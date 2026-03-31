@@ -163,24 +163,25 @@ async def realestate(
         items = []
         for item in root.findall(".//item"):
             def t(tag): return (item.findtext(tag) or "").strip()
-            price_raw = t("거래금액").replace(",", "").replace(" ", "")
+            price_raw = t("dealAmount").replace(",", "").replace(" ", "")
             try:
                 price = int(price_raw)
             except ValueError:
                 price = 0
 
             items.append({
-                "apt_name":   t("아파트"),
-                "dong":       t("법정동"),
-                "floor":      t("층"),
-                "area":       t("전용면적"),
+                "apt_name":   t("aptNm"),
+                "apt_dong":   t("aptDong"),
+                "dong":       t("umdNm"),
+                "floor":      t("floor"),
+                "area":       t("excluUseAr"),
                 "price":      price,
-                "price_str":  t("거래금액").strip(),
-                "year":       t("년"),
-                "month":      t("월"),
-                "day":        t("일"),
-                "build_year": t("건축년도"),
-                "deal_type":  t("거래유형"),
+                "price_str":  t("dealAmount").strip(),
+                "year":       t("dealYear"),
+                "month":      t("dealMonth"),
+                "day":        t("dealDay"),
+                "build_year": t("buildYear"),
+                "deal_type":  t("dealingGbn"),
             })
 
         items.sort(key=lambda x: x["price"], reverse=True)
