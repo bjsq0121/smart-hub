@@ -370,6 +370,134 @@
       line-height: 1.8;
     }
     .news-empty .icon { font-size: 2.5rem; margin-bottom: 12px; display: block; }
+
+    /* ════════════════════════════════
+       부동산 실거래가 페이지
+    ════════════════════════════════ */
+    .re-controls {
+      max-width: 900px;
+      margin: 36px auto 0;
+      padding: 0 24px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: flex-end;
+    }
+    .re-field { display: flex; flex-direction: column; gap: 6px; }
+    .re-field label { font-size: 0.78rem; color: #94a3b8; }
+    .re-select, .re-month {
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1.5px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      outline: none;
+      cursor: pointer;
+      transition: border-color 0.2s;
+      min-width: 140px;
+    }
+    .re-select:focus, .re-month:focus { border-color: #60a5fa; }
+    .re-select option, .re-month option { background: #1e293b; }
+
+    .re-search-btn {
+      padding: 10px 26px;
+      border-radius: 12px;
+      border: none;
+      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+      white-space: nowrap;
+      align-self: flex-end;
+    }
+    .re-search-btn:hover { opacity: 0.88; }
+    .re-search-btn:active { transform: scale(0.97); }
+    .re-search-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    #re-status { text-align: center; margin: 28px auto; font-size: 0.9rem; color: #94a3b8; min-height: 24px; }
+
+    #re-results { max-width: 900px; margin: 0 auto 60px; padding: 0 24px; }
+
+    .re-summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .re-stat {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 16px 20px;
+      text-align: center;
+    }
+    .re-stat-label { font-size: 0.75rem; color: #64748b; margin-bottom: 6px; }
+    .re-stat-value { font-size: 1.25rem; font-weight: 700; color: #e2e8f0; }
+    .re-stat-value.best { color: #f472b6; }
+    .re-stat-value.low  { color: #34d399; }
+    .re-stat-value.avg  { color: #60a5fa; }
+
+    .re-sort-bar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .re-sort-label { font-size: 0.78rem; color: #64748b; margin-right: 4px; }
+    .sort-btn {
+      padding: 5px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.04);
+      color: #94a3b8;
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .sort-btn:hover { border-color: rgba(96,165,250,0.4); color: #60a5fa; }
+    .sort-btn.active { background: rgba(96,165,250,0.15); border-color: rgba(96,165,250,0.5); color: #60a5fa; }
+
+    .re-table-wrap { overflow-x: auto; border-radius: 16px; border: 1px solid rgba(255,255,255,0.08); }
+    table.re-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+    .re-table thead tr {
+      background: rgba(255,255,255,0.05);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+    }
+    .re-table th {
+      padding: 13px 16px;
+      text-align: left;
+      color: #64748b;
+      font-weight: 600;
+      font-size: 0.78rem;
+      white-space: nowrap;
+    }
+    .re-table td {
+      padding: 12px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.05);
+      color: #cbd5e1;
+      white-space: nowrap;
+    }
+    .re-table tbody tr:last-child td { border-bottom: none; }
+    .re-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+    .price-cell { font-weight: 700; color: #f1f5f9; }
+    .rank-top { color: #f472b6; font-weight: 700; }
+    .rank-low { color: #34d399; }
+    .deal-badge {
+      font-size: 0.7rem;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: rgba(96,165,250,0.1);
+      color: #60a5fa;
+      border: 1px solid rgba(96,165,250,0.2);
+    }
   </style>
 </head>
 <body>
@@ -380,6 +508,7 @@
   <nav class="nav-tabs">
     <button class="nav-tab active" data-page="price">🔍 최저가 비교</button>
     <button class="nav-tab" data-page="news">📰 일자별 뉴스 요약</button>
+    <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
   </nav>
 </header>
 
@@ -392,6 +521,40 @@
   <div class="history-wrap" id="historyWrap"></div>
   <div class="status-msg" id="price-status"></div>
   <div id="price-results"></div>
+</div>
+
+<!-- ══════════════ 부동산 실거래가 페이지 ══════════════ -->
+<div class="page" id="page-realestate">
+  <div class="re-controls">
+    <div class="re-field">
+      <label>시/도</label>
+      <select class="re-select" id="reSido" onchange="updateGungu()">
+        <option value="">선택</option>
+        <option value="대전">대전</option>
+        <option value="서울">서울</option>
+        <option value="경기">경기</option>
+        <option value="부산">부산</option>
+        <option value="인천">인천</option>
+        <option value="대구">대구</option>
+        <option value="광주">광주</option>
+        <option value="울산">울산</option>
+        <option value="세종">세종</option>
+      </select>
+    </div>
+    <div class="re-field">
+      <label>구/군</label>
+      <select class="re-select" id="reGungu">
+        <option value="">시/도 먼저 선택</option>
+      </select>
+    </div>
+    <div class="re-field">
+      <label>계약 년월</label>
+      <input type="month" class="re-month" id="reMonth" />
+    </div>
+    <button class="re-search-btn" id="reSearchBtn" onclick="loadRealestate()">조회</button>
+  </div>
+  <div id="re-status"></div>
+  <div id="re-results"></div>
 </div>
 
 <!-- ══════════════ 뉴스 요약 페이지 ══════════════ -->
@@ -618,6 +781,223 @@
   document.querySelector('[data-page="news"]').addEventListener('click', () => {
     if (!newsResults.innerHTML.trim()) loadNews();
   });
+
+  /* ═══════════════════════════════════════
+     부동산 실거래가
+  ═══════════════════════════════════════ */
+  const REGIONS = {
+    "대전": { "동구":"34110","중구":"34140","서구":"34170","유성구":"34200","대덕구":"34230" },
+    "서울": {
+      "종로구":"11110","중구":"11140","용산구":"11170","성동구":"11200","광진구":"11215",
+      "동대문구":"11230","중랑구":"11260","성북구":"11290","강북구":"11305","도봉구":"11320",
+      "노원구":"11350","은평구":"11380","서대문구":"11410","마포구":"11440","양천구":"11470",
+      "강서구":"11500","구로구":"11530","금천구":"11545","영등포구":"11560","동작구":"11590",
+      "관악구":"11620","서초구":"11650","강남구":"11680","송파구":"11710","강동구":"11740"
+    },
+    "경기": {
+      "수원 장안구":"41111","수원 권선구":"41113","수원 팔달구":"41115","수원 영통구":"41117",
+      "성남 수정구":"41131","성남 중원구":"41133","성남 분당구":"41135","의정부시":"41150",
+      "안양 만안구":"41171","안양 동안구":"41173","부천시":"41190","광명시":"41210",
+      "평택시":"41220","동두천시":"41250","안산 상록구":"41271","안산 단원구":"41273",
+      "고양 덕양구":"41281","고양 일산동구":"41285","고양 일산서구":"41287","과천시":"41290",
+      "구리시":"41310","남양주시":"41360","용인 처인구":"41461","용인 기흥구":"41463",
+      "용인 수지구":"41465","하남시":"41450","화성시":"41590","광주시":"41610"
+    },
+    "부산": {
+      "중구":"26110","서구":"26140","동구":"26170","영도구":"26200","부산진구":"26230",
+      "동래구":"26260","남구":"26290","북구":"26320","해운대구":"26350","사하구":"26380",
+      "금정구":"26410","강서구":"26440","연제구":"26470","수영구":"26500","사상구":"26530","기장군":"26710"
+    },
+    "인천": {
+      "중구":"28110","동구":"28140","미추홀구":"28177","연수구":"28185","남동구":"28200",
+      "부평구":"28237","계양구":"28245","서구":"28260","강화군":"28710","옹진군":"28720"
+    },
+    "대구": {
+      "중구":"27110","동구":"27140","서구":"27170","남구":"27200","북구":"27230",
+      "수성구":"27290","달서구":"27290","달성군":"27710"
+    },
+    "광주": {
+      "동구":"29110","서구":"29140","남구":"29155","북구":"29170","광산구":"29200"
+    },
+    "울산": {
+      "중구":"31110","남구":"31140","동구":"31170","북구":"31200","울주군":"31710"
+    },
+    "세종": { "세종시":"36110" },
+  };
+
+  const reSido    = document.getElementById('reSido');
+  const reGungu   = document.getElementById('reGungu');
+  const reMonth   = document.getElementById('reMonth');
+  const reSearchBtn = document.getElementById('reSearchBtn');
+  const reStat    = document.getElementById('re-status');
+  const reResults = document.getElementById('re-results');
+
+  // 기본 년월: 이번 달
+  (() => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth()+1).padStart(2,'0');
+    reMonth.value = `${y}-${m}`;
+    reMonth.max   = `${y}-${m}`;
+  })();
+
+  function updateGungu() {
+    const sido = reSido.value;
+    reGungu.innerHTML = '';
+    if (!sido || !REGIONS[sido]) {
+      reGungu.innerHTML = '<option value="">시/도 먼저 선택</option>';
+      return;
+    }
+    Object.entries(REGIONS[sido]).forEach(([name, code], i) => {
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = name;
+      if (i === 0) opt.selected = true;
+      reGungu.appendChild(opt);
+    });
+  }
+
+  let reData = [];
+  let sortKey = 'price';
+  let sortDir = -1; // -1: 내림차순
+
+  async function loadRealestate() {
+    const lawd_cd  = reGungu.value;
+    const monthVal = reMonth.value; // YYYY-MM
+    if (!lawd_cd)  { alert('구/군을 선택해주세요.'); return; }
+    if (!monthVal) { alert('년월을 선택해주세요.'); return; }
+
+    const deal_ymd = monthVal.replace('-', '');
+    reSearchBtn.disabled = true;
+    reStat.innerHTML = '<span class="spinner"></span> 실거래 데이터 조회 중...';
+    reResults.innerHTML = '';
+
+    try {
+      const res  = await fetch(`/realestate?lawd_cd=${lawd_cd}&deal_ymd=${deal_ymd}`);
+      const data = await res.json();
+      reStat.innerHTML = '';
+      if (data.error) { reResults.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
+      reData = data.items || [];
+      sortKey = 'price'; sortDir = -1;
+      renderReTable(data);
+    } catch (e) {
+      reStat.innerHTML = '';
+      reResults.innerHTML = `<div class="error-box">서버 오류가 발생했습니다.</div>`;
+    } finally {
+      reSearchBtn.disabled = false;
+    }
+  }
+
+  function fmtPrice(만원) {
+    if (!만원) return '-';
+    if (만원 >= 10000) {
+      const 억 = Math.floor(만원 / 10000);
+      const 나머지 = 만원 % 10000;
+      return 나머지 > 0 ? `${억}억 ${나머지.toLocaleString()}만` : `${억}억`;
+    }
+    return `${만원.toLocaleString()}만`;
+  }
+
+  function renderReTable({ deal_ymd, total, items }) {
+    if (!items || items.length === 0) {
+      reResults.innerHTML = `
+        <div class="news-empty">
+          <span class="icon">🏘️</span>
+          해당 기간 실거래 데이터가 없습니다.
+        </div>`;
+      return;
+    }
+
+    const prices   = items.map(i => i.price).filter(p => p > 0);
+    const maxPrice = Math.max(...prices);
+    const minPrice = Math.min(...prices);
+    const avgPrice = Math.round(prices.reduce((a,b)=>a+b,0)/prices.length);
+    const ym = `${deal_ymd.slice(0,4)}년 ${deal_ymd.slice(4)}월`;
+
+    let html = `
+      <div style="font-size:0.85rem;color:#64748b;margin-bottom:16px;">
+        📍 ${ym} 실거래 <span style="color:#e2e8f0;font-weight:600">${total}건</span>
+      </div>
+      <div class="re-summary">
+        <div class="re-stat"><div class="re-stat-label">최고 거래가</div><div class="re-stat-value best">${fmtPrice(maxPrice)}</div></div>
+        <div class="re-stat"><div class="re-stat-label">최저 거래가</div><div class="re-stat-value low">${fmtPrice(minPrice)}</div></div>
+        <div class="re-stat"><div class="re-stat-label">평균 거래가</div><div class="re-stat-value avg">${fmtPrice(avgPrice)}</div></div>
+        <div class="re-stat"><div class="re-stat-label">총 거래 건수</div><div class="re-stat-value">${total}건</div></div>
+      </div>
+      <div class="re-sort-bar">
+        <span class="re-sort-label">정렬:</span>
+        <button class="sort-btn active" data-key="price">거래금액</button>
+        <button class="sort-btn" data-key="date">계약일</button>
+        <button class="sort-btn" data-key="area">전용면적</button>
+        <button class="sort-btn" data-key="floor">층수</button>
+      </div>
+      <div class="re-table-wrap">
+        <table class="re-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>아파트명</th>
+              <th>법정동</th>
+              <th>층</th>
+              <th>전용면적(㎡)</th>
+              <th>거래금액</th>
+              <th>계약일</th>
+              <th>건축년도</th>
+              <th>거래유형</th>
+            </tr>
+          </thead>
+          <tbody id="reTableBody"></tbody>
+        </table>
+      </div>`;
+
+    reResults.innerHTML = html;
+
+    document.querySelectorAll('.sort-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.key;
+        if (sortKey === key) { sortDir *= -1; }
+        else { sortKey = key; sortDir = key === 'price' ? -1 : 1; }
+        document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        fillTableBody();
+      });
+    });
+
+    fillTableBody();
+  }
+
+  function fillTableBody() {
+    const sorted = [...reData].sort((a, b) => {
+      if (sortKey === 'price') return (a.price - b.price) * sortDir;
+      if (sortKey === 'area')  return (parseFloat(a.area) - parseFloat(b.area)) * sortDir;
+      if (sortKey === 'floor') return (parseInt(a.floor) - parseInt(b.floor)) * sortDir;
+      if (sortKey === 'date')  return (`${a.year}${String(a.month).padStart(2,'0')}${String(a.day).padStart(2,'0')}` > `${b.year}${String(b.month).padStart(2,'0')}${String(b.day).padStart(2,'0')}` ? 1 : -1) * sortDir;
+      return 0;
+    });
+
+    const prices = reData.map(i=>i.price).filter(p=>p>0);
+    const max = Math.max(...prices);
+    const min = Math.min(...prices);
+
+    const tbody = document.getElementById('reTableBody');
+    tbody.innerHTML = sorted.map((r, i) => {
+      const isTop = r.price === max;
+      const isLow = r.price === min;
+      const priceClass = isTop ? 'rank-top' : isLow ? 'rank-low' : '';
+      return `
+        <tr>
+          <td style="color:#475569">${i+1}</td>
+          <td style="font-weight:600;color:#e2e8f0">${r.apt_name || '-'}</td>
+          <td>${r.dong || '-'}</td>
+          <td>${r.floor || '-'}층</td>
+          <td>${parseFloat(r.area || 0).toFixed(2)}</td>
+          <td class="price-cell ${priceClass}">${fmtPrice(r.price)}</td>
+          <td>${r.year}.${String(r.month).padStart(2,'0')}.${String(r.day).padStart(2,'0')}</td>
+          <td>${r.build_year || '-'}</td>
+          <td>${r.deal_type ? `<span class="deal-badge">${r.deal_type}</span>` : '-'}</td>
+        </tr>`;
+    }).join('');
+  }
 </script>
 </body>
 </html>

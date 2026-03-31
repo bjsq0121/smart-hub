@@ -21,6 +21,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 NAVER_CLIENT_ID     = os.getenv("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
+MOLIT_API_KEY       = os.getenv("MOLIT_API_KEY", "")
 
 CATEGORY_KEYWORDS = {
     "전체":   "오늘 뉴스",
@@ -128,3 +129,62 @@ async def news(
         })
 
     return {"date": date or datetime.now(kst).strftime("%Y-%m-%d"), "category": category, "items": news_list}
+
+
+@app.get("/realestate")
+async def realestate(
+    lawd_cd: str = Query(..., description="시군구코드 5자리"),
+    deal_ymd: str = Query(..., description="계약년월 YYYYMM"),
+):
+    if not MOLIT_API_KEY:
+        return {"error": "국토교통부 API 키가 설정되지 않았습니다. .env 파일에 MOLIT_API_KEY를 입력해주세요."}
+
+    # serviceKey를 params에 넣으면 requests가 이중 인코딩하여 401 발생 → URL에 직접 삽입
+    url = (
+        f"https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev/getRTMSDataSvcAptTradeDev"
+        f"?serviceKey={MOLIT_API_KEY}&pageNo=1&numOfRows=1000&LAWD_CD={lawd_cd}&DEAL_YMD={deal_ymd}"
+    )
+
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        return {"error": f"API 호출 오류: {e}"}
+
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(resp.text)
+
+        result_code = root.findtext(".//resultCode", "")
+        if result_code not in ("00", "OK", "0000", "000"):
+            msg = root.findtext(".//resultMsg", "알 수 없는 오류")
+            return {"error": f"API 오류 ({result_code}): {msg}"}
+
+        items = []
+        for item in root.findall(".//item"):
+            def t(tag): return (item.findtext(tag) or "").strip()
+            price_raw = t("거래금액").replace(",", "").replace(" ", "")
+            try:
+                price = int(price_raw)
+            except ValueError:
+                price = 0
+
+            items.append({
+                "apt_name":   t("아파트"),
+                "dong":       t("법정동"),
+                "floor":      t("층"),
+                "area":       t("전용면적"),
+                "price":      price,
+                "price_str":  t("거래금액").strip(),
+                "year":       t("년"),
+                "month":      t("월"),
+                "day":        t("일"),
+                "build_year": t("건축년도"),
+                "deal_type":  t("거래유형"),
+            })
+
+        items.sort(key=lambda x: x["price"], reverse=True)
+        return {"lawd_cd": lawd_cd, "deal_ymd": deal_ymd, "total": len(items), "items": items}
+
+    except Exception as e:
+        return {"error": f"데이터 파싱 오류: {e}"}
