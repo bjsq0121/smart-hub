@@ -498,6 +498,221 @@
       color: #60a5fa;
       border: 1px solid rgba(96,165,250,0.2);
     }
+    /* ════════════════════════════════
+       AI 뉴스 요약 페이지
+    ════════════════════════════════ */
+    .ai-news-wrap {
+      max-width: 860px;
+      margin: 36px auto 60px;
+      padding: 0 24px;
+    }
+    .ai-cat-bar {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      margin-bottom: 24px; align-items: center;
+    }
+    .ai-cat-btn {
+      padding: 10px 22px;
+      border-radius: 100px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: transparent;
+      color: #64748b;
+      font-size: 0.88rem; font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .ai-cat-btn:hover { border-color: #a78bfa; color: #a78bfa; }
+    .ai-cat-btn.active {
+      background: rgba(167,139,250,0.15);
+      border-color: rgba(167,139,250,0.5);
+      color: #a78bfa;
+    }
+    .ai-gen-btn {
+      margin-left: auto;
+      padding: 10px 26px;
+      border-radius: 12px; border: none;
+      background: linear-gradient(135deg, #7c3aed, #a78bfa);
+      color: #fff; font-size: 0.9rem; font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s, transform 0.1s;
+      white-space: nowrap;
+    }
+    .ai-gen-btn:hover { opacity: 0.88; }
+    .ai-gen-btn:active { transform: scale(0.97); }
+    .ai-gen-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    #ai-status { text-align:center; margin: 28px auto; font-size:0.9rem; color:#94a3b8; min-height:24px; }
+    .ai-headline {
+      background: linear-gradient(135deg, rgba(124,58,237,0.15), rgba(167,139,250,0.08));
+      border: 1px solid rgba(167,139,250,0.3);
+      border-radius: 20px;
+      padding: 24px 28px;
+      margin-bottom: 20px;
+    }
+    .ai-headline-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.12em;
+      text-transform: uppercase; color: #a78bfa; margin-bottom: 10px;
+    }
+    .ai-headline-text {
+      font-size: 1.1rem; font-weight: 600; color: #e2e8f0; line-height: 1.6;
+    }
+    .ai-points { display: grid; gap: 14px; margin-bottom: 20px; }
+    .ai-point-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
+      padding: 20px 24px;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+    .ai-point-card:hover { transform: translateY(-2px); border-color: rgba(255,255,255,0.14); }
+    .ai-point-top { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+    .ai-sentiment {
+      font-size: 0.72rem; font-weight: 700; padding: 3px 10px;
+      border-radius: 20px; letter-spacing: 0.05em; flex-shrink: 0;
+    }
+    .sentiment-pos { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+    .sentiment-neg { background: rgba(248,113,113,0.15); color: #f87171; border: 1px solid rgba(248,113,113,0.3); }
+    .sentiment-neu { background: rgba(148,163,184,0.1);  color: #94a3b8; border: 1px solid rgba(148,163,184,0.2); }
+    .ai-point-title { font-size: 0.98rem; font-weight: 600; color: #e2e8f0; }
+    .ai-point-body { font-size: 0.85rem; color: #94a3b8; line-height: 1.7; }
+    .ai-outlook {
+      background: rgba(96,165,250,0.06);
+      border: 1px solid rgba(96,165,250,0.2);
+      border-radius: 16px;
+      padding: 18px 24px;
+      display: flex; align-items: flex-start; gap: 12px;
+    }
+    .ai-outlook-icon { font-size: 1.3rem; flex-shrink: 0; margin-top: 2px; }
+    .ai-outlook-label { font-size: 0.72rem; font-weight: 700; color: #60a5fa; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 6px; }
+    .ai-outlook-text { font-size: 0.88rem; color: #cbd5e1; line-height: 1.6; }
+    .ai-meta { font-size: 0.75rem; color: #475569; margin-top: 16px; text-align: right; }
+
+    /* ════════════════════════════════
+       단위 변환기 페이지
+    ════════════════════════════════ */
+    .unit-page-wrap {
+      max-width: 780px;
+      margin: 36px auto 60px;
+      padding: 0 24px;
+    }
+    .unit-tabs {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      margin-bottom: 28px;
+    }
+    .unit-tab {
+      padding: 10px 20px;
+      border-radius: 100px;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: transparent;
+      color: #64748b;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .unit-tab:hover { border-color: #60a5fa; color: #60a5fa; }
+    .unit-tab.active {
+      background: rgba(96,165,250,0.15);
+      border-color: rgba(96,165,250,0.5);
+      color: #60a5fa;
+    }
+    .unit-converter-card {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 20px;
+      padding: 32px;
+      margin-bottom: 24px;
+      transition: border-color 0.2s;
+    }
+    .unit-converter-card:hover { border-color: rgba(255,255,255,0.14); }
+    .unit-select-row {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 24px;
+    }
+    .unit-picker {
+      flex: 1;
+      background: rgba(255,255,255,0.07);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 10px;
+      padding: 10px 32px 10px 14px;
+      color: #e2e8f0;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='%2364748b' viewBox='0 0 16 16'%3E%3Cpath d='M7.247 11.14L2.451 5.658C1.885 5.013 2.345 4 3.204 4h9.592a1 1 0 0 1 .753 1.659l-4.796 5.48a1 1 0 0 1-1.506 0z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      transition: border-color 0.2s;
+      outline: none;
+    }
+    .unit-picker:focus { border-color: #60a5fa; }
+    .unit-picker option { background: #1e293b; }
+    .unit-swap-btn {
+      width: 40px; height: 40px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.05);
+      color: #64748b;
+      font-size: 18px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+    .unit-swap-btn:hover { border-color: #60a5fa; color: #60a5fa; transform: rotate(180deg); }
+    .unit-input-row {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 12px;
+    }
+    .unit-input-group { display: flex; flex-direction: column; gap: 6px; }
+    .unit-input-label {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #64748b;
+    }
+    .unit-num-input {
+      background: rgba(255,255,255,0.05);
+      border: 1.5px solid rgba(255,255,255,0.1);
+      border-radius: 12px;
+      padding: 14px 16px;
+      color: #e2e8f0;
+      font-size: 22px; font-weight: 500;
+      width: 100%;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      outline: none;
+    }
+    .unit-num-input:focus { border-color: #60a5fa; box-shadow: 0 0 0 3px rgba(96,165,250,0.15); }
+    .unit-num-input.result {
+      color: #60a5fa;
+      border-color: rgba(96,165,250,0.2);
+      cursor: default;
+      background: rgba(96,165,250,0.04);
+    }
+    .unit-equals { font-size: 24px; font-weight: 700; color: #475569; text-align: center; }
+    .unit-ref-section { margin-top: 8px; }
+    .unit-ref-title {
+      font-size: 11px; font-weight: 600; letter-spacing: 0.1em;
+      text-transform: uppercase; color: #64748b; margin-bottom: 12px;
+    }
+    .unit-ref-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 8px;
+    }
+    .unit-ref-item {
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px;
+      padding: 10px 14px;
+      display: flex; justify-content: space-between; align-items: center;
+      transition: all 0.15s;
+    }
+    .unit-ref-item:hover { border-color: rgba(167,139,250,0.4); background: rgba(167,139,250,0.08); }
+    .unit-ref-from { font-size: 13px; color: #64748b; }
+    .unit-ref-arrow { color: #475569; font-size: 12px; margin: 0 6px; }
+    .unit-ref-to { font-size: 13px; font-family: monospace; color: #a78bfa; font-weight: 500; }
+    @media (max-width: 480px) {
+      .unit-input-row { grid-template-columns: 1fr; }
+      .unit-equals { display: none; }
+    }
   </style>
 </head>
 <body>
@@ -509,6 +724,8 @@
     <button class="nav-tab active" data-page="price">🔍 최저가 비교</button>
     <button class="nav-tab" data-page="news">📰 일자별 뉴스 요약</button>
     <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
+    <button class="nav-tab" data-page="unit">📐 단위 변환기</button>
+    <button class="nav-tab" data-page="ainews">🤖 AI 뉴스 요약</button>
   </nav>
 </header>
 
@@ -568,6 +785,49 @@
   </div>
   <div id="re-status"></div>
   <div id="re-results"></div>
+</div>
+
+<!-- ══════════════ AI 뉴스 요약 페이지 ══════════════ -->
+<div class="page" id="page-ainews">
+  <div class="ai-news-wrap">
+    <div class="ai-cat-bar">
+      <button class="ai-cat-btn active" data-aicat="AI 동향">🧠 AI 동향</button>
+      <button class="ai-cat-btn" data-aicat="해외 주식">🌎 해외 주식</button>
+      <button class="ai-cat-btn" data-aicat="국내 주식">🇰🇷 국내 주식</button>
+      <button class="ai-gen-btn" id="aiGenBtn" onclick="loadAiNews()">✨ AI 요약 생성</button>
+    </div>
+    <div id="ai-status"></div>
+    <div id="ai-results"></div>
+  </div>
+</div>
+
+<!-- ══════════════ 단위 변환기 페이지 ══════════════ -->
+<div class="page" id="page-unit">
+  <div class="unit-page-wrap">
+    <div class="unit-tabs" id="unitTabs"></div>
+    <div class="unit-converter-card">
+      <div class="unit-select-row">
+        <select class="unit-picker" id="unitFrom"></select>
+        <button class="unit-swap-btn" id="unitSwap" title="단위 교체">⇄</button>
+        <select class="unit-picker" id="unitTo"></select>
+      </div>
+      <div class="unit-input-row">
+        <div class="unit-input-group">
+          <label class="unit-input-label">입력</label>
+          <input class="unit-num-input" id="unitFromInput" type="number" placeholder="0" value="1" />
+        </div>
+        <div class="unit-equals">=</div>
+        <div class="unit-input-group">
+          <label class="unit-input-label">결과</label>
+          <input class="unit-num-input result" id="unitToInput" type="number" readonly placeholder="0" />
+        </div>
+      </div>
+    </div>
+    <div class="unit-ref-section">
+      <div class="unit-ref-title">자주 쓰는 변환</div>
+      <div class="unit-ref-grid" id="unitRefGrid"></div>
+    </div>
+  </div>
 </div>
 
 <!-- ══════════════ 뉴스 요약 페이지 ══════════════ -->
@@ -1084,6 +1344,222 @@
           <td>${r.deal_type ? `<span class="deal-badge">${r.deal_type}</span>` : '-'}</td>
         </tr>`;
     }).join('');
+  }
+
+  /* ═══════════════════════════════════════
+     단위 변환기
+  ═══════════════════════════════════════ */
+  const UNIT_CATEGORIES = {
+    "길이": {
+      units: ["mm","cm","m","km","inch","feet","yard","mile"],
+      labels: {"mm":"밀리미터(mm)","cm":"센티미터(cm)","m":"미터(m)","km":"킬로미터(km)","inch":"인치(inch)","feet":"피트(feet)","yard":"야드(yard)","mile":"마일(mile)"},
+      toBase: {"mm":0.001,"cm":0.01,"m":1,"km":1000,"inch":0.0254,"feet":0.3048,"yard":0.9144,"mile":1609.344},
+      quick: [["1 inch","2.54 cm"],["1 feet","30.48 cm"],["1 mile","1.609 km"],["1 yard","91.44 cm"],["100 cm","1 m"],["1 km","0.621 mile"]]
+    },
+    "무게": {
+      units: ["mg","g","kg","t","oz","lbs","근"],
+      labels: {"mg":"밀리그램(mg)","g":"그램(g)","kg":"킬로그램(kg)","t":"톤(t)","oz":"온스(oz)","lbs":"파운드(lbs)","근":"근(600g)"},
+      toBase: {"mg":0.000001,"g":0.001,"kg":1,"t":1000,"oz":0.028349,"lbs":0.453592,"근":0.6},
+      quick: [["1 lbs","453.6 g"],["1 oz","28.35 g"],["1 kg","2.205 lbs"],["1 t","1,000 kg"],["1 근","600 g"],["100 g","0.22 lbs"]]
+    },
+    "온도": {
+      units: ["°C","°F","K"],
+      labels: {"°C":"섭씨(°C)","°F":"화씨(°F)","K":"켈빈(K)"},
+      toBase: null,
+      quick: [["0 °C","32 °F"],["100 °C","212 °F"],["37 °C","98.6 °F"],["20 °C","68 °F"],["0 K","-273.15 °C"],["25 °C","77 °F"]]
+    },
+    "넓이": {
+      units: ["mm²","cm²","m²","km²","평","acre","ha"],
+      labels: {"mm²":"제곱밀리미터","cm²":"제곱센티미터","m²":"제곱미터(m²)","km²":"제곱킬로미터","평":"평(坪)","acre":"에이커","ha":"헥타르"},
+      toBase: {"mm²":0.000001,"cm²":0.0001,"m²":1,"km²":1000000,"평":3.30579,"acre":4046.86,"ha":10000},
+      quick: [["1 평","3.306 m²"],["1 acre","4,047 m²"],["1 ha","10,000 m²"],["330 m²","약 100평"],["1 km²","100 ha"],["1 ha","2.471 acre"]]
+    }
+  };
+
+  let unitCurrentCat = "길이";
+
+  function unitConvertTemp(val, from, to) {
+    let celsius;
+    if (from === "°C") celsius = val;
+    else if (from === "°F") celsius = (val - 32) * 5/9;
+    else celsius = val - 273.15;
+    if (to === "°C") return celsius;
+    if (to === "°F") return celsius * 9/5 + 32;
+    return celsius + 273.15;
+  }
+
+  function unitConvert(val, from, to) {
+    if (from === to) return val;
+    if (unitCurrentCat === "온도") return unitConvertTemp(val, from, to);
+    const tb = UNIT_CATEGORIES[unitCurrentCat].toBase;
+    return val * tb[from] / tb[to];
+  }
+
+  function unitFormatNum(n) {
+    if (n === "" || isNaN(n)) return "";
+    const abs = Math.abs(n);
+    if (abs === 0) return "0";
+    if (abs < 0.0001) return n.toExponential(4);
+    if (abs < 1) return parseFloat(n.toFixed(6)).toString();
+    if (abs < 10000) return parseFloat(n.toFixed(4)).toString();
+    return parseFloat(n.toFixed(2)).toLocaleString();
+  }
+
+  const unitFromEl    = document.getElementById("unitFrom");
+  const unitToEl      = document.getElementById("unitTo");
+  const unitFromInput = document.getElementById("unitFromInput");
+  const unitToInput   = document.getElementById("unitToInput");
+  const unitSwapBtn   = document.getElementById("unitSwap");
+  const unitTabsEl    = document.getElementById("unitTabs");
+  const unitRefGrid   = document.getElementById("unitRefGrid");
+
+  function unitBuildOptions(sel, units, labels, selected) {
+    sel.innerHTML = "";
+    units.forEach(u => {
+      const opt = document.createElement("option");
+      opt.value = u; opt.textContent = labels[u];
+      if (u === selected) opt.selected = true;
+      sel.appendChild(opt);
+    });
+  }
+
+  function unitBuildQuickRef() {
+    const quicks = UNIT_CATEGORIES[unitCurrentCat].quick;
+    unitRefGrid.innerHTML = "";
+    quicks.forEach(([f, t]) => {
+      const el = document.createElement("div");
+      el.className = "unit-ref-item";
+      el.innerHTML = `<span class="unit-ref-from">${f}</span><span class="unit-ref-arrow">→</span><span class="unit-ref-to">${t}</span>`;
+      unitRefGrid.appendChild(el);
+    });
+  }
+
+  function unitBuildTabs() {
+    unitTabsEl.innerHTML = "";
+    Object.keys(UNIT_CATEGORIES).forEach(cat => {
+      const btn = document.createElement("button");
+      btn.className = "unit-tab" + (cat === unitCurrentCat ? " active" : "");
+      btn.textContent = cat;
+      btn.onclick = () => {
+        unitCurrentCat = cat;
+        const cd = UNIT_CATEGORIES[cat];
+        unitBuildTabs();
+        unitBuildOptions(unitFromEl, cd.units, cd.labels, cd.units[0]);
+        unitBuildOptions(unitToEl,   cd.units, cd.labels, cd.units[1]);
+        unitFromInput.value = "1";
+        unitDoConvert();
+        unitBuildQuickRef();
+      };
+      unitTabsEl.appendChild(btn);
+    });
+  }
+
+  function unitDoConvert() {
+    const val = parseFloat(unitFromInput.value);
+    if (isNaN(val)) { unitToInput.value = ""; return; }
+    unitToInput.value = unitFormatNum(unitConvert(val, unitFromEl.value, unitToEl.value));
+  }
+
+  unitFromInput.addEventListener("input", unitDoConvert);
+  unitFromEl.addEventListener("change", unitDoConvert);
+  unitToEl.addEventListener("change", unitDoConvert);
+  unitSwapBtn.addEventListener("click", () => {
+    const tmp = unitFromEl.value;
+    unitFromEl.value = unitToEl.value;
+    unitToEl.value = tmp;
+    unitDoConvert();
+  });
+
+  document.querySelector('[data-page="unit"]').addEventListener('click', () => {
+    if (!unitTabsEl.innerHTML.trim()) {
+      unitBuildTabs();
+      const init = UNIT_CATEGORIES[unitCurrentCat];
+      unitBuildOptions(unitFromEl, init.units, init.labels, init.units[0]);
+      unitBuildOptions(unitToEl,   init.units, init.labels, init.units[1]);
+      unitFromInput.value = "1";
+      unitDoConvert();
+      unitBuildQuickRef();
+    }
+  });
+
+  /* ═══════════════════════════════════════
+     AI 뉴스 요약
+  ═══════════════════════════════════════ */
+  let aiSelectedCat = 'AI 동향';
+  const aiGenBtn  = document.getElementById('aiGenBtn');
+  const aiStatus  = document.getElementById('ai-status');
+  const aiResults = document.getElementById('ai-results');
+
+  document.querySelectorAll('.ai-cat-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('.ai-cat-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      aiSelectedCat = btn.dataset.aicat;
+    });
+  });
+
+  function sentimentClass(s) {
+    if (s === '긍정') return 'sentiment-pos';
+    if (s === '부정') return 'sentiment-neg';
+    return 'sentiment-neu';
+  }
+  function sentimentIcon(s) {
+    if (s === '긍정') return '▲';
+    if (s === '부정') return '▼';
+    return '─';
+  }
+
+  async function loadAiNews() {
+    aiGenBtn.disabled = true;
+    aiStatus.innerHTML = '<span class="spinner"></span> Gemini AI가 뉴스를 분석하는 중... (10~20초 소요)';
+    aiResults.innerHTML = '';
+    try {
+      const res  = await fetch(`/ai-news?category=${encodeURIComponent(aiSelectedCat)}`);
+      const data = await res.json();
+      aiStatus.innerHTML = '';
+      if (data.error) { aiResults.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
+      renderAiNews(data);
+    } catch (e) {
+      aiStatus.innerHTML = '';
+      aiResults.innerHTML = `<div class="error-box">서버 오류가 발생했습니다.</div>`;
+    } finally {
+      aiGenBtn.disabled = false;
+    }
+  }
+
+  function renderAiNews({ category, summary, article_count }) {
+    const { headline, points, outlook } = summary;
+    let html = `
+      <div class="ai-headline">
+        <div class="ai-headline-label">📡 ${category} · 오늘의 동향</div>
+        <div class="ai-headline-text">${headline}</div>
+      </div>
+      <div class="ai-points">`;
+
+    points.forEach(p => {
+      const cls  = sentimentClass(p.sentiment);
+      const icon = sentimentIcon(p.sentiment);
+      html += `
+        <div class="ai-point-card">
+          <div class="ai-point-top">
+            <span class="ai-sentiment ${cls}">${icon} ${p.sentiment}</span>
+            <span class="ai-point-title">${p.title}</span>
+          </div>
+          <div class="ai-point-body">${p.summary}</div>
+        </div>`;
+    });
+
+    html += `</div>
+      <div class="ai-outlook">
+        <div class="ai-outlook-icon">🔭</div>
+        <div>
+          <div class="ai-outlook-label">전망 & 시사점</div>
+          <div class="ai-outlook-text">${outlook}</div>
+        </div>
+      </div>
+      <div class="ai-meta">분석 기사 ${article_count}건 · Powered by Gemini 1.5 Flash</div>`;
+
+    aiResults.innerHTML = html;
   }
 </script>
 </body>
