@@ -1,0 +1,33 @@
+{
+  "hosting": {
+    "public": "public",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "rewrites": [
+      {
+        "source": "/search",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/news",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/realestate",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      }
+    ]
+  }
+}

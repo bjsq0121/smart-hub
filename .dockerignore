@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+.git/
+public/
+index.html
+README.md
+firebase.json
+.firebaserc
+deploy.sh
