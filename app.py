@@ -8,6 +8,7 @@ import requests
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, Query
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ from price_search import _naver_get_lowest_price, _danawa_get_lowest_price
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 NAVER_CLIENT_ID     = os.getenv("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
