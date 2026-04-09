@@ -35,7 +35,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Chromium만 설치 (--with-deps 제거)
 RUN playwright install chromium
 
-COPY app.py danawa_scraper.py naver_shopping.py price_search.py ./
+COPY app.py danawa_scraper.py naver_shopping.py price_search.py index.html ./
 
 ENV PORT=8080
 EXPOSE 8080

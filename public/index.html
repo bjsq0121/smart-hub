@@ -573,6 +573,9 @@
     .sentiment-neu { background: rgba(148,163,184,0.1);  color: #94a3b8; border: 1px solid rgba(148,163,184,0.2); }
     .ai-point-title { font-size: 0.98rem; font-weight: 600; color: #e2e8f0; }
     .ai-point-body { font-size: 0.85rem; color: #94a3b8; line-height: 1.7; }
+    .ai-point-num { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 50%; background: rgba(96,165,250,0.15); color: #60a5fa; font-size: 0.7rem; font-weight: 700; flex-shrink: 0; }
+    .ai-point-link { display: inline-block; margin-top: 10px; padding: 5px 14px; border-radius: 20px; border: 1px solid rgba(96,165,250,0.3); color: #60a5fa; font-size: 0.78rem; text-decoration: none; transition: all 0.2s; }
+    .ai-point-link:hover { background: rgba(96,165,250,0.1); border-color: #60a5fa; }
     .ai-outlook {
       background: rgba(96,165,250,0.06);
       border: 1px solid rgba(96,165,250,0.2);
@@ -584,6 +587,37 @@
     .ai-outlook-label { font-size: 0.72rem; font-weight: 700; color: #60a5fa; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 6px; }
     .ai-outlook-text { font-size: 0.88rem; color: #cbd5e1; line-height: 1.6; }
     .ai-meta { font-size: 0.75rem; color: #475569; margin-top: 16px; text-align: right; }
+
+    /* ════════════════════════════════
+       주식 추천 페이지
+    ════════════════════════════════ */
+    #stock-status { text-align: center; margin: 28px auto; font-size: 0.9rem; color: #94a3b8; min-height: 24px; }
+    #stock-results { max-width: 960px; margin: 0 auto 60px; padding: 0 24px; }
+    .change-up { color: #f87171; font-weight: 600; }
+    .change-down { color: #60a5fa; font-weight: 600; }
+    .per-low { color: #34d399; }
+    .per-mid { color: #fbbf24; }
+    .per-high { color: #f87171; }
+    .stock-sentiment { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 700; }
+    .stock-sentiment.pos { background: rgba(52,211,153,0.15); color: #34d399; }
+    .stock-sentiment.neg { background: rgba(248,113,113,0.15); color: #f87171; }
+    .stock-sentiment.neu { background: rgba(148,163,184,0.15); color: #94a3b8; }
+    .sentiment-reason { font-size: 0.72rem; color: #64748b; margin-top: 2px; }
+    .decision-badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 700; }
+    .decision-badge.strong-buy { background: rgba(239,68,68,0.2); color: #f87171; }
+    .decision-badge.buy { background: rgba(251,191,36,0.2); color: #fbbf24; }
+    .decision-badge.hold { background: rgba(148,163,184,0.15); color: #94a3b8; }
+    .decision-badge.avoid { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .ma-signal { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.72rem; font-weight: 600; }
+    .ma-signal.golden { background: rgba(239,68,68,0.15); color: #f87171; }
+    .ma-signal.imminent { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .ma-signal.uptrend { background: rgba(52,211,153,0.15); color: #34d399; }
+    .ma-signal.downtrend { background: rgba(148,163,184,0.1); color: #64748b; }
+    .ma-signal.dead { background: rgba(96,165,250,0.15); color: #60a5fa; }
+    .signal-tags { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 3px; }
+    .signal-tag { padding: 1px 6px; border-radius: 8px; font-size: 0.65rem; background: rgba(255,255,255,0.06); color: #94a3b8; }
+    .score-bar { width: 40px; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.08); display: inline-block; vertical-align: middle; margin-left: 4px; overflow: hidden; }
+    .score-fill { height: 100%; border-radius: 3px; }
 
     /* ════════════════════════════════
        단위 변환기 페이지
@@ -726,6 +760,7 @@
     <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
     <button class="nav-tab" data-page="unit">📐 단위 변환기</button>
     <button class="nav-tab" data-page="ainews">🤖 AI 뉴스 요약</button>
+    <button class="nav-tab" data-page="stock">📈 주식 추천</button>
   </nav>
 </header>
 
@@ -799,6 +834,40 @@
     <div id="ai-status"></div>
     <div id="ai-results"></div>
   </div>
+</div>
+
+<!-- ══════════════ 주식 추천 페이지 ══════════════ -->
+<div class="page" id="page-stock">
+  <div class="re-controls">
+    <div class="re-field">
+      <label>시장</label>
+      <select class="re-select" id="stockMarket">
+        <option value="KOSPI">KOSPI</option>
+        <option value="KOSDAQ">KOSDAQ</option>
+      </select>
+    </div>
+    <div class="re-field">
+      <label>PER 범위</label>
+      <select class="re-select" id="stockPer">
+        <option value="0-10">0 ~ 10 (저PER)</option>
+        <option value="0-15" selected>0 ~ 15</option>
+        <option value="0-20">0 ~ 20</option>
+        <option value="0-50">0 ~ 50 (전체)</option>
+      </select>
+    </div>
+    <div class="re-field">
+      <label>PBR 범위</label>
+      <select class="re-select" id="stockPbr">
+        <option value="0-1">0 ~ 1 (저PBR)</option>
+        <option value="0-1.5" selected>0 ~ 1.5</option>
+        <option value="0-2">0 ~ 2</option>
+        <option value="0-5">0 ~ 5 (전체)</option>
+      </select>
+    </div>
+    <button class="re-search-btn" id="stockSearchBtn" onclick="loadStockRecommend()">조회</button>
+  </div>
+  <div id="stock-status"></div>
+  <div id="stock-results"></div>
 </div>
 
 <!-- ══════════════ 단위 변환기 페이지 ══════════════ -->
@@ -1527,7 +1596,149 @@
     }
   }
 
-  function renderAiNews({ category, summary, article_count }) {
+  /* ═══════════════════════════════════════
+     주식 추천
+  ═══════════════════════════════════════ */
+  let stockData = [];
+  let stockSortKey = 'per';
+  let stockSortDir = 1;
+
+  async function loadStockRecommend() {
+    const market = document.getElementById('stockMarket').value;
+    const [perMin, perMax] = document.getElementById('stockPer').value.split('-').map(Number);
+    const [pbrMin, pbrMax] = document.getElementById('stockPbr').value.split('-').map(Number);
+    const btn = document.getElementById('stockSearchBtn');
+    const stat = document.getElementById('stock-status');
+    const results = document.getElementById('stock-results');
+
+    btn.disabled = true;
+    stat.innerHTML = '<span class="spinner"></span> KIS API에서 종목 데이터를 조회 중... (최대 30초)';
+    results.innerHTML = '';
+
+    try {
+      const params = new URLSearchParams({ market, per_min: perMin, per_max: perMax, pbr_min: pbrMin, pbr_max: pbrMax });
+      const res = await fetch(`/stock-recommend?${params}`);
+      const data = await res.json();
+      stat.innerHTML = '';
+      if (data.error) { results.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
+      stockData = data.items || [];
+      stockSortKey = 'per'; stockSortDir = 1;
+      renderStockResults(data);
+    } catch (e) {
+      stat.innerHTML = '';
+      results.innerHTML = `<div class="error-box">서버 오류가 발생했습니다.</div>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function renderStockResults({ market, total, pool_size, items }) {
+    if (!items || items.length === 0) {
+      document.getElementById('stock-results').innerHTML = `<div class="error-box">조건에 맞는 종목이 없습니다. (조회 풀: ${pool_size || 0}개)</div>`;
+      return;
+    }
+
+    const avgPer = (items.reduce((s, i) => s + i.per, 0) / items.length).toFixed(1);
+    const avgPbr = (items.reduce((s, i) => s + i.pbr, 0) / items.length).toFixed(2);
+    const lowestPer = items.reduce((a, b) => a.per < b.per ? a : b);
+
+    let html = `
+      <div style="font-size:0.85rem;color:#64748b;margin-bottom:16px;">
+        📈 ${market} 거래량 상위 ${pool_size}개 중 필터 결과 <span style="color:#e2e8f0;font-weight:600">${total}건</span>
+      </div>
+      <div class="re-summary">
+        <div class="re-stat"><div class="re-stat-label">필터 종목 수</div><div class="re-stat-value">${total}건</div></div>
+        <div class="re-stat"><div class="re-stat-label">평균 PER</div><div class="re-stat-value avg">${avgPer}</div></div>
+        <div class="re-stat"><div class="re-stat-label">평균 PBR</div><div class="re-stat-value low">${avgPbr}</div></div>
+        <div class="re-stat"><div class="re-stat-label">최저 PER</div><div class="re-stat-value best">${lowestPer.stock_name} (${lowestPer.per})</div></div>
+      </div>
+      <div class="re-sort-bar">
+        <span class="re-sort-label">정렬:</span>
+        <button class="sort-btn active" data-skey="per">PER</button>
+        <button class="sort-btn" data-skey="pbr">PBR</button>
+        <button class="sort-btn" data-skey="current_price">현재가</button>
+        <button class="sort-btn" data-skey="change_rate">등락률</button>
+        <button class="sort-btn" data-skey="volume">거래량</button>
+        <button class="sort-btn" data-skey="market_cap">시가총액</button>
+      </div>
+      <div class="re-table-wrap">
+        <table class="re-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>종목명</th>
+              <th>현재가</th>
+              <th>등락률</th>
+              <th>PER</th>
+              <th>PBR</th>
+              <th>거래량</th>
+              <th>RSI</th>
+              <th>MA 시그널</th>
+              <th>AI 판정</th>
+            </tr>
+          </thead>
+          <tbody id="stockTableBody"></tbody>
+        </table>
+      </div>`;
+
+    document.getElementById('stock-results').innerHTML = html;
+
+    document.querySelectorAll('[data-skey]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const key = btn.dataset.skey;
+        if (stockSortKey === key) { stockSortDir *= -1; }
+        else { stockSortKey = key; stockSortDir = key === 'change_rate' ? -1 : 1; }
+        document.querySelectorAll('[data-skey]').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        fillStockTableBody();
+      });
+    });
+
+    fillStockTableBody();
+  }
+
+  function fillStockTableBody() {
+    const sorted = [...stockData].sort((a, b) => (a[stockSortKey] - b[stockSortKey]) * stockSortDir);
+    const tbody = document.getElementById('stockTableBody');
+    if (!sorted.length) {
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;padding:32px;color:#475569;">데이터가 없습니다.</td></tr>`;
+      return;
+    }
+    const rsiCls = v => !v ? '' : v <= 30 ? 'per-low' : v >= 70 ? 'per-high' : 'per-mid';
+    const rsiLabel = v => !v ? '-' : v <= 30 ? '과매도' : v >= 70 ? '과매수' : '';
+    const maCls = s => s === '골든크로스' ? 'golden' : s === '크로스임박' ? 'imminent' : s === '상승추세' ? 'uptrend' : s === '데드크로스' ? 'dead' : 'downtrend';
+    const decCls = d => d === '강력매수' ? 'strong-buy' : d === '매수고려' ? 'buy' : d === '매수보류' ? 'avoid' : 'hold';
+    const scoreFill = sc => sc >= 65 ? '#f87171' : sc >= 55 ? '#fbbf24' : sc >= 40 ? '#94a3b8' : '#60a5fa';
+
+    tbody.innerHTML = sorted.map((s, i) => {
+      const chgCls = s.change_rate > 0 ? 'change-up' : s.change_rate < 0 ? 'change-down' : '';
+      const chgSign = s.change_rate > 0 ? '+' : '';
+      const rsi = s.rsi;
+      const maSignal = s.ma_signal || '없음';
+      const decision = s.decision || '관망';
+      const score = s.score || 50;
+      const signals = s.signals || [];
+      const reason = s.reason || '';
+      const risk = s.risk || '';
+      return `
+        <tr>
+          <td style="color:#475569">${i+1}</td>
+          <td style="font-weight:600;color:#e2e8f0">${s.stock_name}<br><span style="font-size:0.72rem;color:#475569">${s.stock_code} · PER ${s.per.toFixed(1)} · PBR ${s.pbr.toFixed(2)}</span></td>
+          <td>${s.current_price.toLocaleString()}원<br><span class="${chgCls}" style="font-size:0.78rem">${chgSign}${s.change_rate.toFixed(2)}%</span></td>
+          <td class="${rsiCls(rsi)}">${rsi != null ? rsi.toFixed(1) : '-'}${rsiLabel(rsi) ? `<br><span style="font-size:0.68rem">${rsiLabel(rsi)}</span>` : ''}</td>
+          <td><span class="ma-signal ${maCls(maSignal)}">${maSignal}</span>${s.ma_gap ? `<div style="font-size:0.68rem;color:#475569;margin-top:2px">MA간격 ${Math.abs(s.ma_gap).toFixed(1)}%</div>` : ''}</td>
+          <td>
+            <span class="decision-badge ${decCls(decision)}">${decision}</span>
+            <div style="font-size:0.72rem;color:#64748b;margin-top:3px">${score}점 <span class="score-bar"><span class="score-fill" style="width:${score}%;background:${scoreFill(score)}"></span></span></div>
+            ${reason ? `<div class="sentiment-reason" style="margin-top:4px">${reason}</div>` : ''}
+            ${risk ? `<div style="font-size:0.68rem;color:#f87171;margin-top:2px">⚠ ${risk}</div>` : ''}
+            ${signals.length ? `<div class="signal-tags">${signals.map(t=>`<span class="signal-tag">${t}</span>`).join('')}</div>` : ''}
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  function renderAiNews({ category, summary, articles, article_count }) {
     const { headline, points, outlook } = summary;
     let html = `
       <div class="ai-headline">
@@ -1536,16 +1747,19 @@
       </div>
       <div class="ai-points">`;
 
-    points.forEach(p => {
+    points.forEach((p, i) => {
       const cls  = sentimentClass(p.sentiment);
       const icon = sentimentIcon(p.sentiment);
+      const linkBtn = p.link ? `<a href="${p.link}" target="_blank" rel="noopener" class="ai-point-link">기사 원문 ↗</a>` : '';
       html += `
         <div class="ai-point-card">
           <div class="ai-point-top">
+            <span class="ai-point-num">${i+1}</span>
             <span class="ai-sentiment ${cls}">${icon} ${p.sentiment}</span>
             <span class="ai-point-title">${p.title}</span>
           </div>
           <div class="ai-point-body">${p.summary}</div>
+          ${linkBtn}
         </div>`;
     });
 
@@ -1557,7 +1771,7 @@
           <div class="ai-outlook-text">${outlook}</div>
         </div>
       </div>
-      <div class="ai-meta">분석 기사 ${article_count}건 · Powered by Gemini 1.5 Flash</div>`;
+      <div class="ai-meta">분석 기사 ${article_count}건 중 상위 ${points.length}건 선별 · Powered by Gemini 2.5 Flash</div>`;
 
     aiResults.innerHTML = html;
   }

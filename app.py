@@ -27,6 +27,9 @@ GCP_PROJECT         = os.getenv("GCP_PROJECT", "smarthub-9cd05")
 GCP_REGION          = os.getenv("GCP_REGION", "us-central1")
 TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
+KIS_APP_KEY         = os.getenv("KIS_APP_KEY", "")
+KIS_APP_SECRET      = os.getenv("KIS_APP_SECRET", "")
+KIS_BASE_URL        = "https://openapi.koreainvestment.com:9443"
 
 AI_NEWS_KEYWORDS = {
     "AI 동향":   ["인공지능 AI 최신", "ChatGPT LLM 생성형AI", "AI 반도체 엔비디아"],
@@ -91,19 +94,34 @@ async def ai_news(category: str = Query(default="AI 동향")):
     if not unique_items:
         return {"error": "뉴스를 가져올 수 없습니다."}
 
-    # Gemini 프롬프트 구성 (최대 10개 기사 — 토큰 절약)
+    # 상위 15개 기사에서 제목+본문발췌+링크 추출
+    articles_for_ai = unique_items[:15]
     news_text = "\n".join([
-        f"{i+1}. {_strip_html(item.get('title',''))}"
-        for i, item in enumerate(unique_items[:10])
+        f"{i+1}. 제목: {_strip_html(item.get('title',''))}\n   내용: {_strip_html(item.get('description',''))[:200]}"
+        for i, item in enumerate(articles_for_ai)
     ])
 
-    prompt = f"""다음은 [{category}] 관련 최신 뉴스 제목 목록입니다.
+    # 원본 링크 맵 (Gemini 응답과 매칭용)
+    article_links = [
+        {"title": _strip_html(item.get("title", "")),
+         "link": item.get("originallink") or item.get("link", ""),
+         "description": _strip_html(item.get("description", ""))[:300]}
+        for item in articles_for_ai
+    ]
+
+    prompt = f"""다음은 [{category}] 관련 최신 뉴스 제목과 본문 발췌입니다.
 
 {news_text}
 
-아래 JSON 형식으로만 응답하세요. 각 문자열은 한 문장으로 짧게 작성하세요.
-{{"headline":"전체동향한문장","points":[{{"title":"이슈제목","summary":"한두문장설명","sentiment":"긍정"}},{{"title":"이슈제목","summary":"한두문장설명","sentiment":"부정"}},{{"title":"이슈제목","summary":"한두문장설명","sentiment":"중립"}}],"outlook":"전망한문장"}}
-sentiment는 반드시 긍정/부정/중립 중 하나. points는 정확히 3개."""
+아래 JSON 형식으로만 응답하세요.
+{{"headline":"전체 동향 요약 (2~3문장)","points":[{{"title":"기사 제목 (원문 그대로)","summary":"3~4문장으로 핵심 맥락과 배경을 설명","sentiment":"긍정","index":0}}],"outlook":"향후 전망 2~3문장"}}
+
+규칙:
+- points는 정확히 10개. 가장 중요한 기사 10개를 선별.
+- index는 입력 기사의 번호(0부터 시작). 원본 기사와 매칭에 사용.
+- summary는 단순 제목 반복이 아니라, 기사 내용의 맥락·배경·영향을 3~4문장으로 설명.
+- sentiment는 반드시 긍정/부정/중립 중 하나.
+- headline과 outlook도 구체적으로 2~3문장씩 작성."""
 
     try:
         import vertexai
@@ -133,7 +151,20 @@ sentiment는 반드시 긍정/부정/중립 중 하나. points는 정확히 3개
         if not m:
             return {"error": f"JSON 파싱 실패. 원본: {raw[:200]}"}
         summary = json.loads(m.group())
-        return {"category": category, "summary": summary, "article_count": len(unique_items)}
+        # points에 원본 링크 매칭
+        for p in summary.get("points", []):
+            idx = p.get("index")
+            if idx is not None and 0 <= idx < len(article_links):
+                p["link"] = article_links[idx]["link"]
+                p["original_title"] = article_links[idx]["title"]
+            else:
+                # index 없으면 제목으로 매칭 시도
+                for al in article_links:
+                    if al["title"] and al["title"][:10] in p.get("title", ""):
+                        p["link"] = al["link"]
+                        p["original_title"] = al["title"]
+                        break
+        return {"category": category, "summary": summary, "articles": article_links, "article_count": len(unique_items)}
 
     except Exception as e:
         return {"error": f"AI 요약 생성 중 오류: {e}"}
@@ -209,6 +240,607 @@ async def scheduler_ainews():
             results.append({"category": category, "status": "error", "detail": str(e)})
 
     return {"results": results}
+
+
+# ── KIS API ──────────────────────────────────────────────
+import time as _time
+
+_kis_token_cache = {"token": None, "expires_at": 0}
+_stock_cache: dict = {}
+STOCK_CACHE_TTL = 1800  # 30분
+_KIS_TOKEN_FILE = "/tmp/kis_token.json"
+
+
+def _save_token_to_file(token: str, expires_at: float):
+    """토큰을 파일에 저장 (Cloud Run 콜드스타트 대비)"""
+    try:
+        with open(_KIS_TOKEN_FILE, "w") as f:
+            json.dump({"token": token, "expires_at": expires_at}, f)
+    except Exception:
+        pass
+
+
+def _load_token_from_file() -> tuple[str | None, float]:
+    """파일에서 토큰 복원"""
+    try:
+        with open(_KIS_TOKEN_FILE) as f:
+            data = json.load(f)
+            return data.get("token"), data.get("expires_at", 0)
+    except Exception:
+        return None, 0
+
+
+def _get_kis_token() -> str:
+    now = _time.time()
+    # 1) 메모리 캐시
+    if _kis_token_cache["token"] and now < _kis_token_cache["expires_at"] - 60:
+        return _kis_token_cache["token"]
+    # 2) 파일 캐시 (콜드스타트 복원)
+    file_token, file_exp = _load_token_from_file()
+    if file_token and now < file_exp - 60:
+        _kis_token_cache["token"] = file_token
+        _kis_token_cache["expires_at"] = file_exp
+        return file_token
+    # 3) 신규 발급
+    resp = requests.post(
+        f"{KIS_BASE_URL}/oauth2/tokenP",
+        json={"grant_type": "client_credentials", "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise ValueError(f"토큰 발급 실패: {data.get('error_description', data)}")
+    token = data["access_token"]
+    expires_at = now + int(data.get("expires_in", 86400))
+    _kis_token_cache["token"] = token
+    _kis_token_cache["expires_at"] = expires_at
+    _save_token_to_file(token, expires_at)
+    return token
+
+
+def _kis_headers(tr_id: str) -> dict:
+    return {
+        "Content-Type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {_get_kis_token()}",
+        "appkey": KIS_APP_KEY,
+        "appsecret": KIS_APP_SECRET,
+        "tr_id": tr_id,
+    }
+
+
+# 주요 종목 코드 (거래량 상위 API가 장 마감 후 빈 결과를 반환할 때 fallback)
+_MAJOR_STOCKS = {
+    "KOSPI": [
+        ("005930", "삼성전자"), ("000660", "SK하이닉스"), ("373220", "LG에너지솔루션"),
+        ("005380", "현대차"), ("000270", "기아"), ("068270", "셀트리온"),
+        ("207940", "삼성바이오로직스"), ("005490", "POSCO홀딩스"), ("035420", "NAVER"),
+        ("055550", "신한지주"), ("105560", "KB금융"), ("006400", "삼성SDI"),
+        ("003670", "포스코퓨처엠"), ("051910", "LG화학"), ("028260", "삼성물산"),
+        ("086790", "하나금융지주"), ("034730", "SK"), ("032830", "삼성생명"),
+        ("012330", "현대모비스"), ("066570", "LG전자"), ("003550", "LG"),
+        ("096770", "SK이노베이션"), ("010130", "고려아연"), ("033780", "KT&G"),
+        ("015760", "한국전력"), ("034020", "두산에너빌리티"), ("009150", "삼성전기"),
+        ("018260", "삼성에스디에스"), ("000810", "삼성화재"), ("011200", "HMM"),
+    ],
+    "KOSDAQ": [
+        ("247540", "에코프로비엠"), ("091990", "셀트리온헬스케어"), ("196170", "알테오젠"),
+        ("068760", "셀트리온제약"), ("041510", "에스엠"), ("263750", "펄어비스"),
+        ("112040", "위메이드"), ("035760", "CJ ENM"), ("086520", "에코프로"),
+        ("005070", "코스모신소재"), ("099190", "아이센스"), ("145020", "휴젤"),
+        ("028300", "HLB"), ("039030", "이오테크닉스"), ("377300", "카카오페이"),
+        ("036570", "엔씨소프트"), ("293490", "카카오게임즈"), ("058470", "리노공업"),
+        ("323410", "카카오뱅크"), ("357780", "솔브레인"), ("383220", "F&F"),
+        ("352820", "하이브"), ("403870", "HPSP"), ("042700", "한미반도체"),
+        ("009520", "포스코엠텍"), ("095340", "ISC"), ("222160", "NPX반도체"),
+        ("240810", "원익IPS"), ("108320", "LX세미콘"), ("060310", "3S"),
+    ],
+}
+
+
+def _fetch_volume_rank(market: str) -> list[dict]:
+    mrkt_code = "J" if market.upper() == "KOSPI" else "Q"
+    params = {
+        "FID_COND_MRKT_DIV_CODE": mrkt_code,
+        "FID_COND_SCR_DIV_CODE": "20101",
+        "FID_INPUT_ISCD": "0000" if mrkt_code == "J" else "0001",
+        "FID_DIV_CLS_CODE": "0",
+        "FID_BLNG_CLS_CODE": "0",
+        "FID_TRGT_CLS_CODE": "111111111",
+        "FID_TRGT_EXLS_CLS_CODE": "000000",
+        "FID_INPUT_PRICE_1": "",
+        "FID_INPUT_PRICE_2": "",
+        "FID_VOL_CNT": "",
+        "FID_INPUT_DATE_1": "",
+    }
+    try:
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/volume-rank",
+            headers=_kis_headers("FHPST01710000"),
+            params=params,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("rt_cd") == "0" and data.get("output"):
+            return data["output"]
+    except Exception:
+        pass
+    # fallback: 주요 종목 리스트
+    return [{"mksc_shrn_iscd": code, "hts_kor_isnm": name}
+            for code, name in _MAJOR_STOCKS.get(market.upper(), _MAJOR_STOCKS["KOSPI"])]
+
+
+def _fetch_stock_detail(stock_code: str) -> dict | None:
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": stock_code,
+    }
+    resp = requests.get(
+        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-price",
+        headers=_kis_headers("FHKST01010100"),
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("rt_cd") != "0":
+        return None
+    return data.get("output", {})
+
+
+def _fetch_ohlcv(stock_code: str, days: int = 60) -> list[dict] | None:
+    """일봉 OHLCV 데이터 조회 (TR: FHKST03010100)"""
+    end_date = datetime.now().strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=days * 2)).strftime("%Y%m%d")
+    params = {
+        "FID_COND_MRKT_DIV_CODE": "J",
+        "FID_INPUT_ISCD": stock_code,
+        "FID_INPUT_DATE_1": start_date,
+        "FID_INPUT_DATE_2": end_date,
+        "FID_PERIOD_DIV_CODE": "D",
+        "FID_ORG_ADJ_PRC": "0",
+    }
+    try:
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice",
+            headers=_kis_headers("FHKST03010100"),
+            params=params,
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("rt_cd") == "0" and data.get("output2"):
+            return data["output2"]
+    except Exception:
+        pass
+    return None
+
+
+def _calc_rsi(closes: list[int], period: int = 14) -> float | None:
+    """RSI 계산 (kis-trading/screener.py 로직)"""
+    if len(closes) < period + 1:
+        return None
+    deltas = [closes[i] - closes[i - 1] for i in range(1, len(closes))]
+    gains = [d if d > 0 else 0 for d in deltas]
+    losses = [-d if d < 0 else 0 for d in deltas]
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(deltas)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return round(100 - (100 / (1 + rs)), 1)
+
+
+def _calc_ma_signal(closes: list[int], short: int = 5, long: int = 20) -> dict:
+    """MA 크로스 분석 (kis-trading/screener.py 로직)"""
+    result = {"ma5": 0, "ma20": 0, "signal": "데이터부족", "gap": 0}
+    if len(closes) < long + 2:
+        return result
+    ma_short = sum(closes[-short:]) / short
+    ma_long = sum(closes[-long:]) / long
+    prev_ma_short = sum(closes[-(short + 1):-1]) / short
+    result["ma5"] = round(ma_short)
+    result["ma20"] = round(ma_long)
+    gap = (ma_long - ma_short) / ma_long * 100 if ma_long else 0
+    result["gap"] = round(gap, 2)
+
+    if ma_short > ma_long and prev_ma_short <= ma_long:
+        result["signal"] = "골든크로스"
+    elif ma_short < ma_long and prev_ma_short >= ma_long:
+        result["signal"] = "데드크로스"
+    elif ma_short > ma_long:
+        result["signal"] = "상승추세"
+    elif abs(gap) <= 2.0 and ma_short < ma_long and ma_short > prev_ma_short:
+        result["signal"] = "크로스임박"
+    else:
+        result["signal"] = "하락추세"
+    return result
+
+
+def _calc_macd(closes: list[int]) -> dict | None:
+    """MACD (12,26,9) 계산"""
+    if len(closes) < 35:
+        return None
+
+    def ema(data, period):
+        k = 2 / (period + 1)
+        result = [data[0]]
+        for i in range(1, len(data)):
+            result.append(data[i] * k + result[-1] * (1 - k))
+        return result
+
+    ema12 = ema(closes, 12)
+    ema26 = ema(closes, 26)
+    macd_line = [ema12[i] - ema26[i] for i in range(len(closes))]
+    signal_line = ema(macd_line[25:], 9)  # 26번째부터 signal
+
+    macd_val = round(macd_line[-1], 1)
+    signal_val = round(signal_line[-1], 1) if signal_line else 0
+    histogram = round(macd_val - signal_val, 1)
+
+    if macd_val > signal_val and macd_line[-2] <= signal_line[-2] if len(signal_line) >= 2 else False:
+        trend = "매수신호"
+    elif macd_val < signal_val and macd_line[-2] >= signal_line[-2] if len(signal_line) >= 2 else False:
+        trend = "매도신호"
+    elif histogram > 0:
+        trend = "상승모멘텀"
+    else:
+        trend = "하락모멘텀"
+
+    return {"macd": macd_val, "signal": signal_val, "histogram": histogram, "trend": trend}
+
+
+def _calc_bollinger(closes: list[int], period: int = 20) -> dict | None:
+    """볼린저밴드 (20일, 2표준편차)"""
+    if len(closes) < period:
+        return None
+    recent = closes[-period:]
+    mid = sum(recent) / period
+    variance = sum((x - mid) ** 2 for x in recent) / period
+    std = variance ** 0.5
+    upper = round(mid + 2 * std)
+    lower = round(mid - 2 * std)
+    current = closes[-1]
+
+    # %B: (현재가 - 하단) / (상단 - 하단), 0 이하면 하단 돌파, 1 이상이면 상단 돌파
+    width = upper - lower
+    pct_b = round((current - lower) / width, 2) if width > 0 else 0.5
+
+    if pct_b <= 0.05:
+        position = "하단돌파"
+    elif pct_b <= 0.2:
+        position = "하단근접"
+    elif pct_b >= 0.95:
+        position = "상단돌파"
+    elif pct_b >= 0.8:
+        position = "상단근접"
+    else:
+        position = "중간"
+
+    return {"upper": upper, "mid": round(mid), "lower": lower, "pct_b": pct_b, "position": position}
+
+
+def _calc_volume_surge(volumes: list[int]) -> dict:
+    """거래량 급증 감지 (최근 5일 평균 vs 20일 평균)"""
+    if len(volumes) < 20:
+        return {"ratio": 0, "surge": False}
+    avg5 = sum(volumes[-5:]) / 5
+    avg20 = sum(volumes[-20:]) / 20
+    ratio = round(avg5 / avg20, 1) if avg20 > 0 else 0
+    return {"ratio": ratio, "surge": ratio >= 2.0}
+
+
+def _get_technical_indicators(stock_code: str) -> dict:
+    """종목의 기술적 지표 종합 조회 (RSI + MA + MACD + 볼린저 + 거래량)"""
+    ohlcv = None
+    for attempt in range(2):
+        ohlcv = _fetch_ohlcv(stock_code, days=60)
+        if ohlcv:
+            break
+        _time.sleep(0.2)
+    if not ohlcv:
+        return {
+            "rsi": None, "ma": {"signal": "데이터없음", "ma5": 0, "ma20": 0, "gap": 0},
+            "macd": None, "bollinger": None, "vol_surge": {"ratio": 0, "surge": False},
+        }
+    sorted_data = sorted(ohlcv, key=lambda x: x.get("stck_bsop_date", ""))
+    closes = [int(d.get("stck_clpr", 0)) for d in sorted_data if int(d.get("stck_clpr", 0)) > 0]
+    volumes = [int(d.get("acml_vol", 0)) for d in sorted_data if int(d.get("stck_clpr", 0)) > 0]
+
+    rsi = _calc_rsi(closes)
+    ma = _calc_ma_signal(closes)
+    macd = _calc_macd(closes)
+    bollinger = _calc_bollinger(closes)
+    vol_surge = _calc_volume_surge(volumes)
+
+    return {"rsi": rsi, "ma": ma, "macd": macd, "bollinger": bollinger, "vol_surge": vol_surge}
+
+
+def _fetch_and_enrich_stocks(market: str) -> list[dict]:
+    cache_key = market.upper()
+    now = _time.time()
+    if cache_key in _stock_cache and now - _stock_cache[cache_key]["ts"] < STOCK_CACHE_TTL:
+        return _stock_cache[cache_key]["items"]
+
+    rank_items = _fetch_volume_rank(market)
+    enriched = []
+    for item in rank_items:
+        code = item.get("mksc_shrn_iscd", "") or item.get("stck_shrn_iscd", "")
+        name = item.get("hts_kor_isnm", "") or item.get("stck_shrn_iscd", "")
+        if not code:
+            continue
+        try:
+            detail = _fetch_stock_detail(code)
+            _time.sleep(0.05)
+        except Exception:
+            continue
+        if not detail:
+            continue
+
+        def safe_float(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def safe_int(v):
+            try:
+                return int(str(v).replace(",", ""))
+            except (TypeError, ValueError):
+                return 0
+
+        per = safe_float(detail.get("per", 0))
+        pbr = safe_float(detail.get("pbr", 0))
+        current_price = safe_int(detail.get("stck_prpr", 0))
+        change_rate = safe_float(detail.get("prdy_ctrt", 0))
+        volume = safe_int(detail.get("acml_vol", 0))
+        market_cap = safe_int(detail.get("hts_avls", 0))
+
+        # 기술적 지표 조회 (RSI + MA)
+        try:
+            tech = _get_technical_indicators(code)
+            _time.sleep(0.1)
+        except Exception:
+            tech = {"rsi": None, "ma": {"signal": "조회실패", "ma5": 0, "ma20": 0, "gap": 0}}
+
+        macd = tech.get("macd") or {}
+        boll = tech.get("bollinger") or {}
+        vol_s = tech.get("vol_surge") or {}
+
+        enriched.append({
+            "stock_code": code,
+            "stock_name": name,
+            "current_price": current_price,
+            "change_rate": change_rate,
+            "per": per,
+            "pbr": pbr,
+            "volume": volume,
+            "market_cap": market_cap,
+            "rsi": tech["rsi"],
+            "ma5": tech["ma"]["ma5"],
+            "ma20": tech["ma"]["ma20"],
+            "ma_signal": tech["ma"]["signal"],
+            "ma_gap": tech["ma"]["gap"],
+            "macd": macd.get("histogram", 0),
+            "macd_trend": macd.get("trend", "없음"),
+            "bb_position": boll.get("position", "없음"),
+            "bb_pct_b": boll.get("pct_b", 0.5),
+            "vol_ratio": vol_s.get("ratio", 0),
+            "vol_surge": vol_s.get("surge", False),
+        })
+
+    _stock_cache[cache_key] = {"ts": now, "items": enriched}
+    return enriched
+
+
+@app.get("/stock-recommend")
+async def stock_recommend(
+    market: str = Query(default="KOSPI"),
+    per_min: float = Query(default=0),
+    per_max: float = Query(default=20),
+    pbr_min: float = Query(default=0),
+    pbr_max: float = Query(default=2),
+):
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return {"error": "KIS API 키가 설정되지 않았습니다. .env 파일에 KIS_APP_KEY, KIS_APP_SECRET을 입력해주세요."}
+
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            stocks = await loop.run_in_executor(ex, _fetch_and_enrich_stocks, market)
+    except Exception as e:
+        return {"error": f"KIS API 호출 오류: {e}"}
+
+    filtered = [
+        s for s in stocks
+        if s["per"] > 0 and per_min <= s["per"] <= per_max
+        and s["pbr"] > 0 and pbr_min <= s["pbr"] <= pbr_max
+    ]
+    filtered.sort(key=lambda x: x["per"])
+
+    return {"market": market, "total": len(filtered), "pool_size": len(stocks), "items": filtered}
+
+
+@app.post("/stock-ai")
+async def stock_ai_analyze(items: list[dict]):
+    """기술적 지표가 포함된 종목 리스트를 받아 AI 감성분석만 수행"""
+    if not items:
+        return {"items": []}
+
+    cache_key = "ai:" + ",".join(s.get("stock_code", "") for s in items)
+    cached = _stock_cache.get(cache_key)
+    if cached and _time.time() - cached["ts"] < STOCK_CACHE_TTL:
+        return {"items": cached["items"]}
+
+    try:
+        analyzed = await _analyze_stock_sentiment(items)
+        _stock_cache[cache_key] = {"ts": _time.time(), "items": analyzed}
+        return {"items": analyzed}
+    except Exception as e:
+        return {"items": items, "error": str(e)}
+
+
+async def _analyze_stock_sentiment(stocks: list[dict]) -> list[dict]:
+    stock_text = "\n".join([
+        f"{s['stock_name']}({s['stock_code']}): 현재가 {s['current_price']:,}원, "
+        f"등락률 {s['change_rate']:+.2f}%, PER {s['per']:.1f}, PBR {s['pbr']:.2f}, "
+        f"RSI {s.get('rsi') or '없음'}, MA신호 {s.get('ma_signal','없음')}, "
+        f"MA간격 {s.get('ma_gap',0):.2f}%, MACD {s.get('macd_trend','없음')}(히스토그램:{s.get('macd',0)}), "
+        f"볼린저 {s.get('bb_position','없음')}(%B:{s.get('bb_pct_b',0.5):.2f}), "
+        f"거래량비율 {s.get('vol_ratio',0):.1f}배{'(급증!)' if s.get('vol_surge') else ''}"
+        for s in stocks
+    ])
+
+    prompt = f"""주식 투자 애널리스트로서 다음 종목들을 분석하세요.
+기술적 지표(RSI, MA크로스, PER/PBR)와 시장 상황을 종합 판단합니다.
+
+{stock_text}
+
+아래 JSON 배열로만 응답하세요. 종목 순서를 유지하세요.
+[{{"code":"종목코드","score":75,"grade":"긍정","decision":"강력매수","confidence":"높음","reason":"2~3문장 분석근거","risk":"리스크요인","signals":["키워드1","키워드2"]}}]
+
+규칙:
+- score: 0~100 정수 (투자 매력도). RSI/MA/MACD/볼린저 모두 종합.
+- grade: 매우긍정/긍정/중립/부정/매우부정
+- decision: 강력매수(score>=65+긍정)/매수고려(score>=55)/관망(score>=40)/매수보류(score<40)
+- confidence: 높음/중간/낮음
+- reason: 기술적 지표(RSI/MA/MACD/볼린저)와 PER/PBR을 종합한 1~2문장. 50자 이내로 핵심만.
+- risk: 주요 리스크 요인 한 문장 (반드시 작성)
+- signals: 핵심 키워드 2~3개
+- stop_loss: 권장 손절가 (현재가 대비 -3%~-7% 수준, 정수)
+- target_price: 권장 목표가 (현재가 대비 +3%~+10% 수준, 정수)
+
+중요: MACD 데드크로스+RSI 과매수+볼린저 상단돌파가 겹치면 반드시 부정적 판단.
+중요: 지표가 서로 모순될 때(예: RSI 과매도인데 MA 하락추세) confidence를 '낮음'으로."""
+
+    import vertexai
+    from vertexai.generative_models import GenerativeModel, GenerationConfig
+
+    vertexai.init(project=GCP_PROJECT, location=GCP_REGION)
+    model = GenerativeModel("gemini-2.5-flash")
+
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor() as ex:
+        response = await loop.run_in_executor(
+            ex,
+            lambda: model.generate_content(
+                prompt,
+                generation_config=GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=65536,
+                    response_mime_type="application/json",
+                ),
+            )
+        )
+
+    raw = response.text.strip()
+    import re as _re
+    m = _re.search(r'\[.*\]', raw, _re.DOTALL)
+    if not m:
+        print(f"[sentiment] JSON 배열 미발견: {raw[:200]}")
+        return stocks
+    try:
+        sentiments = json.loads(m.group())
+    except json.JSONDecodeError as e:
+        print(f"[sentiment] JSON 파싱 실패: {e}, raw: {raw[:300]}")
+        return stocks
+
+    # 코드 기준으로 매칭
+    sent_map = {item["code"]: item for item in sentiments if "code" in item}
+    for s in stocks:
+        info = sent_map.get(s["stock_code"], {})
+        s["score"] = info.get("score", 50)
+        s["grade"] = info.get("grade", "중립")
+        s["decision"] = info.get("decision", "관망")
+        s["confidence"] = info.get("confidence", "낮음")
+        s["reason"] = info.get("reason", "")
+        s["risk"] = info.get("risk", "")
+        s["signals"] = info.get("signals", [])
+        s["stop_loss"] = info.get("stop_loss", 0)
+        s["target_price"] = info.get("target_price", 0)
+
+    return stocks
+
+
+@app.get("/stock-news")
+async def stock_news(
+    name: str = Query(..., description="종목명"),
+    code: str = Query(default="", description="종목코드"),
+):
+    """종목별 뉴스 수집 + Gemini 요약"""
+    if not NAVER_CLIENT_ID:
+        return {"error": "네이버 API 키가 설정되지 않았습니다."}
+
+    # 뉴스 수집
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            items = await loop.run_in_executor(ex, _fetch_naver_news, f"{name} 주가", 10)
+    except Exception as e:
+        return {"error": f"뉴스 수집 실패: {e}"}
+
+    if not items:
+        return {"error": f"'{name}' 관련 뉴스를 찾을 수 없습니다."}
+
+    articles = [
+        {"title": _strip_html(item.get("title", "")),
+         "description": _strip_html(item.get("description", ""))[:200],
+         "link": item.get("originallink") or item.get("link", ""),
+         "pub_date": item.get("pubDate", "")}
+        for item in items
+    ]
+
+    # Gemini 요약
+    news_text = "\n".join([
+        f"{i+1}. {a['title']}\n   {a['description'][:150]}"
+        for i, a in enumerate(articles[:8])
+    ])
+
+    prompt = f"""주식 투자 애널리스트로서 [{name}({code})] 종목의 최신 뉴스를 분석하세요.
+
+{news_text}
+
+아래 JSON 형식으로만 응답하세요.
+{{"headline":"종목의 현재 상황 2~3문장 요약","sentiment_score":75,"sentiment_grade":"긍정","key_issues":[{{"title":"이슈 제목","summary":"2~3문장 설명","impact":"긍정"}}],"outlook":"향후 전망 2~3문장","risk_factors":"주요 리스크 1~2문장"}}
+
+규칙:
+- sentiment_score: 0~100 (투자 감성 점수)
+- sentiment_grade: 매우긍정/긍정/중립/부정/매우부정
+- key_issues: 핵심 이슈 3~5개. impact는 긍정/부정/중립.
+- headline, outlook은 구체적으로."""
+
+    try:
+        import vertexai
+        from vertexai.generative_models import GenerativeModel, GenerationConfig
+        vertexai.init(project=GCP_PROJECT, location=GCP_REGION)
+        model = GenerativeModel("gemini-2.5-flash")
+
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            response = await loop.run_in_executor(
+                ex,
+                lambda: model.generate_content(
+                    prompt,
+                    generation_config=GenerationConfig(
+                        temperature=0.2, max_output_tokens=4096,
+                        response_mime_type="application/json",
+                    ),
+                )
+            )
+        raw = response.text.strip()
+        import re as _re
+        m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+        if m:
+            summary = json.loads(m.group())
+        else:
+            summary = {"headline": "요약 생성 실패", "key_issues": [], "outlook": "", "risk_factors": ""}
+    except Exception as e:
+        summary = {"headline": f"AI 요약 실패: {str(e)[:50]}", "key_issues": [], "outlook": "", "risk_factors": ""}
+
+    return {"name": name, "code": code, "articles": articles, "summary": summary}
 
 
 @app.get("/", response_class=HTMLResponse)

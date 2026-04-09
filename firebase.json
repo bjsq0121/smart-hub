@@ -27,6 +27,41 @@
           "serviceId": "smart-hub-api",
           "region": "asia-northeast3"
         }
+      },
+      {
+        "source": "/ai-news",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/stock-recommend",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/stock-ai",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/stock-news",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/scheduler/ainews",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
       }
     ]
   }
