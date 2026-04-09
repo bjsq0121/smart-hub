@@ -5,10 +5,31 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>스마트 허브</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 </head>
 <body>
 
+<!-- ══════════════ 로그인 화면 ══════════════ -->
+<div id="login-screen" style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;">
+  <div style="max-width:400px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:40px 32px;text-align:center;">
+    <h1 style="font-size:1.6rem;font-weight:700;background:linear-gradient(90deg,#60a5fa,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px;">🌐 스마트 허브</h1>
+    <p style="color:#64748b;font-size:0.85rem;margin-bottom:32px;">로그인이 필요합니다</p>
+    <div id="login-error" style="display:none;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:12px;padding:10px 16px;color:#fca5a5;font-size:0.82rem;margin-bottom:16px;"></div>
+    <input id="login-email" type="email" placeholder="이메일" style="width:100%;padding:14px 18px;border-radius:14px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.95rem;margin-bottom:12px;outline:none;" />
+    <input id="login-password" type="password" placeholder="비밀번호" style="width:100%;padding:14px 18px;border-radius:14px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.95rem;margin-bottom:20px;outline:none;" />
+    <button id="login-btn" onclick="doLogin()" style="width:100%;padding:14px;border:none;border-radius:14px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;font-size:1rem;font-weight:700;cursor:pointer;transition:opacity 0.2s;">로그인</button>
+    <p style="color:#475569;font-size:0.75rem;margin-top:20px;">초대된 이메일만 접속 가능합니다</p>
+  </div>
+</div>
+
+<!-- ══════════════ 메인 앱 (로그인 후 표시) ══════════════ -->
+<div id="app-main" style="display:none;">
 <header>
+  <div id="logout-area" style="display:none;position:absolute;top:16px;right:24px;align-items:center;gap:10px;">
+    <span id="user-email" style="color:#64748b;font-size:0.78rem;"></span>
+    <button onclick="doLogout()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.75rem;cursor:pointer;">로그아웃</button>
+  </div>
   <h1>🌐 스마트 허브</h1>
   <p>최저가 비교 · 일자별 뉴스 요약 서비스</p>
   <nav class="nav-tabs">
@@ -201,6 +222,107 @@
     <div id="stockNewsContent"></div>
   </div>
 </div>
+
+</div><!-- /app-main -->
+
+<!-- ══════════════ Firebase 인증 ══════════════ -->
+<script>
+  const firebaseConfig = {
+    apiKey: "AIzaSyBxjMENaF_exORMSO27-7rUVRRJDMTsejY",
+    authDomain: "smarthub-9cd05.firebaseapp.com",
+    projectId: "smarthub-9cd05",
+    storageBucket: "smarthub-9cd05.firebasestorage.app",
+    messagingSenderId: "133441660409",
+    appId: "1:133441660409:web:2c6337f88642b4da72c928"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+
+  // 허용된 이메일 목록 (초대제)
+  const ALLOWED_EMAILS = [
+    "bjsi0121@naver.com"
+  ];
+
+  // 로그인 상태 감지
+  auth.onAuthStateChanged(user => {
+    if (user && ALLOWED_EMAILS.includes(user.email)) {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app-main').style.display = 'block';
+      // 로그아웃 버튼에 이메일 표시
+      const logoutEl = document.getElementById('logout-area');
+      if (logoutEl) logoutEl.style.display = 'flex';
+      const emailEl = document.getElementById('user-email');
+      if (emailEl) emailEl.textContent = user.email;
+    } else {
+      if (user) {
+        // 허용되지 않은 이메일
+        auth.signOut();
+        showLoginError('접근 권한이 없는 이메일입니다.');
+      }
+      document.getElementById('login-screen').style.display = 'flex';
+      document.getElementById('app-main').style.display = 'none';
+    }
+  });
+
+  function showLoginError(msg) {
+    const el = document.getElementById('login-error');
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+
+  async function doLogin() {
+    const email = document.getElementById('login-email').value.trim();
+    const password = document.getElementById('login-password').value;
+    const btn = document.getElementById('login-btn');
+    const errEl = document.getElementById('login-error');
+    errEl.style.display = 'none';
+
+    if (!email || !password) { showLoginError('이메일과 비밀번호를 입력하세요.'); return; }
+    if (!ALLOWED_EMAILS.includes(email)) { showLoginError('초대되지 않은 이메일입니다.'); return; }
+
+    btn.disabled = true;
+    btn.textContent = '로그인 중...';
+
+    try {
+      await auth.signInWithEmailAndPassword(email, password);
+    } catch (e) {
+      console.log('Login error code:', e.code, e.message);
+      if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
+        // 유저 없으면 자동 회원가입 시도
+        try {
+          await auth.createUserWithEmailAndPassword(email, password);
+        } catch (e2) {
+          console.log('Signup error code:', e2.code, e2.message);
+          if (e2.code === 'auth/email-already-in-use') {
+            showLoginError('비밀번호가 틀렸습니다.');
+          } else if (e2.code === 'auth/weak-password') {
+            showLoginError('비밀번호가 너무 짧습니다. (6자 이상)');
+          } else {
+            showLoginError(e2.message);
+          }
+        }
+      } else if (e.code === 'auth/wrong-password') {
+        showLoginError('비밀번호가 틀렸습니다.');
+      } else if (e.code === 'auth/too-many-requests') {
+        showLoginError('로그인 시도가 너무 많습니다. 잠시 후 다시 시도하세요.');
+      } else {
+        showLoginError(e.message);
+      }
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '로그인';
+    }
+  }
+
+  // 엔터키 로그인
+  document.getElementById('login-password')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+
+  function doLogout() {
+    auth.signOut();
+  }
+</script>
 
 </body>
 </html>
