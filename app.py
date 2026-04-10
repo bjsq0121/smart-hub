@@ -6,7 +6,7 @@ import re
 import json
 import requests
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request, Header, HTTPException, Depends
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,8 +19,45 @@ sys.stdout.reconfigure(encoding="utf-8")
 from price_search import _naver_get_lowest_price, _danawa_get_lowest_price
 
 app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://banghub.kr", "https://www.banghub.kr",
+        "https://smarthub-9cd05.web.app", "https://smarthub-9cd05.firebaseapp.com",
+        "http://localhost:8000",
+    ],
+    allow_methods=["*"], allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ── 보안: Firebase ID 토큰 검증 ──────────────────────────────
+import google.auth.transport.requests as _g_requests
+from google.oauth2 import id_token as _g_id_token
+
+_FIREBASE_PROJECT_ID = os.getenv("GCP_PROJECT", "smarthub-9cd05")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+
+async def verify_firebase_token(authorization: str = Header(default="")) -> dict:
+    """Firebase ID 토큰 검증. 인증 필요 API에 Depends로 사용."""
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="인증이 필요합니다.")
+    token = authorization[7:]
+    try:
+        decoded = _g_id_token.verify_firebase_token(
+            token, _g_requests.Request(), audience=_FIREBASE_PROJECT_ID
+        )
+        return decoded
+    except Exception:
+        raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
+
+
+def verify_webhook_secret(x_webhook_secret: str = Header(default="")):
+    """웹훅 시크릿 키 검증."""
+    if not WEBHOOK_SECRET:
+        return  # 시크릿 미설정이면 통과 (개발 중)
+    if x_webhook_secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=403, detail="웹훅 인증 실패.")
 
 NAVER_CLIENT_ID     = os.getenv("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = os.getenv("NAVER_CLIENT_SECRET", "")
@@ -71,7 +108,7 @@ def _fetch_naver_news(keyword: str, display: int = 30) -> list[dict]:
 
 
 @app.get("/ai-news")
-async def ai_news(category: str = Query(default="AI 동향")):
+async def ai_news(category: str = Query(default="AI 동향"), user: dict = Depends(verify_firebase_token)):
     if not NAVER_CLIENT_ID:
         return {"error": "네이버 API 키가 설정되지 않았습니다."}
 
@@ -218,7 +255,7 @@ def _format_telegram_message(category: str, summary: dict, article_count: int) -
     return "\n".join(lines)
 
 
-@app.post("/scheduler/ainews")
+@app.post("/scheduler/ainews", dependencies=[Depends(verify_webhook_secret)])
 async def scheduler_ainews():
     """Cloud Scheduler가 호출하는 엔드포인트 — AI 뉴스 요약 후 텔레그램 전송"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -645,6 +682,7 @@ async def stock_recommend(
     per_max: float = Query(default=20),
     pbr_min: float = Query(default=0),
     pbr_max: float = Query(default=2),
+    user: dict = Depends(verify_firebase_token),
 ):
     if not KIS_APP_KEY or not KIS_APP_SECRET:
         return {"error": "KIS API 키가 설정되지 않았습니다. .env 파일에 KIS_APP_KEY, KIS_APP_SECRET을 입력해주세요."}
@@ -667,7 +705,7 @@ async def stock_recommend(
 
 
 @app.post("/stock-ai")
-async def stock_ai_analyze(items: list[dict]):
+async def stock_ai_analyze(items: list[dict], user: dict = Depends(verify_firebase_token)):
     """기술적 지표가 포함된 종목 리스트를 받아 AI 감성분석만 수행"""
     if not items:
         return {"items": []}
@@ -771,6 +809,7 @@ async def _analyze_stock_sentiment(stocks: list[dict]) -> list[dict]:
 async def stock_news(
     name: str = Query(..., description="종목명"),
     code: str = Query(default="", description="종목코드"),
+    user: dict = Depends(verify_firebase_token),
 ):
     """종목별 뉴스 수집 + Gemini 요약"""
     if not NAVER_CLIENT_ID:
@@ -843,6 +882,117 @@ async def stock_news(
         summary = {"headline": f"AI 요약 실패: {str(e)[:50]}", "key_issues": [], "outlook": "", "risk_factors": ""}
 
     return {"name": name, "code": code, "articles": articles, "summary": summary}
+
+
+# ── 웹훅: 알림 수신 (n8n 등 외부 서비스 → Firestore) ──────────
+from google.cloud import firestore as _firestore
+
+_firestore_client = None
+
+
+def _get_firestore():
+    global _firestore_client
+    if _firestore_client is None:
+        _firestore_client = _firestore.Client(project=GCP_PROJECT)
+    return _firestore_client
+
+
+class NotifyRequest(BaseModel):
+    title: str
+    message: str = ""
+    type: str = "system"          # crypto | stock | system | custom
+    severity: str = "info"        # info | warning | critical
+    source: str = "n8n"
+    workflow: str = ""
+    data: dict = {}
+
+
+@app.post("/webhook/notify", dependencies=[Depends(verify_webhook_secret)])
+async def webhook_notify(req: NotifyRequest):
+    try:
+        db = _get_firestore()
+        doc_ref = db.collection("notifications").document()
+        doc_ref.set({
+            "title": req.title,
+            "message": req.message,
+            "type": req.type,
+            "severity": req.severity,
+            "source": req.source,
+            "workflow": req.workflow,
+            "data": req.data,
+            "read": False,
+            "created_at": _firestore.SERVER_TIMESTAMP,
+        })
+        return {"ok": True, "id": doc_ref.id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/webhook/notifications")
+async def get_notifications(limit: int = Query(default=50), user: dict = Depends(verify_firebase_token)):
+    try:
+        db = _get_firestore()
+        docs = db.collection("notifications").order_by(
+            "created_at", direction=_firestore.Query.DESCENDING
+        ).limit(limit).stream()
+        items = []
+        for doc in docs:
+            d = doc.to_dict()
+            d["id"] = doc.id
+            # Firestore Timestamp → ISO string
+            if d.get("created_at"):
+                d["created_at"] = d["created_at"].isoformat()
+            items.append(d)
+        return {"items": items}
+    except Exception as e:
+        return {"items": [], "error": str(e)}
+
+
+@app.post("/webhook/notifications/{noti_id}/read")
+async def mark_notification_read(noti_id: str, user: dict = Depends(verify_firebase_token)):
+    try:
+        db = _get_firestore()
+        db.collection("notifications").document(noti_id).update({"read": True})
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class InviteRequest(BaseModel):
+    email: str
+    password: str
+
+
+@app.post("/admin/invite")
+async def admin_invite(req: InviteRequest, user: dict = Depends(verify_firebase_token)):
+    """관리자가 초대: Firestore 화이트리스트 + Firebase Auth 계정 생성"""
+    # admin 확인
+    db = _get_firestore()
+    admin_doc = db.collection("allowed_emails").document(user.get("email", "")).get()
+    if not admin_doc.exists or admin_doc.to_dict().get("role") != "admin":
+        raise HTTPException(status_code=403, detail="관리자만 초대할 수 있습니다.")
+
+    import firebase_admin
+    from firebase_admin import auth as fb_auth
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app()
+
+    # Firebase Auth 계정 생성
+    try:
+        fb_auth.create_user(email=req.email, password=req.password)
+    except fb_auth.EmailAlreadyExistsError:
+        pass  # 이미 있으면 무시
+    except Exception as e:
+        return {"ok": False, "error": f"계정 생성 실패: {e}"}
+
+    # Firestore 화이트리스트 추가
+    db.collection("allowed_emails").document(req.email).set({
+        "email": req.email,
+        "role": "user",
+        "added_by": user.get("email", ""),
+        "added_at": _firestore.SERVER_TIMESTAMP,
+    })
+    return {"ok": True, "email": req.email}
 
 
 @app.get("/", response_class=HTMLResponse)

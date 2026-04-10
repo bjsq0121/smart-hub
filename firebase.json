@@ -1,4 +1,7 @@
 {
+  "firestore": {
+    "rules": "firestore.rules"
+  },
   "hosting": {
     "public": "public",
     "ignore": [
@@ -37,6 +40,20 @@
       },
       {
         "source": "/stock-recommend",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/admin/**",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
+        "source": "/webhook/**",
         "run": {
           "serviceId": "smart-hub-api",
           "region": "asia-northeast3"

@@ -770,3 +770,24 @@
       .unit-input-row { grid-template-columns: 1fr; }
       .unit-equals { display: none; }
     }
+
+    /* ════════════════════════════════
+       알림 센터
+    ════════════════════════════════ */
+    .noti-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 14px; padding: 16px 20px; margin-bottom: 10px; transition: all 0.2s; cursor: pointer; }
+    .noti-card:hover { border-color: rgba(255,255,255,0.12); }
+    .noti-card.unread { border-left: 3px solid #60a5fa; background: rgba(96,165,250,0.04); }
+    .noti-card.severity-warning { border-left-color: #fbbf24; }
+    .noti-card.severity-critical { border-left-color: #f87171; }
+    .noti-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+    .noti-title { font-weight: 600; color: #e2e8f0; font-size: 0.9rem; }
+    .noti-time { font-size: 0.72rem; color: #475569; }
+    .noti-body { color: #94a3b8; font-size: 0.82rem; line-height: 1.6; white-space: pre-wrap; }
+    .noti-tags { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .noti-tag { padding: 2px 8px; border-radius: 10px; font-size: 0.68rem; font-weight: 600; }
+    .noti-tag.crypto { background: rgba(251,191,36,0.12); color: #fbbf24; }
+    .noti-tag.stock { background: rgba(96,165,250,0.12); color: #60a5fa; }
+    .noti-tag.system { background: rgba(148,163,184,0.1); color: #94a3b8; }
+    .noti-tag.info { background: rgba(96,165,250,0.12); color: #60a5fa; }
+    .noti-tag.warning { background: rgba(251,191,36,0.12); color: #fbbf24; }
+    .noti-tag.critical { background: rgba(248,113,113,0.12); color: #f87171; }

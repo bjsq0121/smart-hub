@@ -1,10 +1,34 @@
+  /* ───────── XSS 방지 ───────── */
+  function esc(str) {
+    if (!str) return '';
+    const d = document.createElement('div');
+    d.textContent = str;
+    return d.innerHTML;
+  }
+
+  /* ───────── 인증 헤더 헬퍼 ───────── */
+  async function authHeaders() {
+    if (typeof auth !== 'undefined' && auth.currentUser) {
+      const token = await auth.currentUser.getIdToken();
+      return { 'Authorization': 'Bearer ' + token };
+    }
+    return {};
+  }
+
   /* ───────── 네비게이션 ───────── */
+  const AUTH_PAGES = ['ainews', 'stock', 'notify', 'admin'];
   document.querySelectorAll('.nav-tab').forEach(tab => {
     tab.addEventListener('click', () => {
+      const page = tab.dataset.page;
+      // 로그인 필요 페이지인데 미로그인 시 로그인 모달 띄움
+      if (AUTH_PAGES.includes(page) && typeof auth !== 'undefined' && !auth.currentUser) {
+        document.getElementById('login-screen').style.display = 'flex';
+        return;
+      }
       document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
       document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
       tab.classList.add('active');
-      document.getElementById('page-' + tab.dataset.page).classList.add('active');
+      document.getElementById('page-' + page).classList.add('active');
     });
   });
 
@@ -659,7 +683,7 @@
     aiStatus.innerHTML = '<span class="spinner"></span> Gemini AI가 뉴스를 분석하는 중... (10~20초 소요)';
     aiResults.innerHTML = '';
     try {
-      const res  = await fetch(`/ai-news?category=${encodeURIComponent(aiSelectedCat)}`);
+      const res  = await fetch(`/ai-news?category=${encodeURIComponent(aiSelectedCat)}`, { headers: await authHeaders() });
       const data = await res.json();
       aiStatus.innerHTML = '';
       if (data.error) { aiResults.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
@@ -693,7 +717,7 @@
 
     try {
       const params = new URLSearchParams({ market, per_min: perMin, per_max: perMax, pbr_min: pbrMin, pbr_max: pbrMax });
-      const res = await fetch(`/stock-recommend?${params}`);
+      const res = await fetch(`/stock-recommend?${params}`, { headers: await authHeaders() });
       const data = await res.json();
       stat.innerHTML = '';
       if (data.error) { results.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
@@ -708,7 +732,7 @@
         try {
           const aiRes = await fetch('/stock-ai', {
             method: 'POST',
-            headers: {'Content-Type':'application/json'},
+            headers: {'Content-Type':'application/json', ...(await authHeaders())},
             body: JSON.stringify(stockData)
           });
           const aiData = await aiRes.json();
@@ -884,7 +908,7 @@
 
     try {
       const params = new URLSearchParams({ name, code });
-      const res = await fetch(`/stock-news?${params}`);
+      const res = await fetch(`/stock-news?${params}`, { headers: await authHeaders() });
       const data = await res.json();
       if (data.error) { content.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
       renderStockNewsModal(data);
@@ -943,3 +967,108 @@
   document.getElementById('stockNewsModal')?.addEventListener('click', e => {
     if (e.target.id === 'stockNewsModal') closeStockNews();
   });
+
+  /* ═══════════════════════════════════════
+     알림 센터
+  ═══════════════════════════════════════ */
+  let allNotifications = [];
+  let notiFilter = 'all';
+
+  async function loadNotifications() {
+    const list = document.getElementById('notify-list');
+    if (!list) return;
+    list.innerHTML = '<div style="text-align:center;padding:20px;color:#475569"><span class="spinner"></span> 알림 로딩 중...</div>';
+
+    try {
+      const res = await fetch('/webhook/notifications?limit=100', { headers: await authHeaders() });
+      const data = await res.json();
+      allNotifications = data.items || [];
+      renderNotifications();
+      updateBadge();
+    } catch (e) {
+      list.innerHTML = '<div class="error-box">알림을 불러올 수 없습니다.</div>';
+    }
+  }
+
+  function renderNotifications() {
+    const list = document.getElementById('notify-list');
+    if (!list) return;
+
+    let filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
+
+    if (!filtered.length) {
+      list.innerHTML = '<div style="text-align:center;padding:40px;color:#475569;">알림이 없습니다.</div>';
+      return;
+    }
+
+    list.innerHTML = filtered.map(n => {
+      const time = n.created_at ? new Date(n.created_at).toLocaleString('ko-KR') : '';
+      const unreadCls = n.read ? '' : 'unread';
+      const sevCls = n.severity !== 'info' ? `severity-${n.severity}` : '';
+      return `
+        <div class="noti-card ${unreadCls} ${sevCls}" onclick="markRead('${n.id}', this)">
+          <div class="noti-header">
+            <span class="noti-title">${n.title || '알림'}</span>
+            <span class="noti-time">${time}</span>
+          </div>
+          <div class="noti-body">${n.message || ''}</div>
+          <div class="noti-tags">
+            <span class="noti-tag ${n.type}">${n.type}</span>
+            <span class="noti-tag ${n.severity}">${n.severity}</span>
+            ${n.source ? `<span class="noti-tag system">${n.source}</span>` : ''}
+            ${n.workflow ? `<span class="noti-tag system">${n.workflow}</span>` : ''}
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  function filterNotify(type) {
+    notiFilter = type;
+    document.querySelectorAll('[id^="noti-filter-"]').forEach(b => b.classList.remove('active'));
+    const btn = document.getElementById(`noti-filter-${type}`);
+    if (btn) btn.classList.add('active');
+    renderNotifications();
+  }
+
+  async function markRead(id, el) {
+    if (el) el.classList.remove('unread');
+    const n = allNotifications.find(n => n.id === id);
+    if (n) n.read = true;
+    updateBadge();
+    try { await fetch(`/webhook/notifications/${id}/read`, { method: 'POST', headers: await authHeaders() }); } catch(e) {}
+  }
+
+  async function markAllRead() {
+    const unread = allNotifications.filter(n => !n.read);
+    for (const n of unread) {
+      n.read = true;
+      try { await fetch(`/webhook/notifications/${n.id}/read`, { method: 'POST', headers: await authHeaders() }); } catch(e) {}
+    }
+    renderNotifications();
+    updateBadge();
+  }
+
+  function updateBadge() {
+    const badge = document.getElementById('notify-badge');
+    if (!badge) return;
+    const count = allNotifications.filter(n => !n.read).length;
+    if (count > 0) {
+      badge.textContent = count > 99 ? '99+' : count;
+      badge.style.display = 'inline';
+    } else {
+      badge.style.display = 'none';
+    }
+  }
+
+  // 알림 탭 클릭 시 로드
+  document.querySelector('[data-page="notify"]')?.addEventListener('click', loadNotifications);
+
+  // 30초마다 알림 배지 업데이트
+  setInterval(async () => {
+    try {
+      const res = await fetch('/webhook/notifications?limit=100', { headers: await authHeaders() });
+      const data = await res.json();
+      allNotifications = data.items || [];
+      updateBadge();
+    } catch(e) {}
+  }, 30000);

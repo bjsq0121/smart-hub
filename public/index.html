@@ -7,14 +7,16 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
-<!-- ══════════════ 로그인 화면 ══════════════ -->
-<div id="login-screen" style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:20px;">
-  <div style="max-width:400px;width:100%;background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:24px;padding:40px 32px;text-align:center;">
+<!-- ══════════════ 로그인 모달 ══════════════ -->
+<div id="login-screen" class="modal-overlay" style="display:none;z-index:2000;">
+  <div style="max-width:400px;width:100%;background:#1a1a2e;border:1px solid rgba(255,255,255,0.1);border-radius:24px;padding:40px 32px;text-align:center;position:relative;">
+    <button onclick="document.getElementById('login-screen').style.display='none'" style="position:absolute;top:12px;right:16px;background:none;border:none;color:#64748b;font-size:1.3rem;cursor:pointer;">&times;</button>
     <h1 style="font-size:1.6rem;font-weight:700;background:linear-gradient(90deg,#60a5fa,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px;">🌐 스마트 허브</h1>
-    <p style="color:#64748b;font-size:0.85rem;margin-bottom:32px;">로그인이 필요합니다</p>
+    <p style="color:#64748b;font-size:0.85rem;margin-bottom:32px;">로그인하면 AI 분석, 주식 추천 등을 이용할 수 있습니다</p>
     <div id="login-error" style="display:none;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.25);border-radius:12px;padding:10px 16px;color:#fca5a5;font-size:0.82rem;margin-bottom:16px;"></div>
     <input id="login-email" type="email" placeholder="이메일" style="width:100%;padding:14px 18px;border-radius:14px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.95rem;margin-bottom:12px;outline:none;" />
     <input id="login-password" type="password" placeholder="비밀번호" style="width:100%;padding:14px 18px;border-radius:14px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.95rem;margin-bottom:20px;outline:none;" />
@@ -23,22 +25,25 @@
   </div>
 </div>
 
-<!-- ══════════════ 메인 앱 (로그인 후 표시) ══════════════ -->
-<div id="app-main" style="display:none;">
 <header>
-  <div id="logout-area" style="display:none;position:absolute;top:16px;right:24px;align-items:center;gap:10px;">
+  <div id="auth-area" style="position:absolute;top:16px;right:24px;display:flex;align-items:center;gap:10px;">
     <span id="user-email" style="color:#64748b;font-size:0.78rem;"></span>
-    <button onclick="doLogout()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.75rem;cursor:pointer;">로그아웃</button>
+    <button id="login-toggle-btn" onclick="document.getElementById('login-screen').style.display='flex'" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.75rem;cursor:pointer;">로그인</button>
+    <button id="logout-btn" onclick="doLogout()" style="display:none;padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.75rem;cursor:pointer;">로그아웃</button>
   </div>
   <h1>🌐 스마트 허브</h1>
   <p>최저가 비교 · 일자별 뉴스 요약 서비스</p>
   <nav class="nav-tabs">
+    <!-- 공개 탭 -->
     <button class="nav-tab active" data-page="price">🔍 최저가 비교</button>
     <button class="nav-tab" data-page="news">📰 일자별 뉴스 요약</button>
     <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
     <button class="nav-tab" data-page="unit">📐 단위 변환기</button>
-    <button class="nav-tab" data-page="ainews">🤖 AI 뉴스 요약</button>
-    <button class="nav-tab" data-page="stock">📈 주식 추천</button>
+    <!-- 로그인 필요 탭 (auth-tab 클래스로 숨김/표시) -->
+    <button class="nav-tab auth-tab" data-page="ainews" style="display:none">🤖 AI 뉴스 요약</button>
+    <button class="nav-tab auth-tab" data-page="stock" style="display:none">📈 주식 추천</button>
+    <button class="nav-tab auth-tab" data-page="notify" style="display:none">🔔 알림 <span id="notify-badge" style="display:none;background:#f87171;color:white;font-size:0.65rem;padding:1px 6px;border-radius:10px;margin-left:4px;font-weight:700;"></span></button>
+    <button class="nav-tab auth-tab" data-page="admin" id="adminTab" style="display:none">⚙️ 관리</button>
   </nav>
 </header>
 
@@ -191,6 +196,38 @@
   </div>
 </div>
 
+<!-- ══════════════ 알림 페이지 ══════════════ -->
+<div class="page" id="page-notify">
+  <div style="max-width:800px;margin:24px auto;padding:0 24px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2 style="font-size:1.1rem;color:#e2e8f0;">🔔 알림 센터</h2>
+      <div style="display:flex;gap:8px;">
+        <button onclick="filterNotify('all')" class="sort-btn active" id="noti-filter-all">전체</button>
+        <button onclick="filterNotify('crypto')" class="sort-btn" id="noti-filter-crypto">암호화폐</button>
+        <button onclick="filterNotify('stock')" class="sort-btn" id="noti-filter-stock">주식</button>
+        <button onclick="filterNotify('system')" class="sort-btn" id="noti-filter-system">시스템</button>
+        <button onclick="markAllRead()" style="padding:5px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#64748b;font-size:0.78rem;cursor:pointer;">모두 읽음</button>
+        <button onclick="loadNotifications()" style="padding:5px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#64748b;font-size:0.78rem;cursor:pointer;">새로고침</button>
+      </div>
+    </div>
+    <div id="notify-list"></div>
+  </div>
+</div>
+
+<!-- ══════════════ 관리자 페이지 ══════════════ -->
+<div class="page" id="page-admin">
+  <div style="max-width:600px;margin:36px auto;padding:0 24px;">
+    <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">👥 초대 관리</h2>
+    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
+      <input id="invite-email" type="email" placeholder="초대할 이메일 주소" style="flex:2;min-width:200px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
+      <input id="invite-password" type="text" placeholder="초기 비밀번호 (6자 이상)" style="flex:1;min-width:150px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
+      <button onclick="addInvite()" style="padding:12px 24px;border:none;border-radius:12px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;font-weight:600;cursor:pointer;white-space:nowrap;">초대</button>
+    </div>
+    <div id="invite-msg" style="display:none;margin-bottom:16px;padding:10px 16px;border-radius:10px;font-size:0.82rem;"></div>
+    <div id="invite-list"></div>
+  </div>
+</div>
+
 <!-- ══════════════ 뉴스 요약 페이지 ══════════════ -->
 <div class="page" id="page-news">
   <div class="news-controls">
@@ -223,7 +260,6 @@
   </div>
 </div>
 
-</div><!-- /app-main -->
 
 <!-- ══════════════ Firebase 인증 ══════════════ -->
 <script>
@@ -237,30 +273,79 @@
   };
   firebase.initializeApp(firebaseConfig);
   const auth = firebase.auth();
+  const db = firebase.firestore();
 
-  // 허용된 이메일 목록 (초대제)
-  const ALLOWED_EMAILS = [
-    "bjsi0121@naver.com"
-  ];
+  let allowedEmails = [];
+  let currentUserRole = null;
+
+  // Firestore에서 화이트리스트 로드
+  async function loadAllowedEmails() {
+    const snap = await db.collection('allowed_emails').get();
+    allowedEmails = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      allowedEmails.push({ email: d.email, role: d.role || 'user' });
+    });
+    return allowedEmails;
+  }
+
+  function isAllowed(email) {
+    return allowedEmails.some(e => e.email === email);
+  }
+  function getRole(email) {
+    const found = allowedEmails.find(e => e.email === email);
+    return found ? found.role : null;
+  }
+
+  function showAuthUI(loggedIn, email, role) {
+    const loginBtn = document.getElementById('login-toggle-btn');
+    const logoutBtn = document.getElementById('logout-btn');
+    const emailEl = document.getElementById('user-email');
+    const authTabs = document.querySelectorAll('.auth-tab');
+    const adminTab = document.getElementById('adminTab');
+
+    if (loggedIn) {
+      loginBtn.style.display = 'none';
+      logoutBtn.style.display = 'inline-block';
+      emailEl.textContent = email;
+      authTabs.forEach(t => {
+        if (t.id === 'adminTab') {
+          t.style.display = role === 'admin' ? 'inline-block' : 'none';
+        } else {
+          t.style.display = 'inline-block';
+        }
+      });
+    } else {
+      loginBtn.style.display = 'inline-block';
+      logoutBtn.style.display = 'none';
+      emailEl.textContent = '';
+      authTabs.forEach(t => t.style.display = 'none');
+      // 로그인 필요 페이지에 있으면 공개 탭으로 이동
+      const activePage = document.querySelector('.page.active');
+      if (activePage && ['page-ainews','page-stock','page-notify','page-admin'].includes(activePage.id)) {
+        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        document.querySelector('[data-page="price"]').classList.add('active');
+        document.getElementById('page-price').classList.add('active');
+      }
+    }
+  }
 
   // 로그인 상태 감지
-  auth.onAuthStateChanged(user => {
-    if (user && ALLOWED_EMAILS.includes(user.email)) {
-      document.getElementById('login-screen').style.display = 'none';
-      document.getElementById('app-main').style.display = 'block';
-      // 로그아웃 버튼에 이메일 표시
-      const logoutEl = document.getElementById('logout-area');
-      if (logoutEl) logoutEl.style.display = 'flex';
-      const emailEl = document.getElementById('user-email');
-      if (emailEl) emailEl.textContent = user.email;
-    } else {
-      if (user) {
-        // 허용되지 않은 이메일
+  auth.onAuthStateChanged(async user => {
+    if (user) {
+      await loadAllowedEmails();
+      if (isAllowed(user.email)) {
+        currentUserRole = getRole(user.email);
+        document.getElementById('login-screen').style.display = 'none';
+        showAuthUI(true, user.email, currentUserRole);
+      } else {
         auth.signOut();
         showLoginError('접근 권한이 없는 이메일입니다.');
       }
-      document.getElementById('login-screen').style.display = 'flex';
-      document.getElementById('app-main').style.display = 'none';
+    } else {
+      currentUserRole = null;
+      showAuthUI(false);
     }
   });
 
@@ -278,7 +363,6 @@
     errEl.style.display = 'none';
 
     if (!email || !password) { showLoginError('이메일과 비밀번호를 입력하세요.'); return; }
-    if (!ALLOWED_EMAILS.includes(email)) { showLoginError('초대되지 않은 이메일입니다.'); return; }
 
     btn.disabled = true;
     btn.textContent = '로그인 중...';
@@ -286,21 +370,8 @@
     try {
       await auth.signInWithEmailAndPassword(email, password);
     } catch (e) {
-      console.log('Login error code:', e.code, e.message);
       if (e.code === 'auth/user-not-found' || e.code === 'auth/invalid-credential') {
-        // 유저 없으면 자동 회원가입 시도
-        try {
-          await auth.createUserWithEmailAndPassword(email, password);
-        } catch (e2) {
-          console.log('Signup error code:', e2.code, e2.message);
-          if (e2.code === 'auth/email-already-in-use') {
-            showLoginError('비밀번호가 틀렸습니다.');
-          } else if (e2.code === 'auth/weak-password') {
-            showLoginError('비밀번호가 너무 짧습니다. (6자 이상)');
-          } else {
-            showLoginError(e2.message);
-          }
-        }
+        showLoginError('계정이 없거나 비밀번호가 틀렸습니다. 관리자에게 초대를 요청하세요.');
       } else if (e.code === 'auth/wrong-password') {
         showLoginError('비밀번호가 틀렸습니다.');
       } else if (e.code === 'auth/too-many-requests') {
@@ -314,14 +385,80 @@
     }
   }
 
-  // 엔터키 로그인
   document.getElementById('login-password')?.addEventListener('keydown', e => {
     if (e.key === 'Enter') doLogin();
   });
 
-  function doLogout() {
-    auth.signOut();
+  function doLogout() { auth.signOut(); }
+
+  // ── 초대 관리 (관리자 전용) ──
+  async function loadInviteList() {
+    await loadAllowedEmails();
+    const list = document.getElementById('invite-list');
+    if (!list) return;
+    list.innerHTML = allowedEmails.map(e => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;margin-bottom:8px;">
+        <div>
+          <span style="color:#e2e8f0;font-weight:600;">${e.email}</span>
+          <span style="margin-left:8px;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;${e.role==='admin'?'background:rgba(96,165,250,0.15);color:#60a5fa':'background:rgba(148,163,184,0.1);color:#94a3b8'}">${e.role==='admin'?'관리자':'멤버'}</span>
+        </div>
+        ${e.role !== 'admin' ? `<button onclick="removeInvite('${e.email}')" style="padding:4px 12px;border-radius:8px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">삭제</button>` : ''}
+      </div>
+    `).join('');
   }
+
+  async function addInvite() {
+    if (currentUserRole !== 'admin') return;
+    const emailInput = document.getElementById('invite-email');
+    const pwInput = document.getElementById('invite-password');
+    const email = emailInput.value.trim().toLowerCase();
+    const password = pwInput.value;
+    const msgEl = document.getElementById('invite-msg');
+    if (!email || !email.includes('@')) {
+      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
+      msgEl.textContent = '올바른 이메일을 입력하세요.'; return;
+    }
+    if (!password || password.length < 6) {
+      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
+      msgEl.textContent = '비밀번호를 6자 이상 입력하세요.'; return;
+    }
+    if (isAllowed(email)) {
+      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(251,191,36,0.08)'; msgEl.style.color = '#fbbf24';
+      msgEl.textContent = '이미 등록된 이메일입니다.'; return;
+    }
+    try {
+      const token = await auth.currentUser.getIdToken();
+      const res = await fetch('/admin/invite', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        emailInput.value = ''; pwInput.value = '';
+        msgEl.style.display = 'block'; msgEl.style.background = 'rgba(52,211,153,0.08)'; msgEl.style.color = '#34d399';
+        msgEl.textContent = `${email} 초대 완료! (계정 생성됨)`;
+        setTimeout(() => msgEl.style.display = 'none', 3000);
+        loadInviteList();
+      } else {
+        msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
+        msgEl.textContent = data.error || '초대 실패';
+      }
+    } catch(e) {
+      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
+      msgEl.textContent = '서버 오류: ' + e.message;
+    }
+  }
+
+  async function removeInvite(email) {
+    if (currentUserRole !== 'admin') return;
+    if (!confirm(`${email}을(를) 삭제하시겠습니까?`)) return;
+    await db.collection('allowed_emails').doc(email).delete();
+    loadInviteList();
+  }
+
+  // 관리 탭 클릭 시 목록 로드
+  document.querySelector('[data-page="admin"]')?.addEventListener('click', loadInviteList);
 </script>
 
 </body>

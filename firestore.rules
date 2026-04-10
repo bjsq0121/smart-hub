@@ -1,0 +1,23 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 화이트리스트: 인증 유저만 읽기, admin만 쓰기
+    match /allowed_emails/{email} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && exists(/databases/$(database)/documents/allowed_emails/$(request.auth.token.email))
+        && get(/databases/$(database)/documents/allowed_emails/$(request.auth.token.email)).data.role == 'admin';
+    }
+    // 알림: 인증 유저만 읽기/읽음처리, 프론트 직접 생성/삭제 차단
+    match /notifications/{notiId} {
+      allow read: if request.auth != null;
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow create, delete: if false;
+    }
+    // 그 외 모든 컬렉션 차단
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
