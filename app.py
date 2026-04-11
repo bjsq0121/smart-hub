@@ -53,9 +53,9 @@ async def verify_firebase_token(authorization: str = Header(default="")) -> dict
 
 
 def verify_webhook_secret(x_webhook_secret: str = Header(default="")):
-    """웹훅 시크릿 키 검증."""
+    """웹훅 시크릿 키 검증. 시크릿 미설정이면 차단."""
     if not WEBHOOK_SECRET:
-        return  # 시크릿 미설정이면 통과 (개발 중)
+        raise HTTPException(status_code=503, detail="웹훅 시크릿이 설정되지 않았습니다.")
     if x_webhook_secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=403, detail="웹훅 인증 실패.")
 
@@ -188,7 +188,7 @@ async def ai_news(category: str = Query(default="AI 동향"), user: dict = Depen
         import re as _re
         m = _re.search(r'\{.*\}', raw, _re.DOTALL)
         if not m:
-            return {"error": f"JSON 파싱 실패. 원본: {raw[:200]}"}
+            return {"error": "AI 응답을 처리하지 못했습니다."}
         summary = json.loads(m.group())
         # points에 원본 링크 매칭
         for p in summary.get("points", []):
@@ -206,7 +206,7 @@ async def ai_news(category: str = Query(default="AI 동향"), user: dict = Depen
         return {"category": category, "summary": summary, "articles": article_links, "article_count": len(unique_items)}
 
     except Exception as e:
-        return {"error": f"AI 요약 생성 중 오류: {e}"}
+        return {"error": "AI 요약 생성 중 오류가 발생했습니다."}
 
 
 def _send_telegram(message: str):
@@ -692,7 +692,7 @@ async def stock_recommend(
         with concurrent.futures.ThreadPoolExecutor() as ex:
             stocks = await loop.run_in_executor(ex, _fetch_and_enrich_stocks, market)
     except Exception as e:
-        return {"error": f"KIS API 호출 오류: {e}"}
+        return {"error": "KIS API 호출 중 오류가 발생했습니다."}
 
     filtered = [
         s for s in stocks
@@ -720,7 +720,7 @@ async def stock_ai_analyze(items: list[dict], user: dict = Depends(verify_fireba
         _stock_cache[cache_key] = {"ts": _time.time(), "items": analyzed}
         return {"items": analyzed}
     except Exception as e:
-        return {"items": items, "error": str(e)}
+        return {"items": items, "error": "AI 분석 중 오류가 발생했습니다."}
 
 
 async def _analyze_stock_sentiment(stocks: list[dict]) -> list[dict]:
@@ -821,7 +821,7 @@ async def stock_news(
         with concurrent.futures.ThreadPoolExecutor() as ex:
             items = await loop.run_in_executor(ex, _fetch_naver_news, f"{name} 주가", 10)
     except Exception as e:
-        return {"error": f"뉴스 수집 실패: {e}"}
+        return {"error": "뉴스 수집에 실패했습니다."}
 
     if not items:
         return {"error": f"'{name}' 관련 뉴스를 찾을 수 없습니다."}
@@ -909,6 +909,8 @@ class NotifyRequest(BaseModel):
 
 @app.post("/webhook/notify", dependencies=[Depends(verify_webhook_secret)])
 async def webhook_notify(req: NotifyRequest):
+    """기존 알림 호환 엔드포인트. notifications 에 저장하면서 events/ 에도 미러링하여
+    운영 대시보드의 이벤트 로그가 구식 n8n 플로우도 같이 보여주도록 한다."""
     try:
         db = _get_firestore()
         doc_ref = db.collection("notifications").document()
@@ -923,9 +925,32 @@ async def webhook_notify(req: NotifyRequest):
             "read": False,
             "created_at": _firestore.SERVER_TIMESTAMP,
         })
+
+        # events/ 미러 — 운영 탭 이벤트 로그를 단일 출처로 만들기 위해
+        try:
+            db.collection("events").document().set({
+                "kind":       "event",
+                "source":     req.source or "n8n",
+                "workflow":   req.workflow,
+                "syncStatus": "ok",
+                "errorType":  None,
+                "occurredAt": None,
+                "payload": {
+                    "title":    req.title,
+                    "message":  req.message,
+                    "type":     req.type,
+                    "severity": req.severity,
+                    "data":     req.data,
+                },
+                "legacyNotificationId": doc_ref.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+        except Exception:
+            pass  # 미러 실패해도 알림 자체는 살린다
+
         return {"ok": True, "id": doc_ref.id}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "서버 오류가 발생했습니다."}
 
 
 @app.get("/webhook/notifications")
@@ -945,7 +970,17 @@ async def get_notifications(limit: int = Query(default=50), user: dict = Depends
             items.append(d)
         return {"items": items}
     except Exception as e:
-        return {"items": [], "error": str(e)}
+        return {"items": [], "error": "알림 조회 중 오류가 발생했습니다."}
+
+
+@app.delete("/webhook/notifications/{noti_id}")
+async def delete_notification(noti_id: str, user: dict = Depends(verify_firebase_token)):
+    try:
+        db = _get_firestore()
+        db.collection("notifications").document(noti_id).delete()
+        return {"ok": True}
+    except Exception:
+        return {"ok": False, "error": "삭제에 실패했습니다."}
 
 
 @app.post("/webhook/notifications/{noti_id}/read")
@@ -955,7 +990,207 @@ async def mark_notification_read(noti_id: str, user: dict = Depends(verify_fireb
         db.collection("notifications").document(noti_id).update({"read": True})
         return {"ok": True}
     except Exception as e:
-        return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "서버 오류가 발생했습니다."}
+
+
+# ── 운영 대시보드: 통합 ingest + 분리된 컬렉션 ──────────────
+#
+# Envelope 스키마 (n8n과 합의된 계약):
+#   {
+#     "kind":       "event" | "balance" | "workflow_run",
+#     "source":     "n8n",
+#     "workflow":   "balance_v1",
+#     "syncStatus": "ok" | "partial" | "failed",
+#     "errorType":  null | "auth" | "rate_limit" | "parse" | "network" | "unknown",
+#     "occurredAt": "2026-04-12T10:00:00+09:00",   # ISO8601, optional
+#     "payload":    { ... kind 별 실제 데이터 ... }
+#   }
+#
+# 컬렉션:
+#   events/         — 모든 진입점, append-only
+#   balances/       — 잔고 스냅샷 (원가 기준만, marketValue 없음)
+#   workflow_runs/  — 워크플로 실행 상태 (운영 탭용)
+#
+# 모든 ingest는 자동으로 events에 append되고, kind 가 balance|workflow_run 이면
+# 해당 컬렉션에도 normalize 후 동시 기록한다.
+
+class IngestEnvelope(BaseModel):
+    kind: str                       # event | balance | workflow_run
+    source: str = "n8n"
+    workflow: str = ""
+    syncStatus: str = "ok"          # ok | partial | failed
+    errorType: str | None = None
+    occurredAt: str | None = None   # ISO8601, 없으면 서버 시간
+    payload: dict = {}
+
+
+_ALLOWED_KINDS = {"event", "balance", "workflow_run"}
+_ALLOWED_SYNC = {"ok", "partial", "failed"}
+
+
+def _normalize_balance(payload: dict) -> dict:
+    """잔고 페이로드를 balances/ 컬렉션 스키마로 정규화. marketValue 류는 의도적으로 무시."""
+    per_coin_in = payload.get("perCoin") or payload.get("per_coin") or []
+    per_coin = []
+    for c in per_coin_in:
+        if not isinstance(c, dict):
+            continue
+        per_coin.append({
+            "symbol":   str(c.get("symbol") or c.get("ticker") or "")[:20],
+            "qty":      float(c.get("qty") or c.get("quantity") or 0),
+            "avgCost":  float(c.get("avgCost") or c.get("avg_cost") or 0),
+            "invested": float(c.get("invested") or c.get("investedKRW") or 0),
+        })
+    return {
+        "accountId":    str(payload.get("accountId") or payload.get("account_id") or "default"),
+        "accountCount": int(payload.get("accountCount") or payload.get("account_count") or 1),
+        "totalCostKRW": float(payload.get("totalCostKRW") or payload.get("total_cost_krw") or 0),
+        "perCoin":      per_coin,
+    }
+
+
+def _normalize_workflow_run(payload: dict, env: IngestEnvelope) -> dict:
+    return {
+        "workflow":   env.workflow or str(payload.get("workflow") or ""),
+        "status":     env.syncStatus,
+        "errorType":  env.errorType,
+        "startedAt":  payload.get("startedAt") or payload.get("started_at"),
+        "finishedAt": payload.get("finishedAt") or payload.get("finished_at"),
+        "durationMs": payload.get("durationMs") or payload.get("duration_ms"),
+        "eventCount": payload.get("eventCount") or payload.get("event_count") or 0,
+        "message":    payload.get("message") or "",
+    }
+
+
+@app.post("/webhook/ingest", dependencies=[Depends(verify_webhook_secret)])
+async def webhook_ingest(env: IngestEnvelope):
+    """통합 진입점. envelope.kind 에 따라 events + (balances|workflow_runs) 에 기록.
+
+    어떤 kind 든 항상 events/ 에 1건 append (append-only 원장).
+    추가로 kind 가 balance | workflow_run 이면 정규화된 컬렉션에도 기록.
+    """
+    if env.kind not in _ALLOWED_KINDS:
+        raise HTTPException(status_code=400, detail=f"알 수 없는 kind: {env.kind}")
+    if env.syncStatus not in _ALLOWED_SYNC:
+        raise HTTPException(status_code=400, detail=f"알 수 없는 syncStatus: {env.syncStatus}")
+
+    try:
+        db = _get_firestore()
+
+        # 1) events/ — append-only 원장
+        event_doc = db.collection("events").document()
+        event_doc.set({
+            "kind":       env.kind,
+            "source":     env.source,
+            "workflow":   env.workflow,
+            "syncStatus": env.syncStatus,
+            "errorType":  env.errorType,
+            "occurredAt": env.occurredAt,
+            "payload":    env.payload,
+            "created_at": _firestore.SERVER_TIMESTAMP,
+        })
+
+        # 2) kind 별 정규화 컬렉션
+        balance_id = None
+        run_id = None
+        if env.kind == "balance":
+            norm = _normalize_balance(env.payload)
+            ref = db.collection("balances").document()
+            ref.set({
+                **norm,
+                "workflow":   env.workflow,
+                "syncStatus": env.syncStatus,
+                "errorType":  env.errorType,
+                "occurredAt": env.occurredAt,
+                "eventId":    event_doc.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+            balance_id = ref.id
+        elif env.kind == "workflow_run":
+            norm = _normalize_workflow_run(env.payload, env)
+            ref = db.collection("workflow_runs").document()
+            ref.set({
+                **norm,
+                "source":     env.source,
+                "occurredAt": env.occurredAt,
+                "eventId":    event_doc.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+            run_id = ref.id
+
+        return {"ok": True, "eventId": event_doc.id, "balanceId": balance_id, "runId": run_id}
+    except HTTPException:
+        raise
+    except Exception:
+        return {"ok": False, "error": "ingest 처리 중 오류가 발생했습니다."}
+
+
+def _doc_to_dict(doc) -> dict:
+    d = doc.to_dict() or {}
+    d["id"] = doc.id
+    if d.get("created_at") and hasattr(d["created_at"], "isoformat"):
+        d["created_at"] = d["created_at"].isoformat()
+    return d
+
+
+@app.get("/api/events")
+async def api_events(
+    limit: int = Query(default=100, le=500),
+    kind: str | None = Query(default=None),
+    user: dict = Depends(verify_firebase_token),
+):
+    """이벤트 로그 (운영 탭의 이벤트 로그 / 리플레이 1차 데이터원)."""
+    try:
+        db = _get_firestore()
+        q = db.collection("events").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        if kind:
+            q = q.where("kind", "==", kind)
+        return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
+    except Exception:
+        return {"items": [], "error": "events 조회 실패"}
+
+
+@app.get("/api/balances/latest")
+async def api_balances_latest(user: dict = Depends(verify_firebase_token)):
+    """가장 최근 잔고 스냅샷 1건 + 직전 스냅샷 1건 (실시간 카드용)."""
+    try:
+        db = _get_firestore()
+        docs = list(
+            db.collection("balances")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(2).stream()
+        )
+        items = [_doc_to_dict(d) for d in docs]
+        return {
+            "latest":   items[0] if len(items) >= 1 else None,
+            "previous": items[1] if len(items) >= 2 else None,
+        }
+    except Exception:
+        return {"latest": None, "previous": None, "error": "balances 조회 실패"}
+
+
+@app.get("/api/workflows/status")
+async def api_workflows_status(
+    limit: int = Query(default=50, le=200),
+    user: dict = Depends(verify_firebase_token),
+):
+    """최근 워크플로 실행 + 워크플로별 마지막 상태 집계 (운영상태 탭용)."""
+    try:
+        db = _get_firestore()
+        docs = list(
+            db.collection("workflow_runs")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(limit).stream()
+        )
+        runs = [_doc_to_dict(d) for d in docs]
+        latest_by_wf: dict[str, dict] = {}
+        for r in runs:
+            wf = r.get("workflow") or "(unknown)"
+            if wf not in latest_by_wf:
+                latest_by_wf[wf] = r
+        return {"runs": runs, "latestByWorkflow": list(latest_by_wf.values())}
+    except Exception:
+        return {"runs": [], "latestByWorkflow": [], "error": "workflow_runs 조회 실패"}
 
 
 class InviteRequest(BaseModel):
@@ -977,13 +1212,18 @@ async def admin_invite(req: InviteRequest, user: dict = Depends(verify_firebase_
     if not firebase_admin._apps:
         firebase_admin.initialize_app()
 
-    # Firebase Auth 계정 생성
+    # Firebase Auth 계정 생성 (기존 계정 있으면 삭제 후 재생성 — 선점 방지)
     try:
         fb_auth.create_user(email=req.email, password=req.password)
     except fb_auth.EmailAlreadyExistsError:
-        pass  # 이미 있으면 무시
+        try:
+            existing = fb_auth.get_user_by_email(req.email)
+            fb_auth.delete_user(existing.uid)
+            fb_auth.create_user(email=req.email, password=req.password)
+        except Exception as e:
+            return {"ok": False, "error": "계정 재설정 실패"}
     except Exception as e:
-        return {"ok": False, "error": f"계정 생성 실패: {e}"}
+        return {"ok": False, "error": "계정 생성 실패"}
 
     # Firestore 화이트리스트 추가
     db.collection("allowed_emails").document(req.email).set({
@@ -1040,7 +1280,7 @@ async def news(
         with concurrent.futures.ThreadPoolExecutor() as ex:
             items = await loop.run_in_executor(ex, _fetch_naver_news, keyword, 50)
     except Exception as e:
-        return {"error": f"뉴스를 가져오는 중 오류가 발생했습니다: {e}"}
+        return {"error": "뉴스를 가져오는 중 오류가 발생했습니다."}
 
     # 날짜 필터: pubDate 파싱 후 KST 기준 비교
     kst = timezone(timedelta(hours=9))
@@ -1090,7 +1330,7 @@ async def realestate(
         resp = requests.get(url, timeout=10)
         resp.raise_for_status()
     except Exception as e:
-        return {"error": f"API 호출 오류: {e}"}
+        return {"error": "API 호출 중 오류가 발생했습니다."}
 
     try:
         import xml.etree.ElementTree as ET
@@ -1129,4 +1369,4 @@ async def realestate(
         return {"lawd_cd": lawd_cd, "deal_ymd": deal_ymd, "total": len(items), "items": items}
 
     except Exception as e:
-        return {"error": f"데이터 파싱 오류: {e}"}
+        return {"error": "데이터를 처리하는 중 오류가 발생했습니다."}

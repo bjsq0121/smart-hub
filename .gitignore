@@ -19,3 +19,7 @@ venv/
 
 # Claude
 .claude/
+.gstack/
+
+# Firebase
+.firebase/

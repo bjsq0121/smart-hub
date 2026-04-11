@@ -1,3 +1,26 @@
+  /* ───────── 커스텀 모달 (confirm/alert 대체) ───────── */
+  function showModal(msg, isConfirm = false) {
+    return new Promise(resolve => {
+      const overlay = document.getElementById('customModal');
+      const msgEl = document.getElementById('customModalMsg');
+      const okBtn = document.getElementById('customModalOk');
+      const cancelBtn = document.getElementById('customModalCancel');
+      msgEl.textContent = msg;
+      cancelBtn.style.display = isConfirm ? 'inline-block' : 'none';
+      okBtn.textContent = isConfirm ? '확인' : '확인';
+      overlay.classList.add('active');
+
+      const cleanup = () => {
+        overlay.classList.remove('active');
+        okBtn.onclick = null;
+        cancelBtn.onclick = null;
+      };
+      okBtn.onclick = () => { cleanup(); resolve(true); };
+      cancelBtn.onclick = () => { cleanup(); resolve(false); };
+      overlay.onclick = e => { if (e.target === overlay) { cleanup(); resolve(false); } };
+    });
+  }
+
   /* ───────── XSS 방지 ───────── */
   function esc(str) {
     if (!str) return '';
@@ -16,7 +39,7 @@
   }
 
   /* ───────── 네비게이션 ───────── */
-  const AUTH_PAGES = ['ainews', 'stock', 'notify', 'admin'];
+  const AUTH_PAGES = ['ops', 'ainews', 'stock', 'admin'];
   document.querySelectorAll('.nav-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       const page = tab.dataset.page;
@@ -99,7 +122,7 @@
 
   function renderPriceResults({query, results}) {
     if (!results || results.length === 0) { pResults.innerHTML = `<div class="error-box">검색 결과가 없습니다.</div>`; return; }
-    let html = `<div class="result-title"><strong>"${query}"</strong> 검색 결과 ${results.length}건</div><div class="cards">`;
+    let html = `<div class="result-title"><strong>"${esc(query)}"</strong> 검색 결과 ${results.length}건</div><div class="cards">`;
     results.forEach((r, i) => {
       const s = sourceLabel(r.source);
       html += `
@@ -109,12 +132,12 @@
           <div class="card-body">
             <div class="card-top">
               <span class="card-source ${s.cls}">${s.icon} ${s.text}</span>
-              ${r.category ? `<span class="card-category">${r.category}</span>` : ''}
+              ${r.category ? `<span class="card-category">${esc(r.category)}</span>` : ''}
             </div>
-            <div class="card-product">${r.product_name || '-'}</div>
+            <div class="card-product">${esc(r.product_name) || '-'}</div>
             <div class="card-meta">
-              ${r.mall_name ? `<span class="card-mall">📦 ${r.mall_name}</span>` : ''}
-              ${r.link ? `<a class="card-link" href="${r.link}" target="_blank" rel="noopener">상품 바로가기 ↗</a>` : ''}
+              ${r.mall_name ? `<span class="card-mall">📦 ${esc(r.mall_name)}</span>` : ''}
+              ${r.link ? `<a class="card-link" href="${encodeURI(r.link)}" target="_blank" rel="noopener">상품 바로가기 ↗</a>` : ''}
             </div>
           </div>
           <div class="card-price">
@@ -204,10 +227,10 @@
           <div class="news-card-top">
             <div class="news-num">${i+1}</div>
             <div class="news-title">
-              <a href="${item.link}" target="_blank" rel="noopener">${item.title}</a>
+              <a href="${encodeURI(item.link)}" target="_blank" rel="noopener">${esc(item.title)}</a>
             </div>
           </div>
-          ${item.description ? `<div class="news-desc">${item.description}</div>` : ''}
+          ${item.description ? `<div class="news-desc">${esc(item.description)}</div>` : ''}
           <div class="news-footer">
             <span class="news-time">🕐 ${item.pub_date}</span>
             <a class="news-link" href="${item.link}" target="_blank" rel="noopener">기사 보기 ↗</a>
@@ -357,8 +380,8 @@
   async function loadRealestate() {
     const lawd_cd  = reGungu.value;
     const monthVal = reMonth.value; // YYYY-MM
-    if (!lawd_cd)  { alert('구/군을 선택해주세요.'); return; }
-    if (!monthVal) { alert('년월을 선택해주세요.'); return; }
+    if (!lawd_cd)  { showModal('구/군을 선택해주세요.'); return; }
+    if (!monthVal) { showModal('년월을 선택해주세요.'); return; }
 
     const deal_ymd = monthVal.replace('-', '');
     reSearchBtn.disabled = true;
@@ -838,7 +861,7 @@
       return `
         <tr>
           <td style="color:#475569">${i+1}</td>
-          <td><a class="stock-link" style="font-weight:600" onclick="openStockNews('${s.stock_name}','${s.stock_code}')">${s.stock_name}</a><br><span style="font-size:0.72rem;color:#475569">${s.stock_code} · PER ${s.per.toFixed(1)} · PBR ${s.pbr.toFixed(2)}</span></td>
+          <td><a class="stock-link" style="font-weight:600" onclick="openStockNews('${esc(s.stock_name)}','${esc(s.stock_code)}')">${esc(s.stock_name)}</a><br><span style="font-size:0.72rem;color:#475569">${esc(s.stock_code)} · PER ${s.per.toFixed(1)} · PBR ${s.pbr.toFixed(2)}</span></td>
           <td>${s.current_price.toLocaleString()}원<br><span class="${chgCls}" style="font-size:0.78rem">${chgSign}${s.change_rate.toFixed(2)}%</span></td>
           <td>${fmtVol(s.volume)}${s.vol_surge ? '<br><span style="color:#f87171;font-size:0.68rem;font-weight:700">🔥 급증</span>' : (s.vol_ratio ? `<br><span style="font-size:0.68rem;color:#475569">${s.vol_ratio}배</span>` : '')}</td>
           <td style="font-size:0.78rem;line-height:1.8">
@@ -851,8 +874,8 @@
             <span class="decision-badge ${decCls(decision)}">${decision}</span> <span style="font-size:0.68rem;color:#64748b">[${s.confidence||''}]</span>
             <div style="font-size:0.72rem;color:#64748b;margin-top:3px">${score}점 <span class="score-bar"><span class="score-fill" style="width:${score}%;background:${scoreFill(score)}"></span></span></div>
             ${s.stop_loss && s.target_price ? `<div style="font-size:0.72rem;margin-top:4px"><span style="color:#60a5fa">손절 ${s.stop_loss.toLocaleString()}</span> · <span style="color:#f87171">목표 ${s.target_price.toLocaleString()}</span></div>` : ''}
-            ${reason ? `<div class="sentiment-reason" style="margin-top:4px">${reason}</div>` : ''}
-            ${risk ? `<div style="font-size:0.68rem;color:#f87171;margin-top:2px">⚠ ${risk}</div>` : ''}
+            ${reason ? `<div class="sentiment-reason" style="margin-top:4px">${esc(reason)}</div>` : ''}
+            ${risk ? `<div style="font-size:0.68rem;color:#f87171;margin-top:2px">⚠ ${esc(risk)}</div>` : ''}
             ${signals.length ? `<div class="signal-tags">${signals.map(t=>`<span class="signal-tag">${t}</span>`).join('')}</div>` : ''}
           </td>
         </tr>`;
@@ -864,7 +887,7 @@
     let html = `
       <div class="ai-headline">
         <div class="ai-headline-label">📡 ${category} · 오늘의 동향</div>
-        <div class="ai-headline-text">${headline}</div>
+        <div class="ai-headline-text">${esc(headline)}</div>
       </div>
       <div class="ai-points">`;
 
@@ -877,9 +900,9 @@
           <div class="ai-point-top">
             <span class="ai-point-num">${i+1}</span>
             <span class="ai-sentiment ${cls}">${icon} ${p.sentiment}</span>
-            <span class="ai-point-title">${p.title}</span>
+            <span class="ai-point-title">${esc(p.title)}</span>
           </div>
-          <div class="ai-point-body">${p.summary}</div>
+          <div class="ai-point-body">${esc(p.summary)}</div>
           ${linkBtn}
         </div>`;
     });
@@ -889,7 +912,7 @@
         <div class="ai-outlook-icon">🔭</div>
         <div>
           <div class="ai-outlook-label">전망 & 시사점</div>
-          <div class="ai-outlook-text">${outlook}</div>
+          <div class="ai-outlook-text">${esc(outlook)}</div>
         </div>
       </div>
       <div class="ai-meta">분석 기사 ${article_count}건 중 상위 ${points.length}건 선별 · Powered by Gemini 2.5 Flash</div>`;
@@ -925,14 +948,14 @@
     let html = `
       <div class="modal-title">${name} (${code})</div>
       <div class="modal-subtitle">AI 뉴스 감성분석 · ${articles?.length || 0}건 기사 분석${s.sentiment_score ? ` · <span style="color:${gradeColor(s.sentiment_grade)};font-weight:700">${s.sentiment_grade} ${s.sentiment_score}점</span>` : ''}</div>
-      <div class="modal-headline">${s.headline || '요약 없음'}</div>`;
+      <div class="modal-headline">${esc(s.headline) || '요약 없음'}</div>`;
 
     if (s.key_issues?.length) {
       html += '<div style="font-size:0.82rem;font-weight:600;color:#94a3b8;margin-bottom:10px">📌 핵심 이슈</div>';
       s.key_issues.forEach(issue => {
         html += `<div class="modal-issue">
-          <div class="modal-issue-title">${issue.title}<span class="modal-impact ${impCls(issue.impact)}">${issue.impact}</span></div>
-          <div class="modal-issue-body">${issue.summary}</div>
+          <div class="modal-issue-title">${esc(issue.title)}<span class="modal-impact ${impCls(issue.impact)}">${esc(issue.impact)}</span></div>
+          <div class="modal-issue-body">${esc(issue.summary)}</div>
         </div>`;
       });
     }
@@ -940,18 +963,18 @@
     if (s.outlook) {
       html += `<div class="modal-outlook">
         <div class="modal-outlook-label">🔭 전망</div>
-        <div class="modal-outlook-text">${s.outlook}</div>
+        <div class="modal-outlook-text">${esc(s.outlook)}</div>
       </div>`;
     }
     if (s.risk_factors) {
-      html += `<div style="margin-top:10px;font-size:0.8rem;color:#f87171">⚠️ ${s.risk_factors}</div>`;
+      html += `<div style="margin-top:10px;font-size:0.8rem;color:#f87171">⚠️ ${esc(s.risk_factors)}</div>`;
     }
 
     if (articles?.length) {
       html += `<div class="modal-articles"><div class="modal-articles-title">📰 원문 기사 (${articles.length}건)</div>`;
       articles.forEach(a => {
         html += `<div class="modal-article">
-          <span class="modal-article-title">${a.title}</span>
+          <span class="modal-article-title">${esc(a.title)}</span>
           <a href="${a.link}" target="_blank" rel="noopener" class="modal-article-link">원문 ↗</a>
         </div>`;
       });
@@ -969,20 +992,24 @@
   });
 
   /* ═══════════════════════════════════════
-     알림 센터
+     알림 센터 (페이징 + 체크박스 + 일괄삭제)
   ═══════════════════════════════════════ */
   let allNotifications = [];
   let notiFilter = 'all';
+  let notiPage = 1;
+  let notiPageSize = parseInt(localStorage.getItem('notiPageSize') || '20');
+  let notiChecked = new Set();
 
   async function loadNotifications() {
     const list = document.getElementById('notify-list');
     if (!list) return;
     list.innerHTML = '<div style="text-align:center;padding:20px;color:#475569"><span class="spinner"></span> 알림 로딩 중...</div>';
-
     try {
-      const res = await fetch('/webhook/notifications?limit=100', { headers: await authHeaders() });
+      const res = await fetch('/webhook/notifications?limit=500', { headers: await authHeaders() });
       const data = await res.json();
       allNotifications = data.items || [];
+      notiPage = 1;
+      notiChecked.clear();
       renderNotifications();
       updateBadge();
     } catch (e) {
@@ -993,41 +1020,181 @@
   function renderNotifications() {
     const list = document.getElementById('notify-list');
     if (!list) return;
-
-    let filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
+    const filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
+    const totalPages = Math.max(1, Math.ceil(filtered.length / notiPageSize));
+    if (notiPage > totalPages) notiPage = totalPages;
+    const start = (notiPage - 1) * notiPageSize;
+    const pageItems = filtered.slice(start, start + notiPageSize);
 
     if (!filtered.length) {
       list.innerHTML = '<div style="text-align:center;padding:40px;color:#475569;">알림이 없습니다.</div>';
       return;
     }
 
-    list.innerHTML = filtered.map(n => {
+    // 상단: 전체선택 + 선택삭제
+    let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <label style="display:flex;align-items:center;gap:6px;color:#64748b;font-size:0.78rem;cursor:pointer;">
+        <input type="checkbox" id="noti-select-all" onchange="toggleSelectAll(this.checked)" style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer;"> 전체 선택
+      </label>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <span id="noti-selected-count" style="font-size:0.75rem;color:#64748b;"></span>
+        <button id="noti-bulk-delete" onclick="bulkDeleteNoti()" style="display:none;padding:5px 14px;border-radius:20px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">선택 삭제</button>
+      </div>
+    </div>`;
+
+    // 카드 목록
+    html += pageItems.map(n => {
       const time = n.created_at ? new Date(n.created_at).toLocaleString('ko-KR') : '';
       const unreadCls = n.read ? '' : 'unread';
       const sevCls = n.severity !== 'info' ? `severity-${n.severity}` : '';
+      const checked = notiChecked.has(n.id) ? 'checked' : '';
       return `
-        <div class="noti-card ${unreadCls} ${sevCls}" onclick="markRead('${n.id}', this)">
-          <div class="noti-header">
-            <span class="noti-title">${n.title || '알림'}</span>
-            <span class="noti-time">${time}</span>
-          </div>
-          <div class="noti-body">${n.message || ''}</div>
-          <div class="noti-tags">
-            <span class="noti-tag ${n.type}">${n.type}</span>
-            <span class="noti-tag ${n.severity}">${n.severity}</span>
-            ${n.source ? `<span class="noti-tag system">${n.source}</span>` : ''}
-            ${n.workflow ? `<span class="noti-tag system">${n.workflow}</span>` : ''}
+        <div class="noti-card ${unreadCls} ${sevCls}" style="display:flex;gap:12px;align-items:flex-start;">
+          <input type="checkbox" class="noti-check" data-id="${esc(n.id)}" ${checked} onclick="event.stopPropagation();toggleNotiCheck('${n.id}',this.checked)" style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer;margin-top:2px;flex-shrink:0;">
+          <div style="flex:1;min-width:0;" onclick="toggleNotiDetail('${n.id}', this.parentElement)">
+            <div class="noti-header">
+              <span class="noti-title">${esc(n.title) || '알림'}</span>
+              <span class="noti-time">${time}</span>
+            </div>
+            <div class="noti-body">${esc(n.message) || ''}</div>
+            <div class="noti-tags">
+              <span class="noti-tag ${n.type}">${esc(n.type)}</span>
+              <span class="noti-tag ${n.severity}">${esc(n.severity)}</span>
+              ${n.source ? `<span class="noti-tag system">${esc(n.source)}</span>` : ''}
+              ${n.workflow ? `<span class="noti-tag system">${esc(n.workflow)}</span>` : ''}
+            </div>
+            <div class="noti-detail" id="noti-detail-${n.id}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);">
+              ${renderNotiDetail(n)}
+            </div>
           </div>
         </div>`;
     }).join('');
+
+    // 페이징
+    html += `<div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;">
+      <button onclick="notiGoPage(1)" ${notiPage<=1?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage<=1?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">«</button>
+      <button onclick="notiGoPage(${notiPage-1})" ${notiPage<=1?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage<=1?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">‹</button>
+      <span style="color:#e2e8f0;font-size:0.85rem;font-weight:600;">${notiPage}</span>
+      <span style="color:#475569;font-size:0.78rem;">/ ${totalPages}</span>
+      <button onclick="notiGoPage(${notiPage+1})" ${notiPage>=totalPages?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage>=totalPages?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">›</button>
+      <button onclick="notiGoPage(${totalPages})" ${notiPage>=totalPages?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage>=totalPages?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">»</button>
+      <span style="color:#475569;font-size:0.72rem;margin-left:8px;">총 ${filtered.length}건</span>
+    </div>`;
+
+    list.innerHTML = html;
+
+    updateSelectUI();
+  }
+
+  function notiGoPage(p) { notiPage = p; notiChecked.clear(); renderNotifications(); }
+
+  function toggleNotiCheck(id, checked) {
+    if (checked) notiChecked.add(id); else notiChecked.delete(id);
+    updateSelectUI();
+  }
+
+  function toggleSelectAll(checked) {
+    const filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
+    const start = (notiPage - 1) * notiPageSize;
+    const pageItems = filtered.slice(start, start + notiPageSize);
+    notiChecked.clear();
+    if (checked) pageItems.forEach(n => notiChecked.add(n.id));
+    document.querySelectorAll('.noti-check').forEach(cb => cb.checked = checked);
+    updateSelectUI();
+  }
+
+  function updateSelectUI() {
+    const count = notiChecked.size;
+    const countEl = document.getElementById('noti-selected-count');
+    const btn = document.getElementById('noti-bulk-delete');
+    if (countEl) countEl.textContent = count > 0 ? `${count}건 선택` : '';
+    if (btn) btn.style.display = count > 0 ? 'inline-block' : 'none';
+  }
+
+  async function bulkDeleteNoti() {
+    if (!notiChecked.size) return;
+    const ok = await showModal(`선택한 ${notiChecked.size}건을 삭제하시겠습니까?`, true);
+    if (!ok) return;
+    const ids = [...notiChecked];
+    const total = ids.length;
+    const list = document.getElementById('notify-list');
+    const hdrs = await authHeaders();
+
+    // 로딩바 표시
+    list.insertAdjacentHTML('afterbegin', `
+      <div id="noti-delete-progress" style="margin-bottom:12px;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#94a3b8;font-size:0.8rem;">삭제 중...</span>
+          <span id="noti-delete-count" style="color:#e2e8f0;font-size:0.8rem;font-weight:600;">0 / ${total}</span>
+        </div>
+        <div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;">
+          <div id="noti-delete-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:3px;transition:width 0.2s;"></div>
+        </div>
+      </div>
+    `);
+
+    const bar = document.getElementById('noti-delete-bar');
+    const countEl = document.getElementById('noti-delete-count');
+
+    for (let i = 0; i < ids.length; i++) {
+      try { await fetch(`/webhook/notifications/${ids[i]}`, { method: 'DELETE', headers: hdrs }); } catch(e) {}
+      const pct = Math.round(((i + 1) / total) * 100);
+      if (bar) bar.style.width = pct + '%';
+      if (countEl) countEl.textContent = `${i + 1} / ${total}`;
+    }
+
+    allNotifications = allNotifications.filter(n => !ids.includes(n.id));
+    notiChecked.clear();
+    renderNotifications();
+    updateBadge();
   }
 
   function filterNotify(type) {
     notiFilter = type;
+    notiPage = 1;
+    notiChecked.clear();
     document.querySelectorAll('[id^="noti-filter-"]').forEach(b => b.classList.remove('active'));
     const btn = document.getElementById(`noti-filter-${type}`);
     if (btn) btn.classList.add('active');
     renderNotifications();
+  }
+
+  function toggleNotiDetail(id, el) {
+    const selection = window.getSelection();
+    if (selection && selection.toString().length > 0) return;
+    const detail = document.getElementById(`noti-detail-${id}`);
+    if (!detail) return;
+    const isOpen = detail.style.display !== 'none';
+    document.querySelectorAll('.noti-detail').forEach(d => d.style.display = 'none');
+    if (!isOpen) detail.style.display = 'block';
+    markRead(id, el);
+  }
+
+  function renderNotiDetail(n) {
+    const data = n.data || {};
+    const keys = Object.keys(data);
+    if (!keys.length && !n.message) return '<div style="color:#475569;font-size:0.8rem;">상세 데이터 없음</div>';
+    let html = '';
+    if (keys.length) {
+      html += '<div style="font-size:0.75rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">📋 상세 데이터</div>';
+      html += '<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:0.8rem;">';
+      keys.forEach(k => {
+        let val = data[k];
+        if (typeof val === 'object') val = JSON.stringify(val);
+        html += `<span style="color:#64748b;font-weight:600;">${esc(k)}</span>`;
+        html += `<span style="color:#cbd5e1;white-space:pre-wrap;word-break:break-all;">${esc(String(val))}</span>`;
+      });
+      html += '</div>';
+    }
+    if (n.message && n.message.length > 100) {
+      html += `<div style="margin-top:10px;font-size:0.75rem;color:#94a3b8;font-weight:600;">💬 전체 메시지</div>`;
+      html += `<div style="margin-top:4px;padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:10px;font-size:0.8rem;color:#cbd5e1;line-height:1.7;white-space:pre-wrap;">${esc(n.message)}</div>`;
+    }
+    html += '<div style="margin-top:10px;display:flex;gap:16px;font-size:0.72rem;color:#475569;">';
+    if (n.source) html += `<span>출처: ${esc(n.source)}</span>`;
+    if (n.workflow) html += `<span>워크플로우: ${esc(n.workflow)}</span>`;
+    html += '</div>';
+    return html;
   }
 
   async function markRead(id, el) {
@@ -1052,21 +1219,33 @@
     const badge = document.getElementById('notify-badge');
     if (!badge) return;
     const count = allNotifications.filter(n => !n.read).length;
-    if (count > 0) {
-      badge.textContent = count > 99 ? '99+' : count;
-      badge.style.display = 'inline';
-    } else {
-      badge.style.display = 'none';
-    }
+    badge.textContent = count > 99 ? '99+' : count;
+    badge.style.display = count > 0 ? 'inline' : 'none';
   }
 
-  // 알림 탭 클릭 시 로드
+  async function deleteNoti(id) {
+    const ok = await showModal('이 알림을 삭제하시겠습니까?', true);
+    if (!ok) return;
+    try { await fetch(`/webhook/notifications/${id}`, { method: 'DELETE', headers: await authHeaders() }); } catch(e) {}
+    allNotifications = allNotifications.filter(n => n.id !== id);
+    notiChecked.delete(id);
+    renderNotifications();
+    updateBadge();
+  }
+
+  // 페이지 사이즈 변경 (관리자 설정에서 호출)
+  function setNotiPageSize(size) {
+    notiPageSize = size;
+    localStorage.setItem('notiPageSize', size);
+    notiPage = 1;
+    renderNotifications();
+  }
+
   document.querySelector('[data-page="notify"]')?.addEventListener('click', loadNotifications);
 
-  // 30초마다 알림 배지 업데이트
   setInterval(async () => {
     try {
-      const res = await fetch('/webhook/notifications?limit=100', { headers: await authHeaders() });
+      const res = await fetch('/webhook/notifications?limit=500', { headers: await authHeaders() });
       const data = await res.json();
       allNotifications = data.items || [];
       updateBadge();

@@ -791,3 +791,16 @@
     .noti-tag.info { background: rgba(96,165,250,0.12); color: #60a5fa; }
     .noti-tag.warning { background: rgba(251,191,36,0.12); color: #fbbf24; }
     .noti-tag.critical { background: rgba(248,113,113,0.12); color: #f87171; }
+
+    /* ════════════════════════════════
+       커스텀 모달 (confirm/alert 대체)
+    ════════════════════════════════ */
+    .confirm-overlay { display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.65);z-index:3000;justify-content:center;align-items:center; }
+    .confirm-overlay.active { display:flex; }
+    .confirm-box { background:#1a1a2e;border:1px solid rgba(255,255,255,0.1);border-radius:20px;padding:32px;max-width:400px;width:90%;text-align:center; }
+    .confirm-msg { color:#e2e8f0;font-size:0.95rem;line-height:1.6;margin-bottom:24px; }
+    .confirm-btns { display:flex;gap:10px;justify-content:center; }
+    .confirm-btn { padding:10px 28px;border-radius:12px;border:none;font-size:0.9rem;font-weight:600;cursor:pointer;transition:opacity 0.2s; }
+    .confirm-btn.ok { background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white; }
+    .confirm-btn.cancel { background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);color:#94a3b8; }
+    .confirm-btn:hover { opacity:0.85; }

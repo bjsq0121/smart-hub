@@ -40,9 +40,9 @@
     <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
     <button class="nav-tab" data-page="unit">📐 단위 변환기</button>
     <!-- 로그인 필요 탭 (auth-tab 클래스로 숨김/표시) -->
+    <button class="nav-tab auth-tab" data-page="ops" style="display:none">📊 운영</button>
     <button class="nav-tab auth-tab" data-page="ainews" style="display:none">🤖 AI 뉴스 요약</button>
     <button class="nav-tab auth-tab" data-page="stock" style="display:none">📈 주식 추천</button>
-    <button class="nav-tab auth-tab" data-page="notify" style="display:none">🔔 알림 <span id="notify-badge" style="display:none;background:#f87171;color:white;font-size:0.65rem;padding:1px 6px;border-radius:10px;margin-left:4px;font-weight:700;"></span></button>
     <button class="nav-tab auth-tab" data-page="admin" id="adminTab" style="display:none">⚙️ 관리</button>
   </nav>
 </header>
@@ -196,27 +196,77 @@
   </div>
 </div>
 
-<!-- ══════════════ 알림 페이지 ══════════════ -->
-<div class="page" id="page-notify">
-  <div style="max-width:800px;margin:24px auto;padding:0 24px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-      <h2 style="font-size:1.1rem;color:#e2e8f0;">🔔 알림 센터</h2>
-      <div style="display:flex;gap:8px;">
-        <button onclick="filterNotify('all')" class="sort-btn active" id="noti-filter-all">전체</button>
-        <button onclick="filterNotify('crypto')" class="sort-btn" id="noti-filter-crypto">암호화폐</button>
-        <button onclick="filterNotify('stock')" class="sort-btn" id="noti-filter-stock">주식</button>
-        <button onclick="filterNotify('system')" class="sort-btn" id="noti-filter-system">시스템</button>
-        <button onclick="markAllRead()" style="padding:5px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#64748b;font-size:0.78rem;cursor:pointer;">모두 읽음</button>
-        <button onclick="loadNotifications()" style="padding:5px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#64748b;font-size:0.78rem;cursor:pointer;">새로고침</button>
+<!-- ══════════════ 📊 운영 대시보드 ══════════════ -->
+<div class="page" id="page-ops">
+  <div style="max-width:1080px;margin:24px auto;padding:0 24px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
+      <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">📊 자산/신호 운영</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;" id="ops-subtabs">
+        <button class="ops-subtab active" data-sub="live">🟢 실시간</button>
+        <button class="ops-subtab" data-sub="perf">📈 성과분석</button>
+        <button class="ops-subtab" data-sub="replay">⏮ 리플레이</button>
+        <button class="ops-subtab" data-sub="status">⚙️ 운영상태</button>
       </div>
+      <button onclick="loadOps()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.78rem;cursor:pointer;">새로고침</button>
     </div>
-    <div id="notify-list"></div>
+
+    <!-- 🟢 실시간 -->
+    <section class="ops-pane active" id="ops-pane-live">
+      <div id="ops-live-cards" class="ops-cards">
+        <div class="ops-empty">로딩 중...</div>
+      </div>
+      <div style="margin-top:18px;">
+        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 이벤트</div>
+        <div id="ops-live-feed"></div>
+      </div>
+    </section>
+
+    <!-- 📈 성과분석 (placeholder) -->
+    <section class="ops-pane" id="ops-pane-perf">
+      <div class="ops-empty" style="padding:48px 24px;">
+        <div style="font-size:2rem;margin-bottom:8px;">🚧</div>
+        <div style="color:#94a3b8;">성과분석은 2차 슬라이스에 추가됩니다.</div>
+        <div style="color:#475569;font-size:0.78rem;margin-top:6px;">신호↔잔고 매칭(<code>signalId</code>) 도입 후 활성화</div>
+      </div>
+    </section>
+
+    <!-- ⏮ 리플레이 — 1차는 이벤트 타임라인 -->
+    <section class="ops-pane" id="ops-pane-replay">
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" id="ops-replay-filters">
+        <button class="ops-chip active" data-kind="">전체</button>
+        <button class="ops-chip" data-kind="balance">balance</button>
+        <button class="ops-chip" data-kind="workflow_run">workflow_run</button>
+        <button class="ops-chip" data-kind="event">event</button>
+      </div>
+      <div id="ops-replay-timeline"></div>
+    </section>
+
+    <!-- ⚙️ 운영상태 -->
+    <section class="ops-pane" id="ops-pane-status">
+      <div id="ops-status-grid" class="ops-cards"></div>
+      <div style="margin-top:18px;">
+        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 워크플로 실행</div>
+        <div id="ops-status-runs"></div>
+      </div>
+    </section>
   </div>
 </div>
 
 <!-- ══════════════ 관리자 페이지 ══════════════ -->
 <div class="page" id="page-admin">
   <div style="max-width:600px;margin:36px auto;padding:0 24px;">
+    <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">⚙️ 설정</h2>
+    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:16px 20px;margin-bottom:28px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;">
+        <span style="color:#94a3b8;font-size:0.85rem;">알림 페이지당 표시 수</span>
+        <select id="admin-page-size" onchange="setNotiPageSize(Number(this.value))" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;">
+          <option value="10">10개</option>
+          <option value="20">20개</option>
+          <option value="50">50개</option>
+          <option value="100">100개</option>
+        </select>
+      </div>
+    </div>
     <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">👥 초대 관리</h2>
     <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
       <input id="invite-email" type="email" placeholder="초대할 이메일 주소" style="flex:2;min-width:200px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
@@ -252,6 +302,17 @@
 
 <script src="/static/app.js"></script>
 
+<!-- 커스텀 confirm/alert 모달 -->
+<div class="confirm-overlay" id="customModal">
+  <div class="confirm-box">
+    <div class="confirm-msg" id="customModalMsg"></div>
+    <div class="confirm-btns">
+      <button class="confirm-btn cancel" id="customModalCancel" style="display:none">취소</button>
+      <button class="confirm-btn ok" id="customModalOk">확인</button>
+    </div>
+  </div>
+</div>
+
 <!-- 종목 뉴스 모달 -->
 <div class="modal-overlay" id="stockNewsModal">
   <div class="modal-box">
@@ -278,14 +339,28 @@
   let allowedEmails = [];
   let currentUserRole = null;
 
-  // Firestore에서 화이트리스트 로드
+  // Firestore에서 화이트리스트 로드 (본인 문서만 읽기, admin은 전체)
   async function loadAllowedEmails() {
-    const snap = await db.collection('allowed_emails').get();
-    allowedEmails = [];
-    snap.forEach(doc => {
-      const d = doc.data();
-      allowedEmails.push({ email: d.email, role: d.role || 'user' });
-    });
+    const user = auth.currentUser;
+    if (!user) return [];
+    try {
+      // 먼저 본인 문서만 확인
+      const myDoc = await db.collection('allowed_emails').doc(user.email).get();
+      if (!myDoc.exists) { allowedEmails = []; return allowedEmails; }
+      const myData = myDoc.data();
+      allowedEmails = [{ email: myData.email, role: myData.role || 'user' }];
+      // admin이면 전체 목록 로드
+      if (myData.role === 'admin') {
+        const snap = await db.collection('allowed_emails').get();
+        allowedEmails = [];
+        snap.forEach(doc => {
+          const d = doc.data();
+          allowedEmails.push({ email: d.email, role: d.role || 'user' });
+        });
+      }
+    } catch(e) {
+      allowedEmails = [];
+    }
     return allowedEmails;
   }
 
@@ -315,6 +390,21 @@
           t.style.display = 'inline-block';
         }
       });
+      // 로그인 사용자 첫 진입 시 자동으로 📊 운영 탭으로 이동
+      // (이미 운영이 아닌 다른 인증 탭에 있다면 그대로 둠)
+      const active = document.querySelector('.page.active');
+      const isFreshLanding = !active || active.id === 'page-price';
+      if (isFreshLanding) {
+        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        const opsTab = document.querySelector('[data-page="ops"]');
+        const opsPage = document.getElementById('page-ops');
+        if (opsTab && opsPage) {
+          opsTab.classList.add('active');
+          opsPage.classList.add('active');
+          if (typeof loadOps === 'function') loadOps();
+        }
+      }
     } else {
       loginBtn.style.display = 'inline-block';
       logoutBtn.style.display = 'none';
@@ -322,7 +412,7 @@
       authTabs.forEach(t => t.style.display = 'none');
       // 로그인 필요 페이지에 있으면 공개 탭으로 이동
       const activePage = document.querySelector('.page.active');
-      if (activePage && ['page-ainews','page-stock','page-notify','page-admin'].includes(activePage.id)) {
+      if (activePage && ['page-ops','page-ainews','page-stock','page-admin'].includes(activePage.id)) {
         document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         document.querySelector('[data-page="price"]').classList.add('active');
@@ -399,10 +489,10 @@
     list.innerHTML = allowedEmails.map(e => `
       <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;margin-bottom:8px;">
         <div>
-          <span style="color:#e2e8f0;font-weight:600;">${e.email}</span>
+          <span style="color:#e2e8f0;font-weight:600;">${e.email.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
           <span style="margin-left:8px;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;${e.role==='admin'?'background:rgba(96,165,250,0.15);color:#60a5fa':'background:rgba(148,163,184,0.1);color:#94a3b8'}">${e.role==='admin'?'관리자':'멤버'}</span>
         </div>
-        ${e.role !== 'admin' ? `<button onclick="removeInvite('${e.email}')" style="padding:4px 12px;border-radius:8px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">삭제</button>` : ''}
+        ${e.role !== 'admin' ? `<button onclick="removeInvite('${e.email.replace(/'/g,"\\'")}')" style="padding:4px 12px;border-radius:8px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">삭제</button>` : ''}
       </div>
     `).join('');
   }
@@ -452,13 +542,18 @@
 
   async function removeInvite(email) {
     if (currentUserRole !== 'admin') return;
-    if (!confirm(`${email}을(를) 삭제하시겠습니까?`)) return;
+    const ok = await showModal(`${email}을(를) 삭제하시겠습니까?`, true);
+    if (!ok) return;
     await db.collection('allowed_emails').doc(email).delete();
     loadInviteList();
   }
 
   // 관리 탭 클릭 시 목록 로드
-  document.querySelector('[data-page="admin"]')?.addEventListener('click', loadInviteList);
+  document.querySelector('[data-page="admin"]')?.addEventListener('click', () => {
+    loadInviteList();
+    const sel = document.getElementById('admin-page-size');
+    if (sel) sel.value = notiPageSize;
+  });
 </script>
 
 </body>
