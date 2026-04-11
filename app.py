@@ -1036,8 +1036,12 @@ def _normalize_balance(payload: dict) -> dict:
     필드 의미:
       coinCostKRW   = sum(perCoin[].invested)        — 코인 매수 누적 원가
       cashKRW       = 계좌에 남아 있는 KRW 현금       — 미투입 잔고
-      totalCostKRW  = coinCostKRW + cashKRW          — 총 입금 원가
-                       (페이로드가 명시하면 그 값 사용, 아니면 자동 계산)
+      totalCostKRW  = coinCostKRW + cashKRW          — 총 입금 원가 (항상 자동 계산)
+
+    중요: totalCostKRW 는 페이로드에서 받지 않는다. n8n 이 보내도 무시한다.
+    이유: n8n 측에서 cash 빼먹고 coin sum 만 보내는 케이스를 한 번 겪었음
+    (workflow=upbit-balance-001, totalCostKRW가 cashKRW 미반영). 일관성을 위해
+    합산 책임은 백엔드 한 곳으로 몰아둔다. n8n 은 raw 만 책임진다.
     """
     per_coin_in = payload.get("perCoin") or payload.get("per_coin") or []
     per_coin = []
@@ -1052,8 +1056,7 @@ def _normalize_balance(payload: dict) -> dict:
         })
     coin_cost = sum(c["invested"] for c in per_coin)
     cash_krw = float(payload.get("cashKRW") or payload.get("cash_krw") or 0)
-    total_provided = payload.get("totalCostKRW") or payload.get("total_cost_krw")
-    total_cost = float(total_provided) if total_provided is not None else (coin_cost + cash_krw)
+    total_cost = coin_cost + cash_krw
     return {
         "accountId":    str(payload.get("accountId") or payload.get("account_id") or "default"),
         "accountCount": int(payload.get("accountCount") or payload.get("account_count") or 1),
@@ -1113,6 +1116,7 @@ async def webhook_ingest(env: IngestEnvelope):
             ref = db.collection("balances").document()
             ref.set({
                 **norm,
+                "source":     env.source,
                 "workflow":   env.workflow,
                 "syncStatus": env.syncStatus,
                 "errorType":  env.errorType,

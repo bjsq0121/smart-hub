@@ -1209,15 +1209,14 @@
     if (latest) {
       const coinCost = deriveCoinCost(latest);
       const cash = Number(latest.cashKRW) || 0;
-      // totalCostKRW가 있으면 사용, 없으면 coin+cash 자동 합산 (구버전 데이터 대비)
-      const totalCost = (typeof latest.totalCostKRW === 'number' && latest.totalCostKRW > 0)
-        ? latest.totalCostKRW
-        : (coinCost + cash);
+      // 합계는 항상 프론트에서 재계산 (서버 totalCostKRW 신뢰 안함 — 안전망)
+      // 백엔드도 자동 계산하지만, 옛 문서가 cash 누락된 채로 totalCostKRW 가 저장돼 있는 케이스 대비
+      const totalCost = coinCost + cash;
 
       const prevCoin = prev ? deriveCoinCost(prev) : null;
       const prevCash = prev ? (Number(prev.cashKRW) || 0) : null;
-      const prevTotal = prev
-        ? ((typeof prev.totalCostKRW === 'number' && prev.totalCostKRW > 0) ? prev.totalCostKRW : ((prevCoin || 0) + (prevCash || 0)))
+      const prevTotal = prev != null && prevCoin != null && prevCash != null
+        ? (prevCoin + prevCash)
         : null;
 
       const mkDelta = (curr, prv) => {
