@@ -60,6 +60,13 @@
         }
       },
       {
+        "source": "/api/**",
+        "run": {
+          "serviceId": "smart-hub-api",
+          "region": "asia-northeast3"
+        }
+      },
+      {
         "source": "/stock-ai",
         "run": {
           "serviceId": "smart-hub-api",
