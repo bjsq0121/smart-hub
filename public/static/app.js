@@ -39,7 +39,7 @@
   }
 
   /* ───────── 네비게이션 ───────── */
-  const AUTH_PAGES = ['ainews', 'stock', 'notify', 'admin'];
+  const AUTH_PAGES = ['ops', 'ainews', 'stock', 'admin'];
   document.querySelectorAll('.nav-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       const page = tab.dataset.page;
@@ -992,262 +992,232 @@
   });
 
   /* ═══════════════════════════════════════
-     알림 센터 (페이징 + 체크박스 + 일괄삭제)
+     📊 운영 대시보드 (실시간 / 성과 / 리플레이 / 운영상태)
+     1차: 실시간, 운영상태, 리플레이(이벤트 타임라인) 활성
+     2차: 성과분석, 신호↔잔고 매칭
   ═══════════════════════════════════════ */
-  let allNotifications = [];
-  let notiFilter = 'all';
-  let notiPage = 1;
-  let notiPageSize = parseInt(localStorage.getItem('notiPageSize') || '20');
-  let notiChecked = new Set();
+  let opsActiveSub = 'live';
+  let opsReplayKind = '';
+  let opsLastFetch = { balance: null, runs: null, events: null };
 
-  async function loadNotifications() {
-    const list = document.getElementById('notify-list');
-    if (!list) return;
-    list.innerHTML = '<div style="text-align:center;padding:20px;color:#475569"><span class="spinner"></span> 알림 로딩 중...</div>';
+  function fmtKRW(n) {
+    if (n == null || isNaN(n)) return '-';
+    return Number(n).toLocaleString('ko-KR') + '원';
+  }
+  function fmtRel(iso) {
+    if (!iso) return '';
+    const t = new Date(iso).getTime();
+    if (isNaN(t)) return '';
+    const diff = Date.now() - t;
+    if (diff < 60000) return '방금';
+    if (diff < 3600000) return Math.floor(diff/60000) + '분 전';
+    if (diff < 86400000) return Math.floor(diff/3600000) + '시간 전';
+    return new Date(iso).toLocaleString('ko-KR');
+  }
+  function syncBadge(status) {
+    const map = { ok:'#34d399', partial:'#fbbf24', failed:'#f87171' };
+    const c = map[status] || '#64748b';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(status||'-')}</span>`;
+  }
+
+  // 서브탭 라우팅
+  document.getElementById('ops-subtabs')?.addEventListener('click', e => {
+    const btn = e.target.closest('.ops-subtab');
+    if (!btn) return;
+    opsActiveSub = btn.dataset.sub;
+    document.querySelectorAll('.ops-subtab').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.ops-pane').forEach(p => p.classList.toggle('active', p.id === 'ops-pane-' + opsActiveSub));
+    if (opsActiveSub === 'replay') renderOpsReplay();
+    if (opsActiveSub === 'status') renderOpsStatus();
+    if (opsActiveSub === 'live') renderOpsLive();
+  });
+
+  // 리플레이 kind 필터
+  document.getElementById('ops-replay-filters')?.addEventListener('click', e => {
+    const btn = e.target.closest('.ops-chip');
+    if (!btn) return;
+    opsReplayKind = btn.dataset.kind || '';
+    document.querySelectorAll('#ops-replay-filters .ops-chip').forEach(b => b.classList.toggle('active', b === btn));
+    renderOpsReplay();
+  });
+
+  async function loadOps() {
+    const hdrs = await authHeaders();
     try {
-      const res = await fetch('/webhook/notifications?limit=500', { headers: await authHeaders() });
-      const data = await res.json();
-      allNotifications = data.items || [];
-      notiPage = 1;
-      notiChecked.clear();
-      renderNotifications();
-      updateBadge();
+      const [balRes, runRes, evRes] = await Promise.all([
+        fetch('/api/balances/latest',          { headers: hdrs }),
+        fetch('/api/workflows/status?limit=50',{ headers: hdrs }),
+        fetch('/api/events?limit=200',         { headers: hdrs }),
+      ]);
+      opsLastFetch.balance = await balRes.json().catch(() => ({}));
+      opsLastFetch.runs    = await runRes.json().catch(() => ({}));
+      opsLastFetch.events  = await evRes.json().catch(() => ({}));
     } catch (e) {
-      list.innerHTML = '<div class="error-box">알림을 불러올 수 없습니다.</div>';
+      opsLastFetch = { balance: null, runs: null, events: null };
+    }
+    renderOpsLive();
+    renderOpsStatus();
+    renderOpsReplay();
+  }
+
+  function renderOpsLive() {
+    const cardsEl = document.getElementById('ops-live-cards');
+    const feedEl  = document.getElementById('ops-live-feed');
+    if (!cardsEl || !feedEl) return;
+
+    const bal    = opsLastFetch.balance || {};
+    const latest = bal.latest;
+    const prev   = bal.previous;
+    const runs   = (opsLastFetch.runs && opsLastFetch.runs.latestByWorkflow) || [];
+    const events = (opsLastFetch.events && opsLastFetch.events.items) || [];
+
+    // 카드 1: 총 원가
+    let totalCard;
+    if (latest) {
+      const delta = prev ? (latest.totalCostKRW - prev.totalCostKRW) : 0;
+      const deltaStr = delta === 0 ? '' : (delta > 0 ? `+${fmtKRW(delta)}` : `${fmtKRW(delta)}`);
+      const deltaColor = delta > 0 ? '#34d399' : delta < 0 ? '#f87171' : '#64748b';
+      totalCard = `
+        <div class="ops-card">
+          <div class="ops-card-label">총 투입 원가</div>
+          <div class="ops-card-value">${fmtKRW(latest.totalCostKRW)}</div>
+          <div class="ops-card-sub">
+            <span style="color:${deltaColor};font-weight:600;">${deltaStr || '직전 대비 변화 없음'}</span>
+            · ${fmtRel(latest.created_at)}
+          </div>
+        </div>`;
+    } else {
+      totalCard = `<div class="ops-card"><div class="ops-card-label">총 투입 원가</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">잔고 webhook 대기 중</div></div>`;
+    }
+
+    // 카드 2: 계좌 / 자산 수
+    const accountCard = latest
+      ? `<div class="ops-card"><div class="ops-card-label">계좌 / 자산</div><div class="ops-card-value">${latest.accountCount || 0} <span style="font-size:0.8rem;color:#64748b;">계좌</span> · ${(latest.perCoin||[]).length} <span style="font-size:0.8rem;color:#64748b;">종목</span></div><div class="ops-card-sub">${syncBadge(latest.syncStatus)} ${latest.errorType ? '· ' + esc(latest.errorType) : ''}</div></div>`
+      : `<div class="ops-card"><div class="ops-card-label">계좌 / 자산</div><div class="ops-card-value" style="color:#475569;">-</div><div class="ops-card-sub">-</div></div>`;
+
+    // 카드 3: 워크플로 상태 요약
+    const okCount   = runs.filter(r => r.status === 'ok').length;
+    const failCount = runs.filter(r => r.status === 'failed').length;
+    const partCount = runs.filter(r => r.status === 'partial').length;
+    const wfCard = `
+      <div class="ops-card">
+        <div class="ops-card-label">워크플로 상태</div>
+        <div class="ops-card-value">${runs.length} <span style="font-size:0.8rem;color:#64748b;">개 활성</span></div>
+        <div class="ops-card-sub">
+          ${syncBadge('ok')} ${okCount}
+          · ${syncBadge('partial')} ${partCount}
+          · ${syncBadge('failed')} ${failCount}
+        </div>
+      </div>`;
+
+    cardsEl.innerHTML = totalCard + accountCard + wfCard;
+
+    // 코인별 원가 미니 테이블 (full-width)
+    if (latest && latest.perCoin && latest.perCoin.length) {
+      cardsEl.insertAdjacentHTML('beforeend', `
+        <div class="ops-card" style="grid-column:1/-1;">
+          <div class="ops-card-label">코인별 원가</div>
+          <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px 12px;font-size:0.82rem;">
+            <div style="color:#64748b;font-weight:600;">심볼</div>
+            <div style="color:#64748b;font-weight:600;text-align:right;">수량</div>
+            <div style="color:#64748b;font-weight:600;text-align:right;">평균단가</div>
+            <div style="color:#64748b;font-weight:600;text-align:right;">투입금</div>
+            ${latest.perCoin.map(c => `
+              <div style="color:#e2e8f0;font-weight:600;">${esc(c.symbol)}</div>
+              <div style="color:#cbd5e1;text-align:right;">${c.qty}</div>
+              <div style="color:#cbd5e1;text-align:right;">${fmtKRW(c.avgCost)}</div>
+              <div style="color:#cbd5e1;text-align:right;">${fmtKRW(c.invested)}</div>
+            `).join('')}
+          </div>
+        </div>
+      `);
+    }
+
+    // 최근 이벤트 5건
+    const recent = events.slice(0, 5);
+    if (!recent.length) {
+      feedEl.innerHTML = '<div class="ops-empty">최근 이벤트가 없습니다.</div>';
+    } else {
+      feedEl.innerHTML = recent.map(ev => renderEventRow(ev)).join('');
     }
   }
 
-  function renderNotifications() {
-    const list = document.getElementById('notify-list');
-    if (!list) return;
-    const filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
-    const totalPages = Math.max(1, Math.ceil(filtered.length / notiPageSize));
-    if (notiPage > totalPages) notiPage = totalPages;
-    const start = (notiPage - 1) * notiPageSize;
-    const pageItems = filtered.slice(start, start + notiPageSize);
+  function renderEventRow(ev) {
+    const kindColors = { balance:'#60a5fa', workflow_run:'#a78bfa', event:'#34d399' };
+    const c = kindColors[ev.kind] || '#94a3b8';
+    const payload = ev.payload || {};
+    const summary = payload.title || payload.message || ev.workflow || ev.kind;
+    return `
+      <div class="ops-event-row">
+        <div class="ops-event-dot" style="background:${c};"></div>
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <span style="font-weight:600;color:#e2e8f0;font-size:0.85rem;">${esc(summary)}</span>
+            <span style="font-size:0.7rem;padding:1px 7px;border-radius:8px;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(ev.kind)}</span>
+            ${ev.workflow ? `<span style="font-size:0.7rem;color:#64748b;">${esc(ev.workflow)}</span>` : ''}
+            ${ev.syncStatus ? syncBadge(ev.syncStatus) : ''}
+          </div>
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px;">${fmtRel(ev.created_at)}${ev.errorType ? ' · ' + esc(ev.errorType) : ''}</div>
+        </div>
+      </div>`;
+  }
 
-    if (!filtered.length) {
-      list.innerHTML = '<div style="text-align:center;padding:40px;color:#475569;">알림이 없습니다.</div>';
+  function renderOpsStatus() {
+    const gridEl = document.getElementById('ops-status-grid');
+    const runsEl = document.getElementById('ops-status-runs');
+    if (!gridEl || !runsEl) return;
+    const data = opsLastFetch.runs || {};
+    const latestByWf = data.latestByWorkflow || [];
+    const runs = data.runs || [];
+
+    if (!latestByWf.length) {
+      gridEl.innerHTML = '<div class="ops-empty">워크플로 실행 기록이 없습니다.</div>';
+      runsEl.innerHTML = '';
       return;
     }
 
-    // 상단: 전체선택 + 선택삭제
-    let html = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-      <label style="display:flex;align-items:center;gap:6px;color:#64748b;font-size:0.78rem;cursor:pointer;">
-        <input type="checkbox" id="noti-select-all" onchange="toggleSelectAll(this.checked)" style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer;"> 전체 선택
-      </label>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <span id="noti-selected-count" style="font-size:0.75rem;color:#64748b;"></span>
-        <button id="noti-bulk-delete" onclick="bulkDeleteNoti()" style="display:none;padding:5px 14px;border-radius:20px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">선택 삭제</button>
+    gridEl.innerHTML = latestByWf.map(r => `
+      <div class="ops-card">
+        <div class="ops-card-label">${esc(r.workflow || '(unknown)')}</div>
+        <div class="ops-card-value" style="font-size:1rem;">${syncBadge(r.status)}</div>
+        <div class="ops-card-sub">
+          마지막 실행 ${fmtRel(r.created_at)}
+          ${r.errorType ? `<br><span style="color:#f87171;">${esc(r.errorType)}</span>` : ''}
+          ${r.eventCount ? `<br>이벤트 ${r.eventCount}건` : ''}
+        </div>
       </div>
-    </div>`;
+    `).join('');
 
-    // 카드 목록
-    html += pageItems.map(n => {
-      const time = n.created_at ? new Date(n.created_at).toLocaleString('ko-KR') : '';
-      const unreadCls = n.read ? '' : 'unread';
-      const sevCls = n.severity !== 'info' ? `severity-${n.severity}` : '';
-      const checked = notiChecked.has(n.id) ? 'checked' : '';
-      return `
-        <div class="noti-card ${unreadCls} ${sevCls}" style="display:flex;gap:12px;align-items:flex-start;">
-          <input type="checkbox" class="noti-check" data-id="${esc(n.id)}" ${checked} onclick="event.stopPropagation();toggleNotiCheck('${n.id}',this.checked)" style="accent-color:#6366f1;width:16px;height:16px;cursor:pointer;margin-top:2px;flex-shrink:0;">
-          <div style="flex:1;min-width:0;" onclick="toggleNotiDetail('${n.id}', this.parentElement)">
-            <div class="noti-header">
-              <span class="noti-title">${esc(n.title) || '알림'}</span>
-              <span class="noti-time">${time}</span>
-            </div>
-            <div class="noti-body">${esc(n.message) || ''}</div>
-            <div class="noti-tags">
-              <span class="noti-tag ${n.type}">${esc(n.type)}</span>
-              <span class="noti-tag ${n.severity}">${esc(n.severity)}</span>
-              ${n.source ? `<span class="noti-tag system">${esc(n.source)}</span>` : ''}
-              ${n.workflow ? `<span class="noti-tag system">${esc(n.workflow)}</span>` : ''}
-            </div>
-            <div class="noti-detail" id="noti-detail-${n.id}" style="display:none;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.06);">
-              ${renderNotiDetail(n)}
-            </div>
+    runsEl.innerHTML = runs.map(r => `
+      <div class="ops-event-row">
+        <div class="ops-event-dot" style="background:${r.status==='ok'?'#34d399':r.status==='failed'?'#f87171':'#fbbf24'};"></div>
+        <div style="flex:1;min-width:0;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <span style="font-weight:600;color:#e2e8f0;font-size:0.85rem;">${esc(r.workflow || '(unknown)')}</span>
+            ${syncBadge(r.status)}
+            ${r.errorType ? `<span style="font-size:0.7rem;color:#f87171;">${esc(r.errorType)}</span>` : ''}
           </div>
-        </div>`;
-    }).join('');
-
-    // 페이징
-    html += `<div style="display:flex;justify-content:center;align-items:center;gap:8px;margin-top:20px;">
-      <button onclick="notiGoPage(1)" ${notiPage<=1?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage<=1?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">«</button>
-      <button onclick="notiGoPage(${notiPage-1})" ${notiPage<=1?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage<=1?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">‹</button>
-      <span style="color:#e2e8f0;font-size:0.85rem;font-weight:600;">${notiPage}</span>
-      <span style="color:#475569;font-size:0.78rem;">/ ${totalPages}</span>
-      <button onclick="notiGoPage(${notiPage+1})" ${notiPage>=totalPages?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage>=totalPages?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">›</button>
-      <button onclick="notiGoPage(${totalPages})" ${notiPage>=totalPages?'disabled':''} style="padding:6px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:${notiPage>=totalPages?'#334155':'#94a3b8'};font-size:0.78rem;cursor:pointer;">»</button>
-      <span style="color:#475569;font-size:0.72rem;margin-left:8px;">총 ${filtered.length}건</span>
-    </div>`;
-
-    list.innerHTML = html;
-
-    updateSelectUI();
-  }
-
-  function notiGoPage(p) { notiPage = p; notiChecked.clear(); renderNotifications(); }
-
-  function toggleNotiCheck(id, checked) {
-    if (checked) notiChecked.add(id); else notiChecked.delete(id);
-    updateSelectUI();
-  }
-
-  function toggleSelectAll(checked) {
-    const filtered = notiFilter === 'all' ? allNotifications : allNotifications.filter(n => n.type === notiFilter);
-    const start = (notiPage - 1) * notiPageSize;
-    const pageItems = filtered.slice(start, start + notiPageSize);
-    notiChecked.clear();
-    if (checked) pageItems.forEach(n => notiChecked.add(n.id));
-    document.querySelectorAll('.noti-check').forEach(cb => cb.checked = checked);
-    updateSelectUI();
-  }
-
-  function updateSelectUI() {
-    const count = notiChecked.size;
-    const countEl = document.getElementById('noti-selected-count');
-    const btn = document.getElementById('noti-bulk-delete');
-    if (countEl) countEl.textContent = count > 0 ? `${count}건 선택` : '';
-    if (btn) btn.style.display = count > 0 ? 'inline-block' : 'none';
-  }
-
-  async function bulkDeleteNoti() {
-    if (!notiChecked.size) return;
-    const ok = await showModal(`선택한 ${notiChecked.size}건을 삭제하시겠습니까?`, true);
-    if (!ok) return;
-    const ids = [...notiChecked];
-    const total = ids.length;
-    const list = document.getElementById('notify-list');
-    const hdrs = await authHeaders();
-
-    // 로딩바 표시
-    list.insertAdjacentHTML('afterbegin', `
-      <div id="noti-delete-progress" style="margin-bottom:12px;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-          <span style="color:#94a3b8;font-size:0.8rem;">삭제 중...</span>
-          <span id="noti-delete-count" style="color:#e2e8f0;font-size:0.8rem;font-weight:600;">0 / ${total}</span>
-        </div>
-        <div style="height:6px;background:rgba(255,255,255,0.08);border-radius:3px;overflow:hidden;">
-          <div id="noti-delete-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:3px;transition:width 0.2s;"></div>
+          <div style="font-size:0.72rem;color:#475569;margin-top:2px;">
+            ${fmtRel(r.created_at)}
+            ${r.durationMs != null ? ' · ' + r.durationMs + 'ms' : ''}
+            ${r.eventCount ? ' · ' + r.eventCount + '건' : ''}
+          </div>
         </div>
       </div>
-    `);
+    `).join('');
+  }
 
-    const bar = document.getElementById('noti-delete-bar');
-    const countEl = document.getElementById('noti-delete-count');
-
-    for (let i = 0; i < ids.length; i++) {
-      try { await fetch(`/webhook/notifications/${ids[i]}`, { method: 'DELETE', headers: hdrs }); } catch(e) {}
-      const pct = Math.round(((i + 1) / total) * 100);
-      if (bar) bar.style.width = pct + '%';
-      if (countEl) countEl.textContent = `${i + 1} / ${total}`;
+  function renderOpsReplay() {
+    const el = document.getElementById('ops-replay-timeline');
+    if (!el) return;
+    const events = ((opsLastFetch.events && opsLastFetch.events.items) || []);
+    const filtered = opsReplayKind ? events.filter(e => e.kind === opsReplayKind) : events;
+    if (!filtered.length) {
+      el.innerHTML = '<div class="ops-empty">표시할 이벤트가 없습니다.</div>';
+      return;
     }
-
-    allNotifications = allNotifications.filter(n => !ids.includes(n.id));
-    notiChecked.clear();
-    renderNotifications();
-    updateBadge();
+    el.innerHTML = filtered.map(ev => renderEventRow(ev)).join('');
   }
 
-  function filterNotify(type) {
-    notiFilter = type;
-    notiPage = 1;
-    notiChecked.clear();
-    document.querySelectorAll('[id^="noti-filter-"]').forEach(b => b.classList.remove('active'));
-    const btn = document.getElementById(`noti-filter-${type}`);
-    if (btn) btn.classList.add('active');
-    renderNotifications();
-  }
-
-  function toggleNotiDetail(id, el) {
-    const selection = window.getSelection();
-    if (selection && selection.toString().length > 0) return;
-    const detail = document.getElementById(`noti-detail-${id}`);
-    if (!detail) return;
-    const isOpen = detail.style.display !== 'none';
-    document.querySelectorAll('.noti-detail').forEach(d => d.style.display = 'none');
-    if (!isOpen) detail.style.display = 'block';
-    markRead(id, el);
-  }
-
-  function renderNotiDetail(n) {
-    const data = n.data || {};
-    const keys = Object.keys(data);
-    if (!keys.length && !n.message) return '<div style="color:#475569;font-size:0.8rem;">상세 데이터 없음</div>';
-    let html = '';
-    if (keys.length) {
-      html += '<div style="font-size:0.75rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">📋 상세 데이터</div>';
-      html += '<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:0.8rem;">';
-      keys.forEach(k => {
-        let val = data[k];
-        if (typeof val === 'object') val = JSON.stringify(val);
-        html += `<span style="color:#64748b;font-weight:600;">${esc(k)}</span>`;
-        html += `<span style="color:#cbd5e1;white-space:pre-wrap;word-break:break-all;">${esc(String(val))}</span>`;
-      });
-      html += '</div>';
-    }
-    if (n.message && n.message.length > 100) {
-      html += `<div style="margin-top:10px;font-size:0.75rem;color:#94a3b8;font-weight:600;">💬 전체 메시지</div>`;
-      html += `<div style="margin-top:4px;padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:10px;font-size:0.8rem;color:#cbd5e1;line-height:1.7;white-space:pre-wrap;">${esc(n.message)}</div>`;
-    }
-    html += '<div style="margin-top:10px;display:flex;gap:16px;font-size:0.72rem;color:#475569;">';
-    if (n.source) html += `<span>출처: ${esc(n.source)}</span>`;
-    if (n.workflow) html += `<span>워크플로우: ${esc(n.workflow)}</span>`;
-    html += '</div>';
-    return html;
-  }
-
-  async function markRead(id, el) {
-    if (el) el.classList.remove('unread');
-    const n = allNotifications.find(n => n.id === id);
-    if (n) n.read = true;
-    updateBadge();
-    try { await fetch(`/webhook/notifications/${id}/read`, { method: 'POST', headers: await authHeaders() }); } catch(e) {}
-  }
-
-  async function markAllRead() {
-    const unread = allNotifications.filter(n => !n.read);
-    for (const n of unread) {
-      n.read = true;
-      try { await fetch(`/webhook/notifications/${n.id}/read`, { method: 'POST', headers: await authHeaders() }); } catch(e) {}
-    }
-    renderNotifications();
-    updateBadge();
-  }
-
-  function updateBadge() {
-    const badge = document.getElementById('notify-badge');
-    if (!badge) return;
-    const count = allNotifications.filter(n => !n.read).length;
-    badge.textContent = count > 99 ? '99+' : count;
-    badge.style.display = count > 0 ? 'inline' : 'none';
-  }
-
-  async function deleteNoti(id) {
-    const ok = await showModal('이 알림을 삭제하시겠습니까?', true);
-    if (!ok) return;
-    try { await fetch(`/webhook/notifications/${id}`, { method: 'DELETE', headers: await authHeaders() }); } catch(e) {}
-    allNotifications = allNotifications.filter(n => n.id !== id);
-    notiChecked.delete(id);
-    renderNotifications();
-    updateBadge();
-  }
-
-  // 페이지 사이즈 변경 (관리자 설정에서 호출)
-  function setNotiPageSize(size) {
-    notiPageSize = size;
-    localStorage.setItem('notiPageSize', size);
-    notiPage = 1;
-    renderNotifications();
-  }
-
-  document.querySelector('[data-page="notify"]')?.addEventListener('click', loadNotifications);
-
-  setInterval(async () => {
-    try {
-      const res = await fetch('/webhook/notifications?limit=500', { headers: await authHeaders() });
-      const data = await res.json();
-      allNotifications = data.items || [];
-      updateBadge();
-    } catch(e) {}
-  }, 30000);
+  // 운영 탭 진입 시 자동 로드
+  document.querySelector('[data-page="ops"]')?.addEventListener('click', loadOps);

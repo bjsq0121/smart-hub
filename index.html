@@ -255,18 +255,6 @@
 <!-- ══════════════ 관리자 페이지 ══════════════ -->
 <div class="page" id="page-admin">
   <div style="max-width:600px;margin:36px auto;padding:0 24px;">
-    <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">⚙️ 설정</h2>
-    <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:16px 20px;margin-bottom:28px;">
-      <div style="display:flex;justify-content:space-between;align-items:center;">
-        <span style="color:#94a3b8;font-size:0.85rem;">알림 페이지당 표시 수</span>
-        <select id="admin-page-size" onchange="setNotiPageSize(Number(this.value))" style="padding:8px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;">
-          <option value="10">10개</option>
-          <option value="20">20개</option>
-          <option value="50">50개</option>
-          <option value="100">100개</option>
-        </select>
-      </div>
-    </div>
     <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">👥 초대 관리</h2>
     <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
       <input id="invite-email" type="email" placeholder="초대할 이메일 주소" style="flex:2;min-width:200px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
@@ -551,8 +539,6 @@
   // 관리 탭 클릭 시 목록 로드
   document.querySelector('[data-page="admin"]')?.addEventListener('click', () => {
     loadInviteList();
-    const sel = document.getElementById('admin-page-size');
-    if (sel) sel.value = notiPageSize;
   });
 </script>
 
