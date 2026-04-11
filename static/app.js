@@ -1197,15 +1197,15 @@
     const runs   = (opsLastFetch.runs && opsLastFetch.runs.latestByWorkflow) || [];
     const events = (opsLastFetch.events && opsLastFetch.events.items) || [];
 
-    // ── 원가 기준 배너 (자산 카드는 평가금액 아님을 명시) ──
+    // ── 원가 기준 배너 (모든 자산 카드는 평가금액 아님을 명시) ──
     const banner = `
       <div class="ops-banner" style="grid-column:1/-1;">
         <span class="ops-banner-pill">원가 기준</span>
         <span class="ops-banner-text">실시간 시세/평가금액이 아닙니다 — 입금·매수 누적 원가만 표시합니다.</span>
       </div>`;
 
-    // ── 자산 4종 카드 (총 보유 자산 = 헤드라인) ──
-    let totalCard, coinCard, cashCard, acctCard;
+    // ── 자산 동등 3장 카드: KRW 현금 / 코인 원가 / 합계 (원가 기준) ──
+    let cashCard, coinCard, sumCard, metaLine;
     if (latest) {
       const coinCost = deriveCoinCost(latest);
       const cash = Number(latest.cashKRW) || 0;
@@ -1217,7 +1217,7 @@
       const prevCoin = prev ? deriveCoinCost(prev) : null;
       const prevCash = prev ? (Number(prev.cashKRW) || 0) : null;
       const prevTotal = prev
-        ? ((typeof prev.totalCostKRW === 'number' && prev.totalCostKRW > 0) ? prev.totalCostKRW : (prevCoin + prevCash))
+        ? ((typeof prev.totalCostKRW === 'number' && prev.totalCostKRW > 0) ? prev.totalCostKRW : ((prevCoin || 0) + (prevCash || 0)))
         : null;
 
       const mkDelta = (curr, prv) => {
@@ -1229,28 +1229,7 @@
         return `<span style="color:${color};font-weight:600;">${str}</span>`;
       };
 
-      // 헤드라인: 총 보유 자산
-      totalCard = `
-        <div class="ops-card ops-card-headline" style="grid-column:1/-1;">
-          <div class="ops-card-label">💰 총 보유 자산 (원가 기준)</div>
-          <div class="ops-card-value-xl">${fmtKRW(totalCost)}</div>
-          <div class="ops-card-sub">
-            코인 ${fmtKRW(coinCost)} + 현금 ${fmtKRW(cash)}
-            ${prevTotal != null ? ` · ${mkDelta(totalCost, prevTotal)}` : ''}
-            · ${fmtRel(latest.created_at)}
-          </div>
-        </div>`;
-
-      coinCard = `
-        <div class="ops-card">
-          <div class="ops-card-label">📊 코인 원가</div>
-          <div class="ops-card-value">${fmtKRW(coinCost)}</div>
-          <div class="ops-card-sub">
-            종목 ${(latest.perCoin || []).length}개
-            ${prevCoin != null ? ` · ${mkDelta(coinCost, prevCoin)}` : ''}
-          </div>
-        </div>`;
-
+      // 1. KRW 현금
       cashCard = `
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
@@ -1261,21 +1240,42 @@
           </div>
         </div>`;
 
-      acctCard = `
+      // 2. 코인 원가
+      coinCard = `
         <div class="ops-card">
-          <div class="ops-card-label">🏦 계좌 수</div>
-          <div class="ops-card-value">${latest.accountCount || 0} <span style="font-size:0.8rem;color:#64748b;">개</span></div>
+          <div class="ops-card-label">📊 코인 원가</div>
+          <div class="ops-card-value">${fmtKRW(coinCost)}</div>
           <div class="ops-card-sub">
-            ${syncBadge(latest.syncStatus)}
-            ${latest.errorType ? ` · <span style="color:#f87171;">${esc(latest.errorType)}</span>` : ''}
+            종목 ${(latest.perCoin || []).length}개
+            ${prevCoin != null ? ` · ${mkDelta(coinCost, prevCoin)}` : ''}
           </div>
+        </div>`;
+
+      // 3. 합계 (원가 기준) — 강조 보더로만 살짝 차이, 폰트 크기는 동일
+      sumCard = `
+        <div class="ops-card ops-card-sum">
+          <div class="ops-card-label">🟰 합계 (원가 기준)</div>
+          <div class="ops-card-value">${fmtKRW(totalCost)}</div>
+          <div class="ops-card-sub">
+            현금 + 코인 원가
+            ${prevTotal != null ? ` · ${mkDelta(totalCost, prevTotal)}` : ''}
+          </div>
+        </div>`;
+
+      // 작은 메타 라인 (계좌 수 + sync + 시간) — 카드 아래 한 줄
+      metaLine = `
+        <div class="ops-meta-line" style="grid-column:1/-1;">
+          🏦 계좌 ${latest.accountCount || 0}개
+          · ${syncBadge(latest.syncStatus)}
+          ${latest.errorType ? ` · <span style="color:#f87171;">${esc(latest.errorType)}</span>` : ''}
+          · 마지막 수신 ${fmtRel(latest.created_at)}
         </div>`;
     } else {
       const empty = (label, hint) => `<div class="ops-card"><div class="ops-card-label">${label}</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">${hint}</div></div>`;
-      totalCard = `<div class="ops-card ops-card-headline" style="grid-column:1/-1;"><div class="ops-card-label">💰 총 보유 자산 (원가 기준)</div><div class="ops-card-value-xl" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">잔고 webhook 한 번도 수신되지 않았습니다</div></div>`;
-      coinCard = empty('📊 코인 원가', '잔고 webhook 대기 중');
       cashCard = empty('💵 KRW 현금', '잔고 webhook 대기 중');
-      acctCard = empty('🏦 계좌 수', '잔고 webhook 대기 중');
+      coinCard = empty('📊 코인 원가', '잔고 webhook 대기 중');
+      sumCard = `<div class="ops-card ops-card-sum"><div class="ops-card-label">🟰 합계 (원가 기준)</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">잔고 webhook 한 번도 수신되지 않았습니다</div></div>`;
+      metaLine = `<div class="ops-meta-line" style="grid-column:1/-1;">🏦 계좌 0개 · 잔고 webhook 미수신</div>`;
     }
 
     // ── 워크플로 상태 카드 (운영 지표, 자산과는 별도 그룹) ──
@@ -1296,7 +1296,7 @@
         <div class="ops-card-sub">자세한 내역은 ⚙️ 운영상태 탭에서 확인</div>
       </div>`;
 
-    cardsEl.innerHTML = banner + totalCard + coinCard + cashCard + acctCard + wfCard;
+    cardsEl.innerHTML = banner + cashCard + coinCard + sumCard + metaLine + wfCard;
 
     // ── 코인별 원가 미니 테이블 (full-width) ──
     if (latest && latest.perCoin && latest.perCoin.length) {

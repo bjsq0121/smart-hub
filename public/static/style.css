@@ -894,23 +894,23 @@
     }
     .ops-card-label { font-size: 0.72rem; color: #64748b; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 6px; }
     .ops-card-value { font-size: 1.4rem; color: #e2e8f0; font-weight: 700; line-height: 1.2; }
-    .ops-card-value-xl {
-      font-size: 2.4rem;
-      font-weight: 800;
-      line-height: 1.1;
-      background: linear-gradient(90deg, #60a5fa, #a78bfa, #f472b6);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      letter-spacing: -0.5px;
-    }
     .ops-card-sub { font-size: 0.74rem; color: #64748b; margin-top: 6px; line-height: 1.5; }
-    .ops-card-headline {
-      background: linear-gradient(135deg, rgba(99,102,241,0.10), rgba(167,139,250,0.06), rgba(244,114,182,0.04));
-      border-color: rgba(139,92,246,0.35);
-      padding: 22px 24px;
+    /* 합계 카드: 폰트 크기는 동등, 보더/배경만 살짝 다르게 — 평가금액 오해 방지 */
+    .ops-card-sum {
+      border-color: rgba(139,92,246,0.45);
+      background: rgba(139,92,246,0.06);
     }
-    .ops-card-headline .ops-card-label { font-size: 0.78rem; color: #c7d2fe; }
-    .ops-card-headline .ops-card-sub { font-size: 0.82rem; color: #94a3b8; margin-top: 10px; }
+    .ops-card-sum .ops-card-label { color: #c7d2fe; }
+    /* 보조 메타 라인 (계좌 수 / sync / 시간) — 카드 아래 한 줄 */
+    .ops-meta-line {
+      font-size: 0.78rem;
+      color: #94a3b8;
+      padding: 6px 4px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
     .ops-empty {
       text-align: center;
       padding: 24px;
