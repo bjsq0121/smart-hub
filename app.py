@@ -1029,7 +1029,16 @@ _ALLOWED_SYNC = {"ok", "partial", "failed"}
 
 
 def _normalize_balance(payload: dict) -> dict:
-    """잔고 페이로드를 balances/ 컬렉션 스키마로 정규화. marketValue 류는 의도적으로 무시."""
+    """잔고 페이로드를 balances/ 컬렉션 스키마로 정규화.
+
+    원가 기준 (cost basis) 만 다룸 — marketValue/평가금액/현재가 류는 의도적으로 무시.
+
+    필드 의미:
+      coinCostKRW   = sum(perCoin[].invested)        — 코인 매수 누적 원가
+      cashKRW       = 계좌에 남아 있는 KRW 현금       — 미투입 잔고
+      totalCostKRW  = coinCostKRW + cashKRW          — 총 입금 원가
+                       (페이로드가 명시하면 그 값 사용, 아니면 자동 계산)
+    """
     per_coin_in = payload.get("perCoin") or payload.get("per_coin") or []
     per_coin = []
     for c in per_coin_in:
@@ -1041,10 +1050,16 @@ def _normalize_balance(payload: dict) -> dict:
             "avgCost":  float(c.get("avgCost") or c.get("avg_cost") or 0),
             "invested": float(c.get("invested") or c.get("investedKRW") or 0),
         })
+    coin_cost = sum(c["invested"] for c in per_coin)
+    cash_krw = float(payload.get("cashKRW") or payload.get("cash_krw") or 0)
+    total_provided = payload.get("totalCostKRW") or payload.get("total_cost_krw")
+    total_cost = float(total_provided) if total_provided is not None else (coin_cost + cash_krw)
     return {
         "accountId":    str(payload.get("accountId") or payload.get("account_id") or "default"),
         "accountCount": int(payload.get("accountCount") or payload.get("account_count") or 1),
-        "totalCostKRW": float(payload.get("totalCostKRW") or payload.get("total_cost_krw") or 0),
+        "coinCostKRW":  coin_cost,
+        "cashKRW":      cash_krw,
+        "totalCostKRW": total_cost,
         "perCoin":      per_coin,
     }
 
