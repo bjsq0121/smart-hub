@@ -38,22 +38,154 @@
     return {};
   }
 
-  /* ───────── 네비게이션 ───────── */
-  const AUTH_PAGES = ['ops', 'ainews', 'stock', 'admin'];
-  document.querySelectorAll('.nav-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const page = tab.dataset.page;
-      // 로그인 필요 페이지인데 미로그인 시 로그인 모달 띄움
-      if (AUTH_PAGES.includes(page) && typeof auth !== 'undefined' && !auth.currentUser) {
-        document.getElementById('login-screen').style.display = 'flex';
-        return;
-      }
-      document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById('page-' + page).classList.add('active');
+  /* ═══════════════════════════════════════
+     네비게이션: 4그룹 + 그룹별 서브탭 (1차)
+     - home / ops / research / tools / admin
+     - 각 그룹 내부 서브탭이 sub-nav 바에 동적으로 그려짐
+     - 서브탭 클릭 = .page 활성화. ops 그룹은 page-ops 내부 ops-pane 도 같이 활성화
+  ═══════════════════════════════════════ */
+  const NAV_GROUPS = {
+    home: {
+      label: '🏠 홈',
+      auth: false,
+      subs: [], // 단일 페이지 — 서브탭 없음
+      defaultPage: 'page-home',
+    },
+    ops: {
+      label: '📊 운영',
+      auth: true,
+      subs: [
+        { id: 'live',   label: '🟢 실시간',   page: 'page-ops', opsPane: 'live' },
+        { id: 'status', label: '⚙️ 운영상태', page: 'page-ops', opsPane: 'status' },
+        { id: 'events', label: '📜 이벤트 로그', page: 'page-ops', opsPane: 'events' },
+        { id: 'perf',   label: '📈 성과분석', page: 'page-ops', opsPane: 'perf', soon: true },
+        { id: 'replay', label: '⏮ 리플레이', page: 'page-ops', opsPane: 'replay', soon: true },
+      ],
+      onEnter: () => { if (typeof loadOps === 'function') loadOps(); },
+    },
+    research: {
+      label: '🔬 리서치',
+      auth: true,
+      subs: [
+        { id: 'ainews',     label: '🤖 AI 뉴스 요약', page: 'page-ainews' },
+        { id: 'stock',      label: '📈 주식 추천',    page: 'page-stock' },
+        { id: 'coin-perf',  label: '코인 성과분석',   page: 'page-soon', soon: true,
+          soonTitle: '코인 성과분석', soonDesc: '거래 이력 + 평균 단가 기반 누적 손익 분석. 2차 슬라이스에서 추가됩니다.' },
+        { id: 'coin-replay',label: '코인 리플레이',   page: 'page-soon', soon: true,
+          soonTitle: '코인 리플레이', soonDesc: '신호 발생 시점부터 후속 잔고 변화를 시간순 재생. 2차 슬라이스에서 추가됩니다.' },
+      ],
+    },
+    tools: {
+      label: '🧰 도구',
+      auth: false,
+      subs: [
+        { id: 'price',      label: '🔍 최저가 비교',    page: 'page-price' },
+        { id: 'realestate', label: '🏠 아파트 실거래가', page: 'page-realestate' },
+        { id: 'unit',       label: '📐 단위 변환기',    page: 'page-unit' },
+      ],
+    },
+    admin: {
+      label: '⚙️ 관리',
+      auth: true,
+      subs: [
+        { id: 'invite',  label: '👥 초대 관리', page: 'page-admin' },
+        { id: 'account', label: '🔑 계정/권한', page: 'page-soon', soon: true,
+          soonTitle: '계정/권한', soonDesc: '역할 기반 권한 관리(RBAC). 2차에서 추가됩니다.' },
+        { id: 'sys',     label: '🛠 시스템 설정', page: 'page-soon', soon: true,
+          soonTitle: '시스템 설정', soonDesc: '환경 변수, 웹훅 시크릿, 알림 채널 설정 UI. 2차에서 추가됩니다.' },
+      ],
+    },
+  };
+
+  let currentGroup = 'home';
+  let currentSubByGroup = {};  // group → 마지막 서브탭 id 기억
+
+  function setOpsPane(opsPane) {
+    document.querySelectorAll('#page-ops .ops-pane').forEach(p => {
+      p.classList.toggle('active', p.id === 'ops-pane-' + opsPane);
     });
+  }
+
+  function renderSubNav(groupId) {
+    const bar = document.getElementById('sub-nav');
+    if (!bar) return;
+    const g = NAV_GROUPS[groupId];
+    if (!g || !g.subs.length) { bar.innerHTML = ''; bar.style.display = 'none'; return; }
+    bar.style.display = 'flex';
+    bar.innerHTML = g.subs.map(s => `
+      <button class="sub-tab${s.soon ? ' soon' : ''}" data-sub="${s.id}">
+        ${s.label}${s.soon ? ' <span class="soon-tag">나중에</span>' : ''}
+      </button>
+    `).join('');
+    // 활성 서브탭 표시
+    const activeSub = currentSubByGroup[groupId] || g.subs[0].id;
+    bar.querySelectorAll('.sub-tab').forEach(b => {
+      if (b.dataset.sub === activeSub) b.classList.add('active');
+    });
+  }
+
+  function navGoto(groupId, subId) {
+    const g = NAV_GROUPS[groupId];
+    if (!g) return;
+    // 인증 필요 그룹인데 미로그인 → 로그인 모달
+    if (g.auth && typeof auth !== 'undefined' && !auth.currentUser) {
+      document.getElementById('login-screen').style.display = 'flex';
+      return;
+    }
+    currentGroup = groupId;
+
+    // 1) 상단 그룹 버튼 활성화
+    document.querySelectorAll('.nav-group').forEach(b => {
+      b.classList.toggle('active', b.dataset.group === groupId);
+    });
+
+    // 2) 서브탭 결정
+    let sub = null;
+    if (g.subs.length) {
+      sub = g.subs.find(s => s.id === subId)
+         || g.subs.find(s => s.id === currentSubByGroup[groupId])
+         || g.subs[0];
+      currentSubByGroup[groupId] = sub.id;
+    }
+
+    // 3) 서브 nav 그리기
+    renderSubNav(groupId);
+
+    // 4) 활성 .page 결정
+    const targetPageId = sub ? sub.page : g.defaultPage;
+    document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === targetPageId));
+
+    // 5) ops 내부 pane
+    if (sub && sub.opsPane) setOpsPane(sub.opsPane);
+
+    // 6) page-soon 메시지 커스터마이즈
+    if (targetPageId === 'page-soon') {
+      const t = document.getElementById('soon-title');
+      const d = document.getElementById('soon-desc');
+      if (t) t.textContent = (sub && sub.soonTitle) || '준비 중';
+      if (d) d.textContent = (sub && sub.soonDesc) || '이 기능은 다음 슬라이스에서 추가됩니다.';
+    }
+
+    // 7) 그룹 진입 훅
+    if (g.onEnter) g.onEnter();
+  }
+  // 다른 모듈에서 호출할 수 있게 전역 노출
+  window.navGoto = navGoto;
+
+  // 상단 그룹 버튼 클릭
+  document.getElementById('nav-groups')?.addEventListener('click', e => {
+    const btn = e.target.closest('.nav-group');
+    if (!btn) return;
+    navGoto(btn.dataset.group);
   });
+  // 서브탭 클릭 (이벤트 위임)
+  document.getElementById('sub-nav')?.addEventListener('click', e => {
+    const btn = e.target.closest('.sub-tab');
+    if (!btn) return;
+    navGoto(currentGroup, btn.dataset.sub);
+  });
+  // 초기 진입 — 홈
+  navGoto('home');
 
   /* ═══════════════════════════════════════
      최저가 비교
@@ -996,8 +1128,7 @@
      1차: 실시간, 운영상태, 리플레이(이벤트 타임라인) 활성
      2차: 성과분석, 신호↔잔고 매칭
   ═══════════════════════════════════════ */
-  let opsActiveSub = 'live';
-  let opsReplayKind = '';
+  let opsEventsKind = '';
   let opsLastFetch = { balance: null, runs: null, events: null };
 
   function fmtKRW(n) {
@@ -1020,25 +1151,13 @@
     return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(status||'-')}</span>`;
   }
 
-  // 서브탭 라우팅
-  document.getElementById('ops-subtabs')?.addEventListener('click', e => {
-    const btn = e.target.closest('.ops-subtab');
-    if (!btn) return;
-    opsActiveSub = btn.dataset.sub;
-    document.querySelectorAll('.ops-subtab').forEach(b => b.classList.toggle('active', b === btn));
-    document.querySelectorAll('.ops-pane').forEach(p => p.classList.toggle('active', p.id === 'ops-pane-' + opsActiveSub));
-    if (opsActiveSub === 'replay') renderOpsReplay();
-    if (opsActiveSub === 'status') renderOpsStatus();
-    if (opsActiveSub === 'live') renderOpsLive();
-  });
-
-  // 리플레이 kind 필터
-  document.getElementById('ops-replay-filters')?.addEventListener('click', e => {
+  // 이벤트 로그 kind 필터 (구 '리플레이'에서 분리)
+  document.getElementById('ops-events-filters')?.addEventListener('click', e => {
     const btn = e.target.closest('.ops-chip');
     if (!btn) return;
-    opsReplayKind = btn.dataset.kind || '';
-    document.querySelectorAll('#ops-replay-filters .ops-chip').forEach(b => b.classList.toggle('active', b === btn));
-    renderOpsReplay();
+    opsEventsKind = btn.dataset.kind || '';
+    document.querySelectorAll('#ops-events-filters .ops-chip').forEach(b => b.classList.toggle('active', b === btn));
+    renderOpsEvents();
   });
 
   async function loadOps() {
@@ -1057,7 +1176,7 @@
     }
     renderOpsLive();
     renderOpsStatus();
-    renderOpsReplay();
+    renderOpsEvents();
   }
 
   function renderOpsLive() {
@@ -1207,17 +1326,15 @@
     `).join('');
   }
 
-  function renderOpsReplay() {
-    const el = document.getElementById('ops-replay-timeline');
+  function renderOpsEvents() {
+    const el = document.getElementById('ops-events-timeline');
     if (!el) return;
     const events = ((opsLastFetch.events && opsLastFetch.events.items) || []);
-    const filtered = opsReplayKind ? events.filter(e => e.kind === opsReplayKind) : events;
+    const filtered = opsEventsKind ? events.filter(e => e.kind === opsEventsKind) : events;
     if (!filtered.length) {
       el.innerHTML = '<div class="ops-empty">표시할 이벤트가 없습니다.</div>';
       return;
     }
     el.innerHTML = filtered.map(ev => renderEventRow(ev)).join('');
   }
-
-  // 운영 탭 진입 시 자동 로드
-  document.querySelector('[data-page="ops"]')?.addEventListener('click', loadOps);
+  // 운영 그룹 진입 시 loadOps() 는 NAV_GROUPS.ops.onEnter 에서 호출됨

@@ -52,6 +52,73 @@
       background: rgba(96,165,250,0.06);
     }
 
+    /* ── 2차 sub-nav 바 (그룹별 서브탭) ── */
+    .sub-nav-bar {
+      display: flex;
+      justify-content: center;
+      gap: 6px;
+      padding: 12px 24px 18px;
+      flex-wrap: wrap;
+      border-top: 1px solid rgba(255,255,255,0.04);
+      margin-top: 0;
+      background: rgba(0,0,0,0.18);
+    }
+    .sub-nav-bar:empty { display: none; }
+    .sub-tab {
+      padding: 7px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.02);
+      color: #94a3b8;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.18s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+    }
+    .sub-tab:hover { color: #e2e8f0; border-color: rgba(255,255,255,0.18); }
+    .sub-tab.active {
+      background: linear-gradient(135deg, rgba(99,102,241,0.22), rgba(139,92,246,0.22));
+      border-color: rgba(139,92,246,0.5);
+      color: #e2e8f0;
+    }
+    .sub-tab.soon { opacity: 0.6; }
+    .sub-tab.soon:hover { opacity: 0.8; }
+    .soon-tag {
+      font-size: 0.62rem;
+      padding: 1px 6px;
+      border-radius: 8px;
+      background: rgba(251,191,36,0.12);
+      color: #fbbf24;
+      border: 1px solid rgba(251,191,36,0.3);
+      font-weight: 700;
+    }
+
+    /* ── 홈 랜딩 카드 ── */
+    .home-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    .home-card {
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(255,255,255,0.07);
+      border-radius: 16px;
+      padding: 24px 20px;
+      transition: transform 0.18s, border-color 0.18s, background 0.18s;
+    }
+    .home-card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(139,92,246,0.4);
+      background: rgba(255,255,255,0.05);
+    }
+    .home-card-icon { font-size: 2rem; margin-bottom: 10px; }
+    .home-card-title { font-size: 1.05rem; font-weight: 700; color: #e2e8f0; margin-bottom: 6px; }
+    .home-card-desc { font-size: 0.8rem; color: #94a3b8; line-height: 1.6; }
+
     /* ── 페이지 섹션 ── */
     .page { display: none; }
     .page.active { display: block; }

@@ -32,23 +32,56 @@
     <button id="logout-btn" onclick="doLogout()" style="display:none;padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.75rem;cursor:pointer;">로그아웃</button>
   </div>
   <h1>🌐 스마트 허브</h1>
-  <p>최저가 비교 · 일자별 뉴스 요약 서비스</p>
-  <nav class="nav-tabs">
-    <!-- 공개 탭 -->
-    <button class="nav-tab active" data-page="price">🔍 최저가 비교</button>
-    <button class="nav-tab" data-page="news">📰 일자별 뉴스 요약</button>
-    <button class="nav-tab" data-page="realestate">🏠 아파트 실거래가</button>
-    <button class="nav-tab" data-page="unit">📐 단위 변환기</button>
-    <!-- 로그인 필요 탭 (auth-tab 클래스로 숨김/표시) -->
-    <button class="nav-tab auth-tab" data-page="ops" style="display:none">📊 운영</button>
-    <button class="nav-tab auth-tab" data-page="ainews" style="display:none">🤖 AI 뉴스 요약</button>
-    <button class="nav-tab auth-tab" data-page="stock" style="display:none">📈 주식 추천</button>
-    <button class="nav-tab auth-tab" data-page="admin" id="adminTab" style="display:none">⚙️ 관리</button>
+  <p>자산 운영 · 시장 리서치 · 생활 도구</p>
+  <!-- ── 1차 nav: 그룹 4종 (홈/도구는 public, 운영/리서치/관리는 auth) ── -->
+  <nav class="nav-tabs" id="nav-groups">
+    <button class="nav-tab nav-group" data-group="home">🏠 홈</button>
+    <button class="nav-tab nav-group nav-group-auth" data-group="ops" style="display:none">📊 운영</button>
+    <button class="nav-tab nav-group nav-group-auth" data-group="research" style="display:none">🔬 리서치</button>
+    <button class="nav-tab nav-group" data-group="tools">🧰 도구</button>
+    <button class="nav-tab nav-group nav-group-auth nav-group-admin" data-group="admin" style="display:none">⚙️ 관리</button>
   </nav>
+  <!-- ── 2차 sub-nav: 활성 그룹의 서브탭이 동적으로 채워짐 ── -->
+  <div class="sub-nav-bar" id="sub-nav"></div>
 </header>
 
+<!-- ══════════════ 🏠 홈 (랜딩) ══════════════ -->
+<div class="page active" id="page-home">
+  <div style="max-width:880px;margin:48px auto;padding:0 24px;text-align:center;">
+    <div style="font-size:3rem;margin-bottom:18px;">🌐</div>
+    <h2 style="font-size:1.6rem;font-weight:700;background:linear-gradient(90deg,#60a5fa,#a78bfa,#f472b6);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:12px;">스마트 허브에 오신 걸 환영합니다</h2>
+    <p style="color:#94a3b8;font-size:0.95rem;line-height:1.7;margin-bottom:32px;">자산 운영 대시보드 · 시장 리서치 · 생활 편의 도구를 한 곳에서.</p>
+    <div class="home-cards">
+      <div class="home-card">
+        <div class="home-card-icon">📊</div>
+        <div class="home-card-title">운영</div>
+        <div class="home-card-desc">잔고/신호/워크플로 실시간 상태. <span style="color:#475569;">로그인 필요</span></div>
+      </div>
+      <div class="home-card">
+        <div class="home-card-icon">🔬</div>
+        <div class="home-card-title">리서치</div>
+        <div class="home-card-desc">AI 뉴스 요약, 주식 추천, 종목 분석. <span style="color:#475569;">로그인 필요</span></div>
+      </div>
+      <div class="home-card" onclick="navGoto('tools','price')" style="cursor:pointer;">
+        <div class="home-card-icon">🧰</div>
+        <div class="home-card-title">도구</div>
+        <div class="home-card-desc">최저가 비교 · 아파트 실거래가 · 단위 변환</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ 🚧 공용 placeholder (나중에) ══════════════ -->
+<div class="page" id="page-soon">
+  <div style="max-width:680px;margin:64px auto;padding:0 24px;text-align:center;">
+    <div style="font-size:3rem;margin-bottom:14px;">🚧</div>
+    <h2 id="soon-title" style="color:#e2e8f0;font-size:1.3rem;font-weight:700;margin-bottom:10px;">준비 중</h2>
+    <p id="soon-desc" style="color:#94a3b8;font-size:0.92rem;line-height:1.7;">이 기능은 다음 슬라이스에서 추가됩니다.</p>
+  </div>
+</div>
+
 <!-- ══════════════ 최저가 비교 페이지 ══════════════ -->
-<div class="page active" id="page-price">
+<div class="page" id="page-price">
   <div class="search-wrap">
     <input id="queryInput" type="text" placeholder="검색할 모델명을 입력하세요 (예: 갤럭시 S24, 맥북 프로 14)" />
     <button id="searchBtn" onclick="doSearch()">검색</button>
@@ -197,16 +230,11 @@
 </div>
 
 <!-- ══════════════ 📊 운영 대시보드 ══════════════ -->
+<!-- 내부 ops-subtabs 제거: 상단 sub-nav 가 ops-pane-* 를 직접 활성화함 -->
 <div class="page" id="page-ops">
   <div style="max-width:1080px;margin:24px auto;padding:0 24px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;flex-wrap:wrap;gap:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
       <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">📊 자산/신호 운영</h2>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;" id="ops-subtabs">
-        <button class="ops-subtab active" data-sub="live">🟢 실시간</button>
-        <button class="ops-subtab" data-sub="perf">📈 성과분석</button>
-        <button class="ops-subtab" data-sub="replay">⏮ 리플레이</button>
-        <button class="ops-subtab" data-sub="status">⚙️ 운영상태</button>
-      </div>
       <button onclick="loadOps()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.78rem;cursor:pointer;">새로고침</button>
     </div>
 
@@ -221,7 +249,27 @@
       </div>
     </section>
 
-    <!-- 📈 성과분석 (placeholder) -->
+    <!-- ⚙️ 운영상태 -->
+    <section class="ops-pane" id="ops-pane-status">
+      <div id="ops-status-grid" class="ops-cards"></div>
+      <div style="margin-top:18px;">
+        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 워크플로 실행</div>
+        <div id="ops-status-runs"></div>
+      </div>
+    </section>
+
+    <!-- 📜 이벤트 로그 (이전 '리플레이'의 타임라인 뷰) -->
+    <section class="ops-pane" id="ops-pane-events">
+      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" id="ops-events-filters">
+        <button class="ops-chip active" data-kind="">전체</button>
+        <button class="ops-chip" data-kind="balance">balance</button>
+        <button class="ops-chip" data-kind="workflow_run">workflow_run</button>
+        <button class="ops-chip" data-kind="event">event</button>
+      </div>
+      <div id="ops-events-timeline"></div>
+    </section>
+
+    <!-- 📈 성과분석 (나중에) -->
     <section class="ops-pane" id="ops-pane-perf">
       <div class="ops-empty" style="padding:48px 24px;">
         <div style="font-size:2rem;margin-bottom:8px;">🚧</div>
@@ -230,23 +278,12 @@
       </div>
     </section>
 
-    <!-- ⏮ 리플레이 — 1차는 이벤트 타임라인 -->
+    <!-- ⏮ 리플레이 (나중에 — 신호 시점 → 결과 매칭 재생) -->
     <section class="ops-pane" id="ops-pane-replay">
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" id="ops-replay-filters">
-        <button class="ops-chip active" data-kind="">전체</button>
-        <button class="ops-chip" data-kind="balance">balance</button>
-        <button class="ops-chip" data-kind="workflow_run">workflow_run</button>
-        <button class="ops-chip" data-kind="event">event</button>
-      </div>
-      <div id="ops-replay-timeline"></div>
-    </section>
-
-    <!-- ⚙️ 운영상태 -->
-    <section class="ops-pane" id="ops-pane-status">
-      <div id="ops-status-grid" class="ops-cards"></div>
-      <div style="margin-top:18px;">
-        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 워크플로 실행</div>
-        <div id="ops-status-runs"></div>
+      <div class="ops-empty" style="padding:48px 24px;">
+        <div style="font-size:2rem;margin-bottom:8px;">🚧</div>
+        <div style="color:#94a3b8;">리플레이는 2차 슬라이스에 추가됩니다.</div>
+        <div style="color:#475569;font-size:0.78rem;margin-top:6px;">신호 발생 시점부터 후속 잔고 변화를 시간순 재생</div>
       </div>
     </section>
   </div>
@@ -361,50 +398,38 @@
   }
 
   function showAuthUI(loggedIn, email, role) {
-    const loginBtn = document.getElementById('login-toggle-btn');
+    const loginBtn  = document.getElementById('login-toggle-btn');
     const logoutBtn = document.getElementById('logout-btn');
-    const emailEl = document.getElementById('user-email');
-    const authTabs = document.querySelectorAll('.auth-tab');
-    const adminTab = document.getElementById('adminTab');
+    const emailEl   = document.getElementById('user-email');
+    const authGroups = document.querySelectorAll('.nav-group-auth');
 
     if (loggedIn) {
-      loginBtn.style.display = 'none';
+      loginBtn.style.display  = 'none';
       logoutBtn.style.display = 'inline-block';
-      emailEl.textContent = email;
-      authTabs.forEach(t => {
-        if (t.id === 'adminTab') {
+      emailEl.textContent     = email;
+      authGroups.forEach(t => {
+        if (t.classList.contains('nav-group-admin')) {
           t.style.display = role === 'admin' ? 'inline-block' : 'none';
         } else {
           t.style.display = 'inline-block';
         }
       });
-      // 로그인 사용자 첫 진입 시 자동으로 📊 운영 탭으로 이동
-      // (이미 운영이 아닌 다른 인증 탭에 있다면 그대로 둠)
+      // 로그인 직후 — 홈/도구 같은 public 화면에 있었다면 운영으로 자동 진입
       const active = document.querySelector('.page.active');
-      const isFreshLanding = !active || active.id === 'page-price';
-      if (isFreshLanding) {
-        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        const opsTab = document.querySelector('[data-page="ops"]');
-        const opsPage = document.getElementById('page-ops');
-        if (opsTab && opsPage) {
-          opsTab.classList.add('active');
-          opsPage.classList.add('active');
-          if (typeof loadOps === 'function') loadOps();
-        }
+      const publicLanding = !active || ['page-home','page-price','page-realestate','page-unit','page-news'].includes(active.id);
+      if (publicLanding && typeof navGoto === 'function') {
+        navGoto('ops', 'live');
       }
     } else {
-      loginBtn.style.display = 'inline-block';
+      loginBtn.style.display  = 'inline-block';
       logoutBtn.style.display = 'none';
-      emailEl.textContent = '';
-      authTabs.forEach(t => t.style.display = 'none');
-      // 로그인 필요 페이지에 있으면 공개 탭으로 이동
+      emailEl.textContent     = '';
+      authGroups.forEach(t => t.style.display = 'none');
+      // 로그아웃 시 인증 페이지에 있으면 홈으로 이동
       const activePage = document.querySelector('.page.active');
-      if (activePage && ['page-ops','page-ainews','page-stock','page-admin'].includes(activePage.id)) {
-        document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-        document.querySelector('[data-page="price"]').classList.add('active');
-        document.getElementById('page-price').classList.add('active');
+      const authPages = ['page-ops','page-ainews','page-stock','page-admin','page-soon'];
+      if (activePage && authPages.includes(activePage.id) && typeof navGoto === 'function') {
+        navGoto('home');
       }
     }
   }
