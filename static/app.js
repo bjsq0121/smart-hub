@@ -88,7 +88,8 @@
       label: '⚙️ 관리',
       auth: true,
       subs: [
-        { id: 'invite',  label: '👥 초대 관리', page: 'page-admin' },
+        { id: 'invite',  label: '👥 초대 관리', page: 'page-admin',
+          onActivate: () => { if (typeof loadInviteList === 'function') loadInviteList(); } },
         { id: 'account', label: '🔑 계정/권한', page: 'page-soon', soon: true,
           soonTitle: '계정/권한', soonDesc: '역할 기반 권한 관리(RBAC). 2차에서 추가됩니다.' },
         { id: 'sys',     label: '🛠 시스템 설정', page: 'page-soon', soon: true,
@@ -166,8 +167,9 @@
       if (d) d.textContent = (sub && sub.soonDesc) || '이 기능은 다음 슬라이스에서 추가됩니다.';
     }
 
-    // 7) 그룹 진입 훅
+    // 7) 그룹 진입 훅 + 서브탭 활성화 훅
     if (g.onEnter) g.onEnter();
+    if (sub && sub.onActivate) sub.onActivate();
   }
   // 다른 모듈에서 호출할 수 있게 전역 노출
   window.navGoto = navGoto;
@@ -374,10 +376,8 @@
     newsResults.innerHTML = html;
   }
 
-  // 뉴스 탭 활성화 시 자동 로드
-  document.querySelector('[data-page="news"]').addEventListener('click', () => {
-    if (!newsResults.innerHTML.trim()) loadNews();
-  });
+  // 뉴스 페이지는 1차 nav 에서 숨김 — 자동 로드 트리거 제거.
+  // (page-news DOM/loadNews 함수는 보존, 나중에 sub-tab 추가 시 onActivate 로 재연결)
 
   /* ═══════════════════════════════════════
      부동산 실거래가
@@ -794,17 +794,17 @@
     unitDoConvert();
   });
 
-  document.querySelector('[data-page="unit"]').addEventListener('click', () => {
-    if (!unitTabsEl.innerHTML.trim()) {
-      unitBuildTabs();
-      const init = UNIT_CATEGORIES[unitCurrentCat];
-      unitBuildOptions(unitFromEl, init.units, init.labels, init.units[0]);
-      unitBuildOptions(unitToEl,   init.units, init.labels, init.units[1]);
-      unitFromInput.value = "1";
-      unitDoConvert();
-      unitBuildQuickRef();
-    }
-  });
+  // 단위 변환기 — 즉시 초기화 (이전엔 nav 클릭 lazy 였으나 nav 재구성으로 셀렉터 무효화됨)
+  (function initUnitConverter() {
+    if (!unitTabsEl) return;
+    unitBuildTabs();
+    const init = UNIT_CATEGORIES[unitCurrentCat];
+    unitBuildOptions(unitFromEl, init.units, init.labels, init.units[0]);
+    unitBuildOptions(unitToEl,   init.units, init.labels, init.units[1]);
+    unitFromInput.value = "1";
+    unitDoConvert();
+    unitBuildQuickRef();
+  })();
 
   /* ═══════════════════════════════════════
      AI 뉴스 요약

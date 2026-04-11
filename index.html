@@ -561,10 +561,7 @@
     loadInviteList();
   }
 
-  // 관리 탭 클릭 시 목록 로드
-  document.querySelector('[data-page="admin"]')?.addEventListener('click', () => {
-    loadInviteList();
-  });
+  // 관리 → 초대 관리 진입 시 자동 로드는 NAV_GROUPS.admin.subs[invite].onActivate 에서 처리
 </script>
 
 </body>
