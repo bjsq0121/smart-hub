@@ -1153,10 +1153,20 @@
     if (min < 1440) return Math.floor(min/60) + '시간 ' + (min%60) + '분';
     return Math.floor(min/1440) + '일 ' + Math.floor((min%1440)/60) + '시간';
   }
+  // syncStatus 전용 뱃지 (ok/partial/failed — 동기화 상태)
   function syncBadge(status) {
     const map = { ok:'#34d399', partial:'#fbbf24', failed:'#f87171' };
     const c = map[status] || '#64748b';
     return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(status||'-')}</span>`;
+  }
+  // signal/paper_trade 상태 전용 뱃지 (candidate/entered/expired/open/closed 등)
+  function itemStatusBadge(status) {
+    const map = {
+      candidate:['#60a5fa','후보'], entered:['#a78bfa','진입'], expired:['#64748b','만료'],
+      rejected:['#f87171','거절'], open:['#fbbf24','진행 중'], closed:['#94a3b8','종료'],
+    };
+    const [c, label] = map[status] || ['#64748b', status || '-'];
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
   }
   function pnlColor(pct) { return pct > 0 ? '#34d399' : pct < 0 ? '#f87171' : '#64748b'; }
   function resultBadge(r) {
@@ -1169,11 +1179,40 @@
     const [c, label] = map[s] || ['#64748b', s || '-'];
     return `<span style="display:inline-block;padding:4px 14px;border-radius:12px;font-size:0.85rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
   }
+  // 빈 화면 구분 메시지
+  function emptyState(type, extra) {
+    const msgs = {
+      noData:    ['📭', '데이터 없음', extra || 'n8n에서 해당 kind를 보내면 여기에 표시됩니다.'],
+      noIndex:   ['🔧', '인덱스 필요', extra || 'Firestore에 복합 인덱스를 생성해야 합니다. 콘솔 에러를 확인하세요.'],
+      authFail:  ['🔒', '인증 실패', extra || '로그인 세션이 만료되었거나 권한이 없습니다. 다시 로그인하세요.'],
+      apiFail:   ['⚠️', 'API 오류', extra || '서버 응답을 받지 못했습니다. 잠시 후 새로고침하세요.'],
+    };
+    const [icon, title, desc] = msgs[type] || msgs.noData;
+    return `<div class="ops-empty"><div style="font-size:1.6rem;margin-bottom:6px;">${icon}</div><div style="color:#e2e8f0;font-weight:600;margin-bottom:4px;">${title}</div><div>${desc}</div></div>`;
+  }
+  // API 응답 상태 분석 — 빈 화면 구분용
+  function diagnose(data) {
+    if (!data) return 'apiFail';
+    if (data.error) {
+      if (/인증|토큰|401/i.test(data.error)) return 'authFail';
+      if (/인덱스|index/i.test(data.error)) return 'noIndex';
+      return 'apiFail';
+    }
+    return null; // 정상
+  }
 
-  // ── loadOps: 5개 API 병렬 호출 ──
+  // ── loadOps: 5개 API 병렬 호출 (HTTP 상태 코드 캡처) ──
   async function loadOps() {
     const hdrs = await authHeaders();
-    const safe = (p) => p.then(r => r.json()).catch(() => ({}));
+    async function safe(p) {
+      try {
+        const r = await p;
+        const body = await r.json().catch(() => ({}));
+        if (r.status === 401) return { error: '인증 실패 (401)' };
+        if (!r.ok) return { error: body.detail || body.error || `HTTP ${r.status}` };
+        return body;
+      } catch (e) { return { error: '네트워크 오류' }; }
+    }
     try {
       const [sig, tr, res, perf, sys] = await Promise.all([
         safe(fetch('/api/signals?limit=50',           { headers: hdrs })),
@@ -1196,12 +1235,15 @@
   // ── 1. 신호 후보 ──
   function renderSignals() {
     const el = document.getElementById('ops-signals-content'); if (!el) return;
-    const items = (opsData.signals && opsData.signals.items) || [];
-    if (!items.length) { el.innerHTML = '<div class="ops-empty">후보 신호가 없습니다. n8n에서 kind=signal 로 보내면 여기에 나타납니다.</div>'; return; }
+    const d = opsData.signals || {};
+    const diag = diagnose(d);
+    if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
+    const items = d.items || [];
+    if (!items.length) { el.innerHTML = emptyState('noData', 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>점수</th><th>사유</th><th>진입 후보가</th><th>손절 기준</th><th>방향</th><th>상태</th><th>시각</th></tr></thead>
+          <thead><tr><th>종목</th><th>점수</th><th>사유</th><th>진입 후보가</th><th>손절 기준</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
           <tbody>${items.map(s => {
             const scoreCls = s.score >= 70 ? 'color:#34d399' : s.score >= 40 ? 'color:#fbbf24' : 'color:#f87171';
             return `<tr>
@@ -1211,7 +1253,7 @@
               <td>${fmtKRW(s.entryPrice)}</td>
               <td>${fmtKRW(s.stopLoss)}</td>
               <td>${s.direction === 'long' ? '<span style="color:#34d399;">Long</span>' : '<span style="color:#f87171;">Short</span>'}</td>
-              <td>${syncBadge(s.status)}</td>
+              <td>${itemStatusBadge(s.status)}</td>
               <td style="font-size:0.72rem;color:#475569;">${fmtRel(s.created_at)}</td>
             </tr>`}).join('')}
           </tbody>
@@ -1222,12 +1264,15 @@
   // ── 2. 검증 중 (paper trade) ──
   function renderTrades() {
     const el = document.getElementById('ops-trades-content'); if (!el) return;
-    const items = (opsData.trades && opsData.trades.items) || [];
-    if (!items.length) { el.innerHTML = '<div class="ops-empty">진행 중인 paper trade가 없습니다.</div>'; return; }
+    const d = opsData.trades || {};
+    const diag = diagnose(d);
+    if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
+    const items = d.items || [];
+    if (!items.length) { el.innerHTML = emptyState('noData', '진행 중인 paper trade가 없습니다.'); return; }
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대 유리</th><th>최대 불리</th><th>보유 시간</th><th>상태</th></tr></thead>
+          <thead><tr><th>종목</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대유리</th><th>최대불리</th><th>보유시간</th><th>상태</th><th>진입</th><th>갱신</th></tr></thead>
           <tbody>${items.map(t => `<tr>
             <td style="font-weight:700;color:#e2e8f0;">${esc(t.symbol)}</td>
             <td>${fmtKRW(t.entryPrice)}</td>
@@ -1236,7 +1281,9 @@
             <td style="color:#34d399;">${fmtPct(t.maxFavorable)}</td>
             <td style="color:#f87171;">${fmtPct(t.maxAdverse)}</td>
             <td>${fmtHold(t.holdTimeMin)}</td>
-            <td>${syncBadge(t.status)}</td>
+            <td>${itemStatusBadge(t.status)}</td>
+            <td style="font-size:0.72rem;color:#475569;">${fmtRel(t.created_at)}</td>
+            <td style="font-size:0.72rem;color:#60a5fa;">${fmtRel(t.updated_at)}</td>
           </tr>`).join('')}
           </tbody>
         </table>
@@ -1246,8 +1293,11 @@
   // ── 3. 종료 결과 ──
   function renderResults() {
     const el = document.getElementById('ops-results-content'); if (!el) return;
-    const items = (opsData.results && opsData.results.items) || [];
-    if (!items.length) { el.innerHTML = '<div class="ops-empty">종료된 trade가 없습니다.</div>'; return; }
+    const d = opsData.results || {};
+    const diag = diagnose(d);
+    if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
+    const items = d.items || [];
+    if (!items.length) { el.innerHTML = emptyState('noData', '종료된 trade가 없습니다.'); return; }
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
@@ -1269,8 +1319,12 @@
   // ── 4. 성과 요약 ──
   function renderPerf() {
     const el = document.getElementById('ops-perf-content'); if (!el) return;
-    const p = opsData.perf || {};
-    if (!p.total) { el.innerHTML = '<div class="ops-empty">성과 데이터가 없습니다. trade 결과가 쌓이면 자동 계산됩니다.</div>'; return; }
+    const d = opsData.perf || {};
+    const diag = diagnose(d);
+    if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
+    if (!d.total) { el.innerHTML = emptyState('noData', 'trade 결과가 쌓이면 자동 계산됩니다.'); return; }
+    const p = d;
+    const safeRatio = (v) => (v == null || !isFinite(v)) ? '0' : String(v);
     const expectColor = p.expectation > 0 ? '#34d399' : p.expectation < 0 ? '#f87171' : '#64748b';
     el.innerHTML = `
       <div class="ops-cards">
@@ -1281,8 +1335,8 @@
         </div>
         <div class="ops-card">
           <div class="ops-card-label">평균 손익비</div>
-          <div class="ops-card-value">${p.avgPnlRatio === Infinity ? '∞' : p.avgPnlRatio}</div>
-          <div class="ops-card-sub">평균 수익 ${fmtPct(p.avgWinPercent)} / 평균 손실 -${p.avgLossPercent}%</div>
+          <div class="ops-card-value">${safeRatio(p.avgPnlRatio)}</div>
+          <div class="ops-card-sub">평균 수익 ${fmtPct(p.avgWinPercent)} / 평균 손실 -${p.avgLossPercent || 0}%</div>
         </div>
         <div class="ops-card">
           <div class="ops-card-label">기대값</div>
@@ -1291,42 +1345,46 @@
         </div>
         <div class="ops-card">
           <div class="ops-card-label">최대 연속손실</div>
-          <div class="ops-card-value" style="color:#f87171;">${p.maxConsecutiveLoss}</div>
+          <div class="ops-card-value" style="color:#f87171;">${p.maxConsecutiveLoss || 0}</div>
           <div class="ops-card-sub">연속 패배 횟수</div>
         </div>
         <div class="ops-card">
           <div class="ops-card-label">최대낙폭</div>
-          <div class="ops-card-value" style="color:#f87171;">${p.maxDrawdownPercent}%</div>
+          <div class="ops-card-value" style="color:#f87171;">${p.maxDrawdownPercent || 0}%</div>
           <div class="ops-card-sub">누적 PnL 고점 대비</div>
         </div>
       </div>`;
   }
 
-  // ── 5. 시스템 상태 (시스템 + 잔고 + 워크플로) ──
+  // ── 5. 시스템 상태 (시스템 + 잔고 + 워크플로 + 실패 이력) ──
   function renderSystem() {
     const el = document.getElementById('ops-system-content'); if (!el) return;
     const d = opsData.system || {};
+    const diag = diagnose(d);
+    if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
+
     const sys = d.system;
     const bal = d.balance;
     const wfs = d.workflows || [];
 
     let html = '';
 
-    // 시스템 상태 뱃지
+    // 시스템 상태 뱃지 + 실패 이유
     html += `<div class="ops-cards" style="margin-bottom:16px;">
       <div class="ops-card" style="grid-column:1/-1;">
         <div class="ops-card-label">시스템 상태</div>
         <div style="display:flex;gap:12px;align-items:center;margin-top:6px;">
           ${sys ? sysStatusBadge(sys.status) : sysStatusBadge('normal')}
-          <span style="color:#94a3b8;font-size:0.85rem;">${sys ? esc(sys.reason) : '상태 정보 없음 (kind=system_status 미수신)'}</span>
+          <span style="color:#94a3b8;font-size:0.85rem;">${sys ? esc(sys.reason) : '상태 정보 없음 — kind=system_status 를 보내면 반영됩니다.'}</span>
         </div>
-        ${sys && sys.lastSyncFailure ? `<div style="margin-top:8px;font-size:0.78rem;color:#f87171;">동기화 실패: ${esc(sys.lastSyncFailure)}</div>` : ''}
-        ${sys && sys.lastCollectFailure ? `<div style="font-size:0.78rem;color:#f87171;">수집 실패: ${esc(sys.lastCollectFailure)}</div>` : ''}
-        ${sys && sys.updated_at ? `<div style="font-size:0.72rem;color:#475569;margin-top:4px;">마지막 업데이트 ${fmtRel(sys.updated_at)}</div>` : ''}
+        ${sys && sys.lastSyncFailure ? `<div style="margin-top:10px;padding:8px 12px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;font-size:0.78rem;color:#f87171;"><strong>동기화 실패:</strong> ${esc(sys.lastSyncFailure)}</div>` : ''}
+        ${sys && sys.lastCollectFailure ? `<div style="margin-top:6px;padding:8px 12px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;font-size:0.78rem;color:#f87171;"><strong>수집 실패:</strong> ${esc(sys.lastCollectFailure)}</div>` : ''}
+        ${sys && sys.updated_at ? `<div style="font-size:0.72rem;color:#475569;margin-top:8px;">마지막 상태 업데이트: ${fmtRel(sys.updated_at)}</div>` : ''}
       </div>
     </div>`;
 
     // 잔고 카드 (cashKRW / totalCostKRW 분리)
+    html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">잔고 (원가 기준)</div>';
     html += '<div class="ops-cards" style="margin-bottom:16px;">';
     if (bal) {
       const coinCost = Number(bal.totalCostKRW) || 0;
@@ -1335,7 +1393,7 @@
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
           <div class="ops-card-value">${fmtKRW(cash)}</div>
-          <div class="ops-card-sub">${cash > 0 ? '계좌 미투입 잔고' : '0원'}</div>
+          <div class="ops-card-sub">${cash > 0 ? '계좌 미투입 잔고' : '0원'} · ${syncBadge(bal.syncStatus)}</div>
         </div>
         <div class="ops-card">
           <div class="ops-card-label">📊 코인 원가</div>
@@ -1345,29 +1403,46 @@
         <div class="ops-card ops-card-sum">
           <div class="ops-card-label">🟰 추정 합계</div>
           <div class="ops-card-value">${fmtKRW(coinCost + cash)}</div>
-          <div class="ops-card-sub">코인 원가 + 현금 · ${fmtRel(bal.created_at)}</div>
+          <div class="ops-card-sub">코인 원가 + 현금</div>
         </div>`;
+      html += `<div class="ops-meta-line" style="grid-column:1/-1;">
+        🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}
+        ${bal.errorType ? ` · <span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
+      </div>`;
     } else {
-      html += '<div class="ops-card" style="grid-column:1/-1;"><div class="ops-card-label">잔고</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">balance webhook 대기 중</div></div>';
+      html += `<div class="ops-card" style="grid-column:1/-1;">${emptyState('noData', 'balance webhook 대기 중')}</div>`;
     }
     html += '</div>';
 
-    // 워크플로 상태
+    // 워크플로 상태 (최근 실패 강조)
+    html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">워크플로 상태</div>';
     if (wfs.length) {
-      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">워크플로 상태</div>';
+      const failed = wfs.filter(r => r.status === 'failed');
+      if (failed.length) {
+        html += `<div style="padding:8px 12px;background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.2);border-radius:8px;margin-bottom:10px;font-size:0.78rem;color:#f87171;">
+          <strong>${failed.length}개 워크플로 실패</strong>: ${failed.map(f => esc(f.workflow || '?')).join(', ')}
+          ${failed[0].errorType ? ` (${esc(failed[0].errorType)})` : ''}
+        </div>`;
+      }
       html += wfs.map(r => `
         <div class="ops-event-row">
           <div class="ops-event-dot" style="background:${r.status==='ok'?'#34d399':r.status==='failed'?'#f87171':'#fbbf24'};"></div>
           <div style="flex:1;min-width:0;">
-            <span style="font-weight:600;color:#e2e8f0;">${esc(r.workflow || '(unknown)')}</span>
-            ${syncBadge(r.status)}
-            ${r.errorType ? `<span style="font-size:0.7rem;color:#f87171;"> ${esc(r.errorType)}</span>` : ''}
-            <span style="font-size:0.72rem;color:#475569;margin-left:8px;">${fmtRel(r.created_at)}</span>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+              <span style="font-weight:600;color:#e2e8f0;">${esc(r.workflow || '(unknown)')}</span>
+              ${syncBadge(r.status)}
+              ${r.errorType ? `<span style="font-size:0.7rem;color:#f87171;">${esc(r.errorType)}</span>` : ''}
+            </div>
+            <div style="font-size:0.72rem;color:#475569;margin-top:2px;">
+              마지막 실행 ${fmtRel(r.created_at)}
+              ${r.durationMs != null ? ' · ' + r.durationMs + 'ms' : ''}
+              ${r.eventCount ? ' · ' + r.eventCount + '건' : ''}
+            </div>
           </div>
         </div>
       `).join('');
     } else {
-      html += '<div class="ops-empty">워크플로 실행 기록이 없습니다.</div>';
+      html += emptyState('noData', '워크플로 실행 기록이 없습니다.');
     }
 
     el.innerHTML = html;

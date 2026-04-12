@@ -1204,13 +1204,17 @@ async def webhook_ingest(env: IngestEnvelope):
             norm = _normalize_paper_trade(env.payload)
             trade_id = norm.get("tradeId") or event_doc.id
             ref = db.collection("paper_trades").document(trade_id)
-            ref.set({
+            existing = ref.get()
+            write_data = {
                 **norm,
                 "source": env.source, "workflow": env.workflow,
                 "syncStatus": env.syncStatus, "errorType": env.errorType,
                 "occurredAt": env.occurredAt, "eventId": event_doc.id,
-                "created_at": _firestore.SERVER_TIMESTAMP,
-            }, merge=True)
+                "updated_at": _firestore.SERVER_TIMESTAMP,
+            }
+            if not existing.exists:
+                write_data["created_at"] = _firestore.SERVER_TIMESTAMP
+            ref.set(write_data, merge=True)
         elif env.kind == "trade_result":
             norm = _normalize_trade_result(env.payload)
             ref = db.collection("trade_results").document()
@@ -1242,8 +1246,9 @@ async def webhook_ingest(env: IngestEnvelope):
 def _doc_to_dict(doc) -> dict:
     d = doc.to_dict() or {}
     d["id"] = doc.id
-    if d.get("created_at") and hasattr(d["created_at"], "isoformat"):
-        d["created_at"] = d["created_at"].isoformat()
+    for ts_key in ("created_at", "updated_at"):
+        if d.get(ts_key) and hasattr(d[ts_key], "isoformat"):
+            d[ts_key] = d[ts_key].isoformat()
     return d
 
 
@@ -1386,7 +1391,7 @@ async def api_performance(
 
         avg_win = sum(r.get("pnlPercent", 0) for r in wins) / len(wins) if wins else 0
         avg_loss = sum(abs(r.get("pnlPercent", 0)) for r in losses) / len(losses) if losses else 0
-        avg_pnl_ratio = avg_win / avg_loss if avg_loss > 0 else float("inf") if avg_win > 0 else 0
+        avg_pnl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
 
         expectation = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
 
