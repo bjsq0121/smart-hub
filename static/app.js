@@ -176,6 +176,9 @@
   }
   // 다른 모듈에서 호출할 수 있게 전역 노출
   window.navGoto = navGoto;
+  window.setSignalFilter = (v) => { opsSignalFilter = v; renderSignals(); };
+  window.setResultFilter = (v) => { opsResultFilter = v; renderResults(); };
+  window.setPerfCount = (v) => { opsPerfCount = v; loadOps(); };
 
   // 상단 그룹 버튼 클릭
   document.getElementById('nav-groups')?.addEventListener('click', e => {
@@ -1131,6 +1134,13 @@
      신호 / 검증 중 / 결과 / 성과 / 시스템
   ═══════════════════════════════════════ */
   let opsData = {};
+  let opsLastLoadTime = null;
+  let opsAutoRefreshTimer = null;
+  let opsPerfCount = 50;          // 성과 20/50 토글
+  let opsSignalFilter = '';       // 신호 종목 필터
+  let opsResultFilter = '';       // 결과 W/L 필터
+  const OPS_STALE_MS = 5 * 60 * 1000; // 5분
+  const OPS_REFRESH_MS = 30 * 1000;   // 30초
 
   function fmtKRW(n) {
     if (n == null || isNaN(n)) return '-';
@@ -1201,7 +1211,7 @@
     return null; // 정상
   }
 
-  // ── loadOps: 5개 API 병렬 호출 (HTTP 상태 코드 캡처) ──
+  // ── loadOps: 5개 API 병렬 호출 + 갱신 시각 + stale 경고 + 자동 새로고침 ──
   async function loadOps() {
     const hdrs = await authHeaders();
     async function safe(p) {
@@ -1215,32 +1225,75 @@
     }
     try {
       const [sig, tr, res, perf, sys] = await Promise.all([
-        safe(fetch('/api/signals?limit=50',           { headers: hdrs })),
-        safe(fetch('/api/paper-trades?status=open',   { headers: hdrs })),
-        safe(fetch('/api/trade-results?limit=100',    { headers: hdrs })),
-        safe(fetch('/api/performance?count=50',       { headers: hdrs })),
-        safe(fetch('/api/system-status',              { headers: hdrs })),
+        safe(fetch('/api/signals?limit=50',                    { headers: hdrs })),
+        safe(fetch('/api/paper-trades?status=open',            { headers: hdrs })),
+        safe(fetch('/api/trade-results?limit=100',             { headers: hdrs })),
+        safe(fetch('/api/performance?count=' + opsPerfCount,   { headers: hdrs })),
+        safe(fetch('/api/system-status',                       { headers: hdrs })),
       ]);
       opsData = { signals: sig, trades: tr, results: res, perf, system: sys };
     } catch (e) {
       opsData = {};
     }
+    opsLastLoadTime = Date.now();
+    updateOpsTimestamp();
     renderSignals();
     renderTrades();
     renderResults();
     renderPerf();
     renderSystem();
+    startOpsAutoRefresh();
   }
 
-  // ── 1. 신호 후보 ──
+  function updateOpsTimestamp() {
+    const el = document.getElementById('ops-last-update');
+    const warn = document.getElementById('ops-stale-warning');
+    if (el && opsLastLoadTime) {
+      el.textContent = '갱신 ' + new Date(opsLastLoadTime).toLocaleTimeString('ko-KR');
+    }
+    if (warn) {
+      if (opsLastLoadTime && (Date.now() - opsLastLoadTime > OPS_STALE_MS)) {
+        warn.style.display = 'block';
+        warn.className = 'ops-banner';
+        warn.innerHTML = `<span class="ops-banner-pill" style="background:rgba(248,113,113,0.18);color:#f87171;">STALE</span>
+          <span class="ops-banner-text">마지막 갱신이 5분 이상 경과했습니다. 자동 새로고침이 동작 중이 아니거나 네트워크 문제일 수 있습니다.</span>`;
+      } else {
+        warn.style.display = 'none';
+      }
+    }
+  }
+
+  function startOpsAutoRefresh() {
+    if (opsAutoRefreshTimer) clearInterval(opsAutoRefreshTimer);
+    opsAutoRefreshTimer = setInterval(() => {
+      const opsPage = document.getElementById('page-ops');
+      if (opsPage && opsPage.classList.contains('active')) {
+        loadOps();
+      }
+    }, OPS_REFRESH_MS);
+    // stale check 은 더 자주 (10초)
+    setInterval(updateOpsTimestamp, 10000);
+  }
+
+  // ── 1. 신호 후보 (종목 필터) ──
   function renderSignals() {
     const el = document.getElementById('ops-signals-content'); if (!el) return;
     const d = opsData.signals || {};
     const diag = diagnose(d);
     if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
-    const items = d.items || [];
-    if (!items.length) { el.innerHTML = emptyState('noData', 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
-    el.innerHTML = `
+    const allItems = d.items || [];
+    if (!allItems.length) { el.innerHTML = emptyState('noData', 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
+
+    // 종목 필터 칩
+    const symbols = [...new Set(allItems.map(s => s.symbol).filter(Boolean))].sort();
+    const items = opsSignalFilter ? allItems.filter(s => s.symbol === opsSignalFilter) : allItems;
+
+    let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+      <button class="ops-chip${!opsSignalFilter?' active':''}" onclick="setSignalFilter('')">전체 (${allItems.length})</button>
+      ${symbols.map(sym => `<button class="ops-chip${opsSignalFilter===sym?' active':''}" onclick="setSignalFilter('${sym}')">${esc(sym)}</button>`).join('')}
+    </div>`;
+
+    el.innerHTML = filterHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
           <thead><tr><th>종목</th><th>점수</th><th>사유</th><th>진입 후보가</th><th>손절 기준</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
@@ -1290,15 +1343,26 @@
       </div>`;
   }
 
-  // ── 3. 종료 결과 ──
+  // ── 3. 종료 결과 (W/L 필터) ──
   function renderResults() {
     const el = document.getElementById('ops-results-content'); if (!el) return;
     const d = opsData.results || {};
     const diag = diagnose(d);
     if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
-    const items = d.items || [];
-    if (!items.length) { el.innerHTML = emptyState('noData', '종료된 trade가 없습니다.'); return; }
-    el.innerHTML = `
+    const allItems = d.items || [];
+    if (!allItems.length) { el.innerHTML = emptyState('noData', '종료된 trade가 없습니다.'); return; }
+
+    const wins = allItems.filter(r => r.result === 'win').length;
+    const losses = allItems.filter(r => r.result === 'loss').length;
+    const items = opsResultFilter ? allItems.filter(r => r.result === opsResultFilter) : allItems;
+
+    let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+      <button class="ops-chip${!opsResultFilter?' active':''}" onclick="setResultFilter('')">전체 (${allItems.length})</button>
+      <button class="ops-chip${opsResultFilter==='win'?' active':''}" onclick="setResultFilter('win')" style="color:#34d399;">W (${wins})</button>
+      <button class="ops-chip${opsResultFilter==='loss'?' active':''}" onclick="setResultFilter('loss')" style="color:#f87171;">L (${losses})</button>
+    </div>`;
+
+    el.innerHTML = filterHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
           <thead><tr><th></th><th>종목</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
@@ -1316,7 +1380,7 @@
       </div>`;
   }
 
-  // ── 4. 성과 요약 ──
+  // ── 4. 성과 요약 (20/50 토글 + 실전 판정) ──
   function renderPerf() {
     const el = document.getElementById('ops-perf-content'); if (!el) return;
     const d = opsData.perf || {};
@@ -1326,8 +1390,44 @@
     const p = d;
     const safeRatio = (v) => (v == null || !isFinite(v)) ? '0' : String(v);
     const expectColor = p.expectation > 0 ? '#34d399' : p.expectation < 0 ? '#f87171' : '#64748b';
-    el.innerHTML = `
+
+    // 실전 검토 판정 (규칙 기반)
+    let verdict, verdictColor, verdictDesc;
+    if (p.total < 10) {
+      verdict = '판단 보류'; verdictColor = '#64748b';
+      verdictDesc = `데이터 ${p.total}건 — 최소 10건 이상 필요`;
+    } else if (p.expectation > 0 && p.winRate >= 0.4 && p.maxConsecutiveLoss <= 5 && p.maxDrawdownPercent <= 15) {
+      verdict = '검토 가능'; verdictColor = '#34d399';
+      verdictDesc = '기대값 양수, 승률/낙폭 허용 범위 내';
+    } else if (p.expectation <= 0 || p.maxDrawdownPercent > 20 || p.maxConsecutiveLoss > 7) {
+      verdict = '보류'; verdictColor = '#f87171';
+      verdictDesc = p.expectation <= 0 ? '기대값이 음수입니다' : p.maxDrawdownPercent > 20 ? '최대낙폭 20% 초과' : '연속손실 7회 초과';
+    } else {
+      verdict = '경계'; verdictColor = '#fbbf24';
+      verdictDesc = '일부 지표가 경계 수준 — 추가 데이터 필요';
+    }
+
+    // 20/50건 토글
+    const toggleHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center;">
+      <span style="font-size:0.78rem;color:#94a3b8;">기준:</span>
+      <button class="ops-chip${opsPerfCount===20?' active':''}" onclick="setPerfCount(20)">최근 20건</button>
+      <button class="ops-chip${opsPerfCount===50?' active':''}" onclick="setPerfCount(50)">최근 50건</button>
+    </div>`;
+
+    // 판정 카드
+    const verdictCard = `
+      <div class="ops-card" style="grid-column:1/-1;border-color:${verdictColor}55;background:${verdictColor}08;">
+        <div class="ops-card-label">실전 검토 판정</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:6px;">
+          <span style="display:inline-block;padding:5px 16px;border-radius:12px;font-size:0.9rem;font-weight:700;background:${verdictColor}22;color:${verdictColor};border:1px solid ${verdictColor}55;">${verdict}</span>
+          <span style="color:#94a3b8;font-size:0.82rem;">${verdictDesc}</span>
+        </div>
+        <div style="font-size:0.72rem;color:#475569;margin-top:6px;">기준: 기대값 > 0, 승률 >= 40%, 연속손실 <= 5, 낙폭 <= 15%</div>
+      </div>`;
+
+    el.innerHTML = toggleHtml + `
       <div class="ops-cards">
+        ${verdictCard}
         <div class="ops-card">
           <div class="ops-card-label">승률</div>
           <div class="ops-card-value" style="color:${p.winRate >= 0.5 ? '#34d399' : '#f87171'};">${(p.winRate * 100).toFixed(1)}%</div>
