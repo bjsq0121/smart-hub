@@ -627,6 +627,7 @@
       if (data.ok) { document.getElementById('admin-pw-email').value = ''; document.getElementById('admin-pw-new').value = ''; _adminMsg('admin-pw-msg', `${email} 비밀번호 초기화 완료`, 'ok'); }
       else { _adminMsg('admin-pw-msg', data.error || '변경 실패', 'err'); }
     } catch (e) { _adminMsg('admin-pw-msg', '서버 오류', 'err'); }
+  }
 </script>
 
 </body>
