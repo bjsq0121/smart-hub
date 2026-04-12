@@ -1033,15 +1033,14 @@ def _normalize_balance(payload: dict) -> dict:
 
     원가 기준 (cost basis) 만 다룸 — marketValue/평가금액/현재가 류는 의도적으로 무시.
 
-    필드 의미:
-      coinCostKRW   = sum(perCoin[].invested)        — 코인 매수 누적 원가
-      cashKRW       = 계좌에 남아 있는 KRW 현금       — 미투입 잔고
-      totalCostKRW  = coinCostKRW + cashKRW          — 총 입금 원가 (항상 자동 계산)
-
-    중요: totalCostKRW 는 페이로드에서 받지 않는다. n8n 이 보내도 무시한다.
-    이유: n8n 측에서 cash 빼먹고 coin sum 만 보내는 케이스를 한 번 겪었음
-    (workflow=upbit-balance-001, totalCostKRW가 cashKRW 미반영). 일관성을 위해
-    합산 책임은 백엔드 한 곳으로 몰아둔다. n8n 은 raw 만 책임진다.
+    n8n 계약:
+      accountId    — 계좌 식별자
+      accountCount — 계좌 수
+      cashKRW      — 계좌 KRW 현금 잔고 (미투입분)
+      totalCostKRW — 코인 매수 누적 원가 (= sum of perCoin[].invested)
+                     ※ 이름이 'total'이지만 실제 의미는 코인 원가.
+                        현금 포함 추정 합계는 프론트에서 계산한다.
+      perCoin[]    — 종목별 (symbol, qty, avgCost, invested)
     """
     per_coin_in = payload.get("perCoin") or payload.get("per_coin") or []
     per_coin = []
@@ -1054,13 +1053,11 @@ def _normalize_balance(payload: dict) -> dict:
             "avgCost":  float(c.get("avgCost") or c.get("avg_cost") or 0),
             "invested": float(c.get("invested") or c.get("investedKRW") or 0),
         })
-    coin_cost = sum(c["invested"] for c in per_coin)
     cash_krw = float(payload.get("cashKRW") or payload.get("cash_krw") or 0)
-    total_cost = coin_cost + cash_krw
+    total_cost = float(payload.get("totalCostKRW") or payload.get("total_cost_krw") or 0)
     return {
         "accountId":    str(payload.get("accountId") or payload.get("account_id") or "default"),
         "accountCount": int(payload.get("accountCount") or payload.get("account_count") or 1),
-        "coinCostKRW":  coin_cost,
         "cashKRW":      cash_krw,
         "totalCostKRW": total_cost,
         "perCoin":      per_coin,
