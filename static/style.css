@@ -881,6 +881,8 @@
     }
     .ops-pane { display: none; }
     .ops-pane.active { display: block; }
+    .admin-pane { display: none; }
+    .admin-pane.active { display: block; }
     .ops-cards {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));

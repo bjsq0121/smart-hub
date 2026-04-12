@@ -1509,6 +1509,109 @@ async def admin_invite(req: InviteRequest, user: dict = Depends(verify_firebase_
     return {"ok": True, "email": req.email}
 
 
+def _ensure_admin(user: dict):
+    """현재 사용자가 admin인지 확인. 아니면 403."""
+    db = _get_firestore()
+    doc = db.collection("allowed_emails").document(user.get("email", "")).get()
+    if not doc.exists or doc.to_dict().get("role") != "admin":
+        raise HTTPException(status_code=403, detail="관리자만 사용할 수 있습니다.")
+
+
+def _init_firebase_admin():
+    import firebase_admin
+    from firebase_admin import auth as fb_auth
+    if not firebase_admin._apps:
+        firebase_admin.initialize_app()
+    return fb_auth
+
+
+@app.get("/admin/users")
+async def admin_users(user: dict = Depends(verify_firebase_token)):
+    """관리자: 전체 사용자 목록 (화이트리스트 + 기본 Auth 정보)."""
+    _ensure_admin(user)
+    db = _get_firestore()
+    docs = db.collection("allowed_emails").stream()
+    items = []
+    for doc in docs:
+        d = doc.to_dict()
+        added_at = d.get("added_at")
+        if added_at and hasattr(added_at, "isoformat"):
+            added_at = added_at.isoformat()
+        items.append({
+            "email":    d.get("email", doc.id),
+            "role":     d.get("role", "user"),
+            "addedBy":  d.get("added_by", ""),
+            "addedAt":  added_at,
+        })
+    return {"items": items}
+
+
+class PasswordChangeRequest(BaseModel):
+    email: str = ""           # 비어 있으면 본인, 있으면 admin이 대상 지정
+    newPassword: str
+
+
+@app.post("/admin/change-password")
+async def admin_change_password(req: PasswordChangeRequest, user: dict = Depends(verify_firebase_token)):
+    """비밀번호 변경. 본인이면 누구나, 타인이면 admin만."""
+    target_email = req.email.strip().lower() or user.get("email", "")
+    is_self = target_email == user.get("email", "")
+
+    if not is_self:
+        _ensure_admin(user)
+
+    if not req.newPassword or len(req.newPassword) < 6:
+        raise HTTPException(status_code=400, detail="비밀번호는 6자 이상이어야 합니다.")
+
+    fb_auth = _init_firebase_admin()
+    try:
+        existing = fb_auth.get_user_by_email(target_email)
+        fb_auth.update_user(existing.uid, password=req.newPassword)
+        return {"ok": True, "email": target_email}
+    except Exception:
+        return {"ok": False, "error": "비밀번호 변경에 실패했습니다."}
+
+
+class RoleUpdateRequest(BaseModel):
+    email: str
+    role: str               # admin | user
+
+
+@app.post("/admin/update-role")
+async def admin_update_role(req: RoleUpdateRequest, user: dict = Depends(verify_firebase_token)):
+    """관리자: 사용자 역할 변경."""
+    _ensure_admin(user)
+    if req.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail="role은 admin 또는 user만 가능합니다.")
+    if req.email == user.get("email", ""):
+        raise HTTPException(status_code=400, detail="자기 자신의 역할은 변경할 수 없습니다.")
+    db = _get_firestore()
+    doc_ref = db.collection("allowed_emails").document(req.email)
+    if not doc_ref.get().exists:
+        raise HTTPException(status_code=404, detail="등록되지 않은 사용자입니다.")
+    doc_ref.update({"role": req.role})
+    return {"ok": True, "email": req.email, "role": req.role}
+
+
+@app.delete("/admin/user/{email}")
+async def admin_delete_user(email: str, user: dict = Depends(verify_firebase_token)):
+    """관리자: 사용자 삭제 (Firestore 화이트리스트 + Firebase Auth 계정)."""
+    _ensure_admin(user)
+    if email == user.get("email", ""):
+        raise HTTPException(status_code=400, detail="자기 자신은 삭제할 수 없습니다.")
+    db = _get_firestore()
+    # Firestore 화이트리스트 삭제
+    db.collection("allowed_emails").document(email).delete()
+    # Firebase Auth 계정 삭제
+    fb_auth = _init_firebase_admin()
+    try:
+        existing = fb_auth.get_user_by_email(email)
+        fb_auth.delete_user(existing.uid)
+    except Exception:
+        pass  # Auth에 없어도 화이트리스트는 이미 삭제됨
+    return {"ok": True, "email": email}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     with open("index.html", encoding="utf-8") as f:

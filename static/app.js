@@ -88,12 +88,10 @@
       label: '⚙️ 관리',
       auth: true,
       subs: [
-        { id: 'invite',  label: '👥 초대 관리', page: 'page-admin',
-          onActivate: () => { if (typeof loadInviteList === 'function') loadInviteList(); } },
-        { id: 'account', label: '🔑 계정/권한', page: 'page-soon', soon: true,
-          soonTitle: '계정/권한', soonDesc: '역할 기반 권한 관리(RBAC). 2차에서 추가됩니다.' },
-        { id: 'sys',     label: '🛠 시스템 설정', page: 'page-soon', soon: true,
-          soonTitle: '시스템 설정', soonDesc: '환경 변수, 웹훅 시크릿, 알림 채널 설정 UI. 2차에서 추가됩니다.' },
+        { id: 'users',    label: '👥 사용자',    page: 'page-admin', adminPane: 'users',
+          onActivate: () => { if (typeof loadAdminUsers === 'function') loadAdminUsers(); } },
+        { id: 'password', label: '🔑 비밀번호', page: 'page-admin', adminPane: 'password',
+          onActivate: () => { if (typeof initPasswordPane === 'function') initPasswordPane(); } },
       ],
     },
   };
@@ -156,8 +154,13 @@
     const targetPageId = sub ? sub.page : g.defaultPage;
     document.querySelectorAll('.page').forEach(p => p.classList.toggle('active', p.id === targetPageId));
 
-    // 5) ops 내부 pane
+    // 5) 내부 pane (ops / admin)
     if (sub && sub.opsPane) setOpsPane(sub.opsPane);
+    if (sub && sub.adminPane) {
+      document.querySelectorAll('#page-admin .admin-pane').forEach(p => {
+        p.classList.toggle('active', p.id === 'admin-pane-' + sub.adminPane);
+      });
+    }
 
     // 6) page-soon 메시지 커스터마이즈
     if (targetPageId === 'page-soon') {

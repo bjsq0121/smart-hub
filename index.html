@@ -267,17 +267,57 @@
   </div>
 </div>
 
-<!-- ══════════════ 관리자 페이지 ══════════════ -->
+<!-- ══════════════ 관리 페이지 ══════════════ -->
 <div class="page" id="page-admin">
-  <div style="max-width:600px;margin:36px auto;padding:0 24px;">
-    <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:20px;">👥 초대 관리</h2>
-    <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
-      <input id="invite-email" type="email" placeholder="초대할 이메일 주소" style="flex:2;min-width:200px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
-      <input id="invite-password" type="text" placeholder="초기 비밀번호 (6자 이상)" style="flex:1;min-width:150px;padding:12px 16px;border-radius:12px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.9rem;outline:none;" />
-      <button onclick="addInvite()" style="padding:12px 24px;border:none;border-radius:12px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;font-weight:600;cursor:pointer;white-space:nowrap;">초대</button>
-    </div>
-    <div id="invite-msg" style="display:none;margin-bottom:16px;padding:10px 16px;border-radius:10px;font-size:0.82rem;"></div>
-    <div id="invite-list"></div>
+  <div style="max-width:720px;margin:24px auto;padding:0 24px;">
+
+    <!-- 사용자 관리 pane -->
+    <section class="admin-pane active" id="admin-pane-users">
+      <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:16px;">👥 사용자 관리</h2>
+
+      <!-- 초대 폼 -->
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:16px 20px;margin-bottom:20px;">
+        <div style="font-size:0.78rem;color:#94a3b8;font-weight:600;margin-bottom:10px;">새 사용자 초대</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <input id="invite-email" type="email" placeholder="이메일" style="flex:2;min-width:180px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+          <input id="invite-password" type="text" placeholder="초기 비밀번호 (6+)" style="flex:1;min-width:130px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+          <button onclick="addInvite()" style="padding:10px 20px;border:none;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;font-weight:600;cursor:pointer;font-size:0.85rem;white-space:nowrap;">초대</button>
+        </div>
+        <div id="invite-msg" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;font-size:0.8rem;"></div>
+      </div>
+
+      <!-- 사용자 목록 (API로 로드) -->
+      <div id="admin-user-list"><div class="ops-empty">로딩 중...</div></div>
+    </section>
+
+    <!-- 비밀번호 변경 pane -->
+    <section class="admin-pane" id="admin-pane-password">
+      <h2 style="font-size:1.1rem;color:#e2e8f0;margin-bottom:16px;">🔑 비밀번호 변경</h2>
+
+      <!-- 내 비밀번호 -->
+      <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:16px 20px;margin-bottom:20px;">
+        <div style="font-size:0.78rem;color:#94a3b8;font-weight:600;margin-bottom:10px;">내 비밀번호 변경</div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;">
+          <input id="pw-new" type="password" placeholder="새 비밀번호 (6자 이상)" style="flex:1;min-width:200px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+          <input id="pw-confirm" type="password" placeholder="비밀번호 확인" style="flex:1;min-width:200px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+          <button onclick="changeSelfPassword()" style="padding:10px 20px;border:none;border-radius:10px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:white;font-weight:600;cursor:pointer;font-size:0.85rem;white-space:nowrap;">변경</button>
+        </div>
+        <div id="pw-msg" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;font-size:0.8rem;"></div>
+      </div>
+
+      <!-- 관리자: 타인 비밀번호 초기화 (admin만 보임) -->
+      <div id="admin-pw-section" style="display:none;">
+        <div style="background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:16px 20px;">
+          <div style="font-size:0.78rem;color:#94a3b8;font-weight:600;margin-bottom:10px;">관리자: 사용자 비밀번호 초기화</div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <input id="admin-pw-email" type="email" placeholder="대상 이메일" style="flex:2;min-width:180px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+            <input id="admin-pw-new" type="text" placeholder="새 비밀번호 (6+)" style="flex:1;min-width:130px;padding:10px 14px;border-radius:10px;border:1px solid rgba(255,255,255,0.1);background:rgba(255,255,255,0.05);color:#e2e8f0;font-size:0.85rem;outline:none;" />
+            <button onclick="adminResetPassword()" style="padding:10px 20px;border:none;border-radius:10px;background:rgba(248,113,113,0.15);border:1px solid rgba(248,113,113,0.3);color:#f87171;font-weight:600;cursor:pointer;font-size:0.85rem;white-space:nowrap;">초기화</button>
+          </div>
+          <div id="admin-pw-msg" style="display:none;margin-top:10px;padding:8px 14px;border-radius:8px;font-size:0.8rem;"></div>
+        </div>
+      </div>
+    </section>
   </div>
 </div>
 
@@ -472,20 +512,70 @@
 
   function doLogout() { auth.signOut(); }
 
-  // ── 초대 관리 (관리자 전용) ──
-  async function loadInviteList() {
-    await loadAllowedEmails();
-    const list = document.getElementById('invite-list');
-    if (!list) return;
-    list.innerHTML = allowedEmails.map(e => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;margin-bottom:8px;">
-        <div>
-          <span style="color:#e2e8f0;font-weight:600;">${e.email.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
-          <span style="margin-left:8px;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;${e.role==='admin'?'background:rgba(96,165,250,0.15);color:#60a5fa':'background:rgba(148,163,184,0.1);color:#94a3b8'}">${e.role==='admin'?'관리자':'멤버'}</span>
-        </div>
-        ${e.role !== 'admin' ? `<button onclick="removeInvite('${e.email.replace(/'/g,"\\'")}')" style="padding:4px 12px;border-radius:8px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.75rem;cursor:pointer;">삭제</button>` : ''}
-      </div>
-    `).join('');
+  // ── 관리: 사용자 관리 (API 기반) ──
+  function _adminMsg(elId, text, type) {
+    const el = document.getElementById(elId); if (!el) return;
+    const colors = { ok:['rgba(52,211,153,0.08)','#34d399'], err:['rgba(239,68,68,0.08)','#fca5a5'], warn:['rgba(251,191,36,0.08)','#fbbf24'] };
+    const [bg, fg] = colors[type] || colors.err;
+    el.style.display = 'block'; el.style.background = bg; el.style.color = fg;
+    el.textContent = text;
+    if (type === 'ok') setTimeout(() => el.style.display = 'none', 3000);
+  }
+
+  async function loadAdminUsers() {
+    const list = document.getElementById('admin-user-list'); if (!list) return;
+    try {
+      const hdrs = { ...await authHeaders(), 'Content-Type': 'application/json' };
+      const res = await fetch('/admin/users', { headers: hdrs });
+      const data = await res.json();
+      if (!res.ok || !data.items) { list.innerHTML = '<div class="ops-empty">사용자 목록 조회 실패</div>'; return; }
+      const myEmail = auth.currentUser ? auth.currentUser.email : '';
+      list.innerHTML = data.items.map(u => {
+        const isMe = u.email === myEmail;
+        const isAdmin = u.role === 'admin';
+        const roleBg = isAdmin ? 'background:rgba(96,165,250,0.15);color:#60a5fa' : 'background:rgba(148,163,184,0.1);color:#94a3b8';
+        const roleLabel = isAdmin ? '관리자' : '멤버';
+        return `
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.06);border-radius:12px;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <span style="color:#e2e8f0;font-weight:600;">${u.email.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
+              <span style="padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;${roleBg}">${roleLabel}</span>
+              ${isMe ? '<span style="font-size:0.68rem;color:#475569;">(나)</span>' : ''}
+              ${u.addedAt ? `<span style="font-size:0.68rem;color:#475569;">가입 ${new Date(u.addedAt).toLocaleDateString('ko-KR')}</span>` : ''}
+            </div>
+            ${!isMe && currentUserRole === 'admin' ? `
+              <div style="display:flex;gap:6px;">
+                <button onclick="toggleRole('${u.email.replace(/'/g,"\\'")}','${isAdmin ? 'user' : 'admin'}')" style="padding:4px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.72rem;cursor:pointer;">${isAdmin ? '멤버로' : '관리자로'}</button>
+                <button onclick="deleteUser('${u.email.replace(/'/g,"\\'")}')" style="padding:4px 10px;border-radius:8px;border:1px solid rgba(239,68,68,0.3);background:transparent;color:#f87171;font-size:0.72rem;cursor:pointer;">삭제</button>
+              </div>
+            ` : ''}
+          </div>`;
+      }).join('');
+    } catch (e) {
+      list.innerHTML = '<div class="ops-empty">사용자 목록 로드 실패</div>';
+    }
+  }
+
+  async function toggleRole(email, newRole) {
+    const ok = await showModal(`${email}의 역할을 ${newRole === 'admin' ? '관리자' : '멤버'}로 변경하시겠습니까?`, true);
+    if (!ok) return;
+    try {
+      const hdrs = { ...await authHeaders(), 'Content-Type': 'application/json' };
+      const res = await fetch('/admin/update-role', { method: 'POST', headers: hdrs, body: JSON.stringify({ email, role: newRole }) });
+      const data = await res.json();
+      if (data.ok) { loadAdminUsers(); loadAllowedEmails(); } else { showModal(data.detail || data.error || '역할 변경 실패'); }
+    } catch (e) { showModal('서버 오류'); }
+  }
+
+  async function deleteUser(email) {
+    const ok = await showModal(`${email} 계정을 완전히 삭제하시겠습니까?\n(Firebase Auth 계정 + 화이트리스트 모두 삭제)`, true);
+    if (!ok) return;
+    try {
+      const hdrs = await authHeaders();
+      const res = await fetch(`/admin/user/${encodeURIComponent(email)}`, { method: 'DELETE', headers: hdrs });
+      const data = await res.json();
+      if (data.ok) { loadAdminUsers(); loadAllowedEmails(); } else { showModal(data.detail || data.error || '삭제 실패'); }
+    } catch (e) { showModal('서버 오류'); }
   }
 
   async function addInvite() {
@@ -494,52 +584,49 @@
     const pwInput = document.getElementById('invite-password');
     const email = emailInput.value.trim().toLowerCase();
     const password = pwInput.value;
-    const msgEl = document.getElementById('invite-msg');
-    if (!email || !email.includes('@')) {
-      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
-      msgEl.textContent = '올바른 이메일을 입력하세요.'; return;
-    }
-    if (!password || password.length < 6) {
-      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
-      msgEl.textContent = '비밀번호를 6자 이상 입력하세요.'; return;
-    }
-    if (isAllowed(email)) {
-      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(251,191,36,0.08)'; msgEl.style.color = '#fbbf24';
-      msgEl.textContent = '이미 등록된 이메일입니다.'; return;
-    }
+    if (!email || !email.includes('@')) { _adminMsg('invite-msg', '올바른 이메일을 입력하세요.', 'err'); return; }
+    if (!password || password.length < 6) { _adminMsg('invite-msg', '비밀번호를 6자 이상 입력하세요.', 'err'); return; }
     try {
-      const token = await auth.currentUser.getIdToken();
-      const res = await fetch('/admin/invite', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
-        body: JSON.stringify({ email, password })
-      });
+      const hdrs = { ...await authHeaders(), 'Content-Type': 'application/json' };
+      const res = await fetch('/admin/invite', { method: 'POST', headers: hdrs, body: JSON.stringify({ email, password }) });
       const data = await res.json();
-      if (data.ok) {
-        emailInput.value = ''; pwInput.value = '';
-        msgEl.style.display = 'block'; msgEl.style.background = 'rgba(52,211,153,0.08)'; msgEl.style.color = '#34d399';
-        msgEl.textContent = `${email} 초대 완료! (계정 생성됨)`;
-        setTimeout(() => msgEl.style.display = 'none', 3000);
-        loadInviteList();
-      } else {
-        msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
-        msgEl.textContent = data.error || '초대 실패';
-      }
-    } catch(e) {
-      msgEl.style.display = 'block'; msgEl.style.background = 'rgba(239,68,68,0.08)'; msgEl.style.color = '#fca5a5';
-      msgEl.textContent = '서버 오류: ' + e.message;
-    }
+      if (data.ok) { emailInput.value = ''; pwInput.value = ''; _adminMsg('invite-msg', `${email} 초대 완료!`, 'ok'); loadAdminUsers(); loadAllowedEmails(); }
+      else { _adminMsg('invite-msg', data.error || '초대 실패', 'err'); }
+    } catch (e) { _adminMsg('invite-msg', '서버 오류', 'err'); }
   }
 
-  async function removeInvite(email) {
-    if (currentUserRole !== 'admin') return;
-    const ok = await showModal(`${email}을(를) 삭제하시겠습니까?`, true);
-    if (!ok) return;
-    await db.collection('allowed_emails').doc(email).delete();
-    loadInviteList();
+  // ── 관리: 비밀번호 변경 ──
+  function initPasswordPane() {
+    const adminSec = document.getElementById('admin-pw-section');
+    if (adminSec) adminSec.style.display = currentUserRole === 'admin' ? 'block' : 'none';
   }
 
-  // 관리 → 초대 관리 진입 시 자동 로드는 NAV_GROUPS.admin.subs[invite].onActivate 에서 처리
+  async function changeSelfPassword() {
+    const pw = document.getElementById('pw-new').value;
+    const pw2 = document.getElementById('pw-confirm').value;
+    if (!pw || pw.length < 6) { _adminMsg('pw-msg', '6자 이상 입력하세요.', 'err'); return; }
+    if (pw !== pw2) { _adminMsg('pw-msg', '비밀번호가 일치하지 않습니다.', 'err'); return; }
+    try {
+      const hdrs = { ...await authHeaders(), 'Content-Type': 'application/json' };
+      const res = await fetch('/admin/change-password', { method: 'POST', headers: hdrs, body: JSON.stringify({ email: '', newPassword: pw }) });
+      const data = await res.json();
+      if (data.ok) { document.getElementById('pw-new').value = ''; document.getElementById('pw-confirm').value = ''; _adminMsg('pw-msg', '비밀번호가 변경되었습니다.', 'ok'); }
+      else { _adminMsg('pw-msg', data.error || '변경 실패', 'err'); }
+    } catch (e) { _adminMsg('pw-msg', '서버 오류', 'err'); }
+  }
+
+  async function adminResetPassword() {
+    const email = document.getElementById('admin-pw-email').value.trim();
+    const pw = document.getElementById('admin-pw-new').value;
+    if (!email) { _adminMsg('admin-pw-msg', '대상 이메일을 입력하세요.', 'err'); return; }
+    if (!pw || pw.length < 6) { _adminMsg('admin-pw-msg', '6자 이상 입력하세요.', 'err'); return; }
+    try {
+      const hdrs = { ...await authHeaders(), 'Content-Type': 'application/json' };
+      const res = await fetch('/admin/change-password', { method: 'POST', headers: hdrs, body: JSON.stringify({ email, newPassword: pw }) });
+      const data = await res.json();
+      if (data.ok) { document.getElementById('admin-pw-email').value = ''; document.getElementById('admin-pw-new').value = ''; _adminMsg('admin-pw-msg', `${email} 비밀번호 초기화 완료`, 'ok'); }
+      else { _adminMsg('admin-pw-msg', data.error || '변경 실패', 'err'); }
+    } catch (e) { _adminMsg('admin-pw-msg', '서버 오류', 'err'); }
 </script>
 
 </body>
