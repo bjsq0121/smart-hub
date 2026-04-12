@@ -1024,7 +1024,7 @@ class IngestEnvelope(BaseModel):
     payload: dict = {}
 
 
-_ALLOWED_KINDS = {"event", "balance", "workflow_run"}
+_ALLOWED_KINDS = {"event", "balance", "workflow_run", "signal", "paper_trade", "trade_result", "system_status"}
 _ALLOWED_SYNC = {"ok", "partial", "failed"}
 
 
@@ -1074,6 +1074,63 @@ def _normalize_workflow_run(payload: dict, env: IngestEnvelope) -> dict:
         "durationMs": payload.get("durationMs") or payload.get("duration_ms"),
         "eventCount": payload.get("eventCount") or payload.get("event_count") or 0,
         "message":    payload.get("message") or "",
+    }
+
+
+# ── crypto 검증 허브: 신호/paper trade/결과/시스템 정규화 ──
+
+def _normalize_signal(payload: dict) -> dict:
+    """후보 신호. n8n이 AI 분석 결과를 보냄."""
+    return {
+        "signalId":    str(payload.get("signalId") or payload.get("signal_id") or ""),
+        "symbol":      str(payload.get("symbol") or "")[:20],
+        "score":       float(payload.get("score") or 0),
+        "scoreReason": str(payload.get("scoreReason") or payload.get("score_reason") or ""),
+        "entryPrice":  float(payload.get("entryPrice") or payload.get("entry_price") or 0),
+        "stopLoss":    float(payload.get("stopLoss") or payload.get("stop_loss") or 0),
+        "direction":   str(payload.get("direction") or "long"),
+        "status":      str(payload.get("status") or "candidate"),
+    }
+
+
+def _normalize_paper_trade(payload: dict) -> dict:
+    """검증 중 paper trade 상태 업데이트. n8n이 주기적으로 보냄."""
+    return {
+        "tradeId":      str(payload.get("tradeId") or payload.get("trade_id") or ""),
+        "signalId":     str(payload.get("signalId") or payload.get("signal_id") or ""),
+        "symbol":       str(payload.get("symbol") or "")[:20],
+        "entryPrice":   float(payload.get("entryPrice") or payload.get("entry_price") or 0),
+        "currentPrice": float(payload.get("currentPrice") or payload.get("current_price") or 0),
+        "pnlPercent":   float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
+        "maxFavorable": float(payload.get("maxFavorable") or payload.get("max_favorable") or 0),
+        "maxAdverse":   float(payload.get("maxAdverse") or payload.get("max_adverse") or 0),
+        "holdTimeMin":  int(payload.get("holdTimeMin") or payload.get("hold_time_min") or 0),
+        "status":       str(payload.get("status") or "open"),
+    }
+
+
+def _normalize_trade_result(payload: dict) -> dict:
+    """종료 결과. paper trade 종료 시 n8n이 보냄."""
+    return {
+        "tradeId":    str(payload.get("tradeId") or payload.get("trade_id") or ""),
+        "signalId":   str(payload.get("signalId") or payload.get("signal_id") or ""),
+        "symbol":     str(payload.get("symbol") or "")[:20],
+        "result":     str(payload.get("result") or ""),         # win | loss
+        "pnlPercent": float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
+        "exitReason": str(payload.get("exitReason") or payload.get("exit_reason") or ""),
+        "exitAt":     payload.get("exitAt") or payload.get("exit_at"),
+        "entryPrice": float(payload.get("entryPrice") or payload.get("entry_price") or 0),
+        "exitPrice":  float(payload.get("exitPrice") or payload.get("exit_price") or 0),
+    }
+
+
+def _normalize_system_status(payload: dict) -> dict:
+    """시스템 상태 업데이트. n8n 또는 모니터링이 보냄."""
+    return {
+        "status":             str(payload.get("status") or "normal"),  # normal | caution | pause
+        "reason":             str(payload.get("reason") or ""),
+        "lastSyncFailure":    payload.get("lastSyncFailure") or payload.get("last_sync_failure"),
+        "lastCollectFailure": payload.get("lastCollectFailure") or payload.get("last_collect_failure"),
     }
 
 
@@ -1133,6 +1190,47 @@ async def webhook_ingest(env: IngestEnvelope):
                 "created_at": _firestore.SERVER_TIMESTAMP,
             })
             run_id = ref.id
+        elif env.kind == "signal":
+            norm = _normalize_signal(env.payload)
+            ref = db.collection("signals").document()
+            ref.set({
+                **norm,
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+        elif env.kind == "paper_trade":
+            norm = _normalize_paper_trade(env.payload)
+            trade_id = norm.get("tradeId") or event_doc.id
+            ref = db.collection("paper_trades").document(trade_id)
+            ref.set({
+                **norm,
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+        elif env.kind == "trade_result":
+            norm = _normalize_trade_result(env.payload)
+            ref = db.collection("trade_results").document()
+            ref.set({
+                **norm,
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+        elif env.kind == "system_status":
+            norm = _normalize_system_status(env.payload)
+            ref = db.collection("system_status").document("current")
+            ref.set({
+                **norm,
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                "updated_at": _firestore.SERVER_TIMESTAMP,
+            })
 
         return {"ok": True, "eventId": event_doc.id, "balanceId": balance_id, "runId": run_id}
     except HTTPException:
@@ -1207,6 +1305,166 @@ async def api_workflows_status(
         return {"runs": runs, "latestByWorkflow": list(latest_by_wf.values())}
     except Exception:
         return {"runs": [], "latestByWorkflow": [], "error": "workflow_runs 조회 실패"}
+
+
+# ── crypto 검증 허브 GET 엔드포인트 ──
+
+@app.get("/api/signals")
+async def api_signals(
+    limit: int = Query(default=50, le=200),
+    status: str | None = Query(default=None),
+    user: dict = Depends(verify_firebase_token),
+):
+    """후보 신호 목록 (최근순)."""
+    try:
+        db = _get_firestore()
+        q = db.collection("signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        if status:
+            q = q.where("status", "==", status)
+        return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
+    except Exception:
+        return {"items": [], "error": "signals 조회 실패"}
+
+
+@app.get("/api/paper-trades")
+async def api_paper_trades(
+    status: str | None = Query(default="open"),
+    limit: int = Query(default=50, le=200),
+    user: dict = Depends(verify_firebase_token),
+):
+    """검증 중 paper trade 목록."""
+    try:
+        db = _get_firestore()
+        q = db.collection("paper_trades").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        if status:
+            q = q.where("status", "==", status)
+        return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
+    except Exception:
+        return {"items": [], "error": "paper_trades 조회 실패"}
+
+
+@app.get("/api/trade-results")
+async def api_trade_results(
+    limit: int = Query(default=100, le=500),
+    user: dict = Depends(verify_firebase_token),
+):
+    """종료 결과 목록 (최근순)."""
+    try:
+        db = _get_firestore()
+        docs = list(
+            db.collection("trade_results")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(limit).stream()
+        )
+        return {"items": [_doc_to_dict(d) for d in docs]}
+    except Exception:
+        return {"items": [], "error": "trade_results 조회 실패"}
+
+
+@app.get("/api/performance")
+async def api_performance(
+    count: int = Query(default=50, le=500),
+    user: dict = Depends(verify_firebase_token),
+):
+    """성과 요약 — 최근 N건 trade_results 기반 서버 계산."""
+    try:
+        db = _get_firestore()
+        docs = list(
+            db.collection("trade_results")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(count).stream()
+        )
+        results = [_doc_to_dict(d) for d in docs]
+        total = len(results)
+        if total == 0:
+            return {"total": 0, "winRate": 0, "avgPnl": 0, "expectation": 0,
+                    "maxConsecutiveLoss": 0, "maxDrawdownPercent": 0}
+
+        wins = [r for r in results if r.get("result") == "win"]
+        losses = [r for r in results if r.get("result") == "loss"]
+        win_rate = len(wins) / total if total > 0 else 0
+
+        avg_win = sum(r.get("pnlPercent", 0) for r in wins) / len(wins) if wins else 0
+        avg_loss = sum(abs(r.get("pnlPercent", 0)) for r in losses) / len(losses) if losses else 0
+        avg_pnl_ratio = avg_win / avg_loss if avg_loss > 0 else float("inf") if avg_win > 0 else 0
+
+        expectation = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+        # 최대 연속 손실
+        max_consec = 0
+        cur_consec = 0
+        for r in results:
+            if r.get("result") == "loss":
+                cur_consec += 1
+                max_consec = max(max_consec, cur_consec)
+            else:
+                cur_consec = 0
+
+        # 최대 낙폭 (누적 PnL 기준)
+        cum = 0
+        peak = 0
+        max_dd = 0
+        for r in reversed(results):  # 시간순
+            cum += r.get("pnlPercent", 0)
+            peak = max(peak, cum)
+            dd = peak - cum
+            max_dd = max(max_dd, dd)
+
+        return {
+            "total": total,
+            "wins": len(wins),
+            "losses": len(losses),
+            "winRate": round(win_rate, 4),
+            "avgWinPercent": round(avg_win, 2),
+            "avgLossPercent": round(avg_loss, 2),
+            "avgPnlRatio": round(avg_pnl_ratio, 2),
+            "expectation": round(expectation, 2),
+            "maxConsecutiveLoss": max_consec,
+            "maxDrawdownPercent": round(max_dd, 2),
+        }
+    except Exception:
+        return {"total": 0, "error": "performance 계산 실패"}
+
+
+@app.get("/api/system-status")
+async def api_system_status(user: dict = Depends(verify_firebase_token)):
+    """시스템 상태 (current doc) + 최근 잔고 + 워크플로."""
+    try:
+        db = _get_firestore()
+        # 시스템 상태
+        status_doc = db.collection("system_status").document("current").get()
+        sys_status = status_doc.to_dict() if status_doc.exists else None
+        if sys_status and sys_status.get("updated_at") and hasattr(sys_status["updated_at"], "isoformat"):
+            sys_status["updated_at"] = sys_status["updated_at"].isoformat()
+
+        # 최근 잔고 1건
+        bal_docs = list(
+            db.collection("balances")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(1).stream()
+        )
+        balance = _doc_to_dict(bal_docs[0]) if bal_docs else None
+
+        # 워크플로별 최신 상태
+        wf_docs = list(
+            db.collection("workflow_runs")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(30).stream()
+        )
+        latest_by_wf: dict[str, dict] = {}
+        for d in wf_docs:
+            r = _doc_to_dict(d)
+            wf = r.get("workflow") or "(unknown)"
+            if wf not in latest_by_wf:
+                latest_by_wf[wf] = r
+
+        return {
+            "system": sys_status,
+            "balance": balance,
+            "workflows": list(latest_by_wf.values()),
+        }
+    except Exception:
+        return {"system": None, "balance": None, "workflows": [], "error": "system-status 조회 실패"}
 
 
 class InviteRequest(BaseModel):

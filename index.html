@@ -229,62 +229,40 @@
   </div>
 </div>
 
-<!-- ══════════════ 📊 운영 대시보드 ══════════════ -->
-<!-- 내부 ops-subtabs 제거: 상단 sub-nav 가 ops-pane-* 를 직접 활성화함 -->
+<!-- ══════════════ 📊 Crypto 검증 허브 ══════════════ -->
 <div class="page" id="page-ops">
-  <div style="max-width:1080px;margin:24px auto;padding:0 24px;">
+  <div style="max-width:1120px;margin:24px auto;padding:0 24px;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
-      <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">📊 자산/신호 운영</h2>
+      <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">
+        <span style="font-size:0.72rem;color:#fbbf24;border:1px solid rgba(251,191,36,0.3);background:rgba(251,191,36,0.08);padding:2px 8px;border-radius:8px;margin-right:8px;">검증 허브</span>
+        Crypto Signal Validation
+      </h2>
       <button onclick="loadOps()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.78rem;cursor:pointer;">새로고침</button>
     </div>
 
-    <!-- 🟢 실시간 -->
-    <section class="ops-pane active" id="ops-pane-live">
-      <div id="ops-live-cards" class="ops-cards">
-        <div class="ops-empty">로딩 중...</div>
-      </div>
-      <div style="margin-top:18px;">
-        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 이벤트</div>
-        <div id="ops-live-feed"></div>
-      </div>
+    <!-- 🎯 신호 후보 -->
+    <section class="ops-pane active" id="ops-pane-signals">
+      <div id="ops-signals-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
 
-    <!-- ⚙️ 운영상태 -->
-    <section class="ops-pane" id="ops-pane-status">
-      <div id="ops-status-grid" class="ops-cards"></div>
-      <div style="margin-top:18px;">
-        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">최근 워크플로 실행</div>
-        <div id="ops-status-runs"></div>
-      </div>
+    <!-- 📊 검증 중 (paper trade) -->
+    <section class="ops-pane" id="ops-pane-trades">
+      <div id="ops-trades-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
 
-    <!-- 📜 이벤트 로그 (이전 '리플레이'의 타임라인 뷰) -->
-    <section class="ops-pane" id="ops-pane-events">
-      <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;" id="ops-events-filters">
-        <button class="ops-chip active" data-kind="">전체</button>
-        <button class="ops-chip" data-kind="balance">balance</button>
-        <button class="ops-chip" data-kind="workflow_run">workflow_run</button>
-        <button class="ops-chip" data-kind="event">event</button>
-      </div>
-      <div id="ops-events-timeline"></div>
+    <!-- 📋 종료 결과 -->
+    <section class="ops-pane" id="ops-pane-results">
+      <div id="ops-results-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
 
-    <!-- 📈 성과분석 (나중에) -->
+    <!-- 📈 성과 요약 -->
     <section class="ops-pane" id="ops-pane-perf">
-      <div class="ops-empty" style="padding:48px 24px;">
-        <div style="font-size:2rem;margin-bottom:8px;">🚧</div>
-        <div style="color:#94a3b8;">성과분석은 2차 슬라이스에 추가됩니다.</div>
-        <div style="color:#475569;font-size:0.78rem;margin-top:6px;">신호↔잔고 매칭(<code>signalId</code>) 도입 후 활성화</div>
-      </div>
+      <div id="ops-perf-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
 
-    <!-- ⏮ 리플레이 (나중에 — 신호 시점 → 결과 매칭 재생) -->
-    <section class="ops-pane" id="ops-pane-replay">
-      <div class="ops-empty" style="padding:48px 24px;">
-        <div style="font-size:2rem;margin-bottom:8px;">🚧</div>
-        <div style="color:#94a3b8;">리플레이는 2차 슬라이스에 추가됩니다.</div>
-        <div style="color:#475569;font-size:0.78rem;margin-top:6px;">신호 발생 시점부터 후속 잔고 변화를 시간순 재생</div>
-      </div>
+    <!-- ⚙️ 시스템 상태 -->
+    <section class="ops-pane" id="ops-pane-system">
+      <div id="ops-system-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
   </div>
 </div>

@@ -31,6 +31,23 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false;
     }
+    // crypto 검증 허브 컬렉션
+    match /signals/{signalId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /paper_trades/{tradeId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /trade_results/{resultId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+    match /system_status/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
     // 그 외 모든 컬렉션 차단
     match /{document=**} {
       allow read, write: if false;

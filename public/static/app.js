@@ -55,11 +55,11 @@
       label: '📊 운영',
       auth: true,
       subs: [
-        { id: 'live',   label: '🟢 실시간',   page: 'page-ops', opsPane: 'live' },
-        { id: 'status', label: '⚙️ 운영상태', page: 'page-ops', opsPane: 'status' },
-        { id: 'events', label: '📜 이벤트 로그', page: 'page-ops', opsPane: 'events' },
-        { id: 'perf',   label: '📈 성과분석', page: 'page-ops', opsPane: 'perf', soon: true },
-        { id: 'replay', label: '⏮ 리플레이', page: 'page-ops', opsPane: 'replay', soon: true },
+        { id: 'signals', label: '🎯 신호',    page: 'page-ops', opsPane: 'signals' },
+        { id: 'trades',  label: '📊 검증 중', page: 'page-ops', opsPane: 'trades' },
+        { id: 'results', label: '📋 결과',    page: 'page-ops', opsPane: 'results' },
+        { id: 'perf',    label: '📈 성과',    page: 'page-ops', opsPane: 'perf' },
+        { id: 'system',  label: '⚙️ 시스템', page: 'page-ops', opsPane: 'system' },
       ],
       onEnter: () => { if (typeof loadOps === 'function') loadOps(); },
     },
@@ -1124,17 +1124,16 @@
   });
 
   /* ═══════════════════════════════════════
-     📊 운영 대시보드 (실시간 / 성과 / 리플레이 / 운영상태)
-     1차: 실시간, 운영상태, 리플레이(이벤트 타임라인) 활성
-     2차: 성과분석, 신호↔잔고 매칭
+     📊 Crypto 검증 허브 (5판)
+     신호 / 검증 중 / 결과 / 성과 / 시스템
   ═══════════════════════════════════════ */
-  let opsEventsKind = '';
-  let opsLastFetch = { balance: null, runs: null, events: null };
+  let opsData = {};
 
   function fmtKRW(n) {
     if (n == null || isNaN(n)) return '-';
     return Number(n).toLocaleString('ko-KR') + '원';
   }
+  function fmtPct(n) { return n == null || isNaN(n) ? '-' : (n >= 0 ? '+' : '') + n.toFixed(2) + '%'; }
   function fmtRel(iso) {
     if (!iso) return '';
     const t = new Date(iso).getTime();
@@ -1145,253 +1144,228 @@
     if (diff < 86400000) return Math.floor(diff/3600000) + '시간 전';
     return new Date(iso).toLocaleString('ko-KR');
   }
+  function fmtHold(min) {
+    if (!min || min < 1) return '-';
+    if (min < 60) return min + '분';
+    if (min < 1440) return Math.floor(min/60) + '시간 ' + (min%60) + '분';
+    return Math.floor(min/1440) + '일 ' + Math.floor((min%1440)/60) + '시간';
+  }
   function syncBadge(status) {
     const map = { ok:'#34d399', partial:'#fbbf24', failed:'#f87171' };
     const c = map[status] || '#64748b';
     return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(status||'-')}</span>`;
   }
-
-  // 이벤트 로그 kind 필터 (구 '리플레이'에서 분리)
-  document.getElementById('ops-events-filters')?.addEventListener('click', e => {
-    const btn = e.target.closest('.ops-chip');
-    if (!btn) return;
-    opsEventsKind = btn.dataset.kind || '';
-    document.querySelectorAll('#ops-events-filters .ops-chip').forEach(b => b.classList.toggle('active', b === btn));
-    renderOpsEvents();
-  });
-
-  async function loadOps() {
-    const hdrs = await authHeaders();
-    try {
-      const [balRes, runRes, evRes] = await Promise.all([
-        fetch('/api/balances/latest',          { headers: hdrs }),
-        fetch('/api/workflows/status?limit=50',{ headers: hdrs }),
-        fetch('/api/events?limit=200',         { headers: hdrs }),
-      ]);
-      opsLastFetch.balance = await balRes.json().catch(() => ({}));
-      opsLastFetch.runs    = await runRes.json().catch(() => ({}));
-      opsLastFetch.events  = await evRes.json().catch(() => ({}));
-    } catch (e) {
-      opsLastFetch = { balance: null, runs: null, events: null };
-    }
-    renderOpsLive();
-    renderOpsStatus();
-    renderOpsEvents();
+  function pnlColor(pct) { return pct > 0 ? '#34d399' : pct < 0 ? '#f87171' : '#64748b'; }
+  function resultBadge(r) {
+    if (r === 'win') return '<span style="color:#34d399;font-weight:700;">W</span>';
+    if (r === 'loss') return '<span style="color:#f87171;font-weight:700;">L</span>';
+    return '<span style="color:#64748b;">-</span>';
+  }
+  function sysStatusBadge(s) {
+    const map = { normal:['#34d399','정상'], caution:['#fbbf24','주의'], pause:['#f87171','중단'] };
+    const [c, label] = map[s] || ['#64748b', s || '-'];
+    return `<span style="display:inline-block;padding:4px 14px;border-radius:12px;font-size:0.85rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
   }
 
-  function renderOpsLive() {
-    const cardsEl = document.getElementById('ops-live-cards');
-    const feedEl  = document.getElementById('ops-live-feed');
-    if (!cardsEl || !feedEl) return;
+  // ── loadOps: 5개 API 병렬 호출 ──
+  async function loadOps() {
+    const hdrs = await authHeaders();
+    const safe = (p) => p.then(r => r.json()).catch(() => ({}));
+    try {
+      const [sig, tr, res, perf, sys] = await Promise.all([
+        safe(fetch('/api/signals?limit=50',           { headers: hdrs })),
+        safe(fetch('/api/paper-trades?status=open',   { headers: hdrs })),
+        safe(fetch('/api/trade-results?limit=100',    { headers: hdrs })),
+        safe(fetch('/api/performance?count=50',       { headers: hdrs })),
+        safe(fetch('/api/system-status',              { headers: hdrs })),
+      ]);
+      opsData = { signals: sig, trades: tr, results: res, perf, system: sys };
+    } catch (e) {
+      opsData = {};
+    }
+    renderSignals();
+    renderTrades();
+    renderResults();
+    renderPerf();
+    renderSystem();
+  }
 
-    const bal    = opsLastFetch.balance || {};
-    const latest = bal.latest;
-    const prev   = bal.previous;
-    const runs   = (opsLastFetch.runs && opsLastFetch.runs.latestByWorkflow) || [];
-    const events = (opsLastFetch.events && opsLastFetch.events.items) || [];
-
-    // ── 원가 기준 배너 ──
-    const banner = `
-      <div class="ops-banner" style="grid-column:1/-1;">
-        <span class="ops-banner-pill">원가 기준</span>
-        <span class="ops-banner-text">실시간 시세/평가금액이 아닙니다 — 입금·매수 누적 원가만 표시합니다.</span>
+  // ── 1. 신호 후보 ──
+  function renderSignals() {
+    const el = document.getElementById('ops-signals-content'); if (!el) return;
+    const items = (opsData.signals && opsData.signals.items) || [];
+    if (!items.length) { el.innerHTML = '<div class="ops-empty">후보 신호가 없습니다. n8n에서 kind=signal 로 보내면 여기에 나타납니다.</div>'; return; }
+    el.innerHTML = `
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>종목</th><th>점수</th><th>사유</th><th>진입 후보가</th><th>손절 기준</th><th>방향</th><th>상태</th><th>시각</th></tr></thead>
+          <tbody>${items.map(s => {
+            const scoreCls = s.score >= 70 ? 'color:#34d399' : s.score >= 40 ? 'color:#fbbf24' : 'color:#f87171';
+            return `<tr>
+              <td style="font-weight:700;color:#e2e8f0;">${esc(s.symbol)}</td>
+              <td style="${scoreCls};font-weight:700;">${s.score}</td>
+              <td style="color:#94a3b8;font-size:0.78rem;max-width:220px;white-space:normal;">${esc(s.scoreReason)}</td>
+              <td>${fmtKRW(s.entryPrice)}</td>
+              <td>${fmtKRW(s.stopLoss)}</td>
+              <td>${s.direction === 'long' ? '<span style="color:#34d399;">Long</span>' : '<span style="color:#f87171;">Short</span>'}</td>
+              <td>${syncBadge(s.status)}</td>
+              <td style="font-size:0.72rem;color:#475569;">${fmtRel(s.created_at)}</td>
+            </tr>`}).join('')}
+          </tbody>
+        </table>
       </div>`;
+  }
 
-    // ── 자산 카드: KRW 현금 / 코인 원가 / 추정 합계 ──
-    // n8n 계약: totalCostKRW = 코인 매수 원가, cashKRW = KRW 현금
-    // 추정 합계 = totalCostKRW + cashKRW (프론트 계산)
-    let cashCard, coinCard, sumCard, metaLine;
-    if (latest) {
-      const coinCost = Number(latest.totalCostKRW) || 0;     // n8n: 코인 원가
-      const cash     = Number(latest.cashKRW) || 0;          // n8n: KRW 현금
-      const estTotal = coinCost + cash;                      // 프론트 계산: 추정 합계
+  // ── 2. 검증 중 (paper trade) ──
+  function renderTrades() {
+    const el = document.getElementById('ops-trades-content'); if (!el) return;
+    const items = (opsData.trades && opsData.trades.items) || [];
+    if (!items.length) { el.innerHTML = '<div class="ops-empty">진행 중인 paper trade가 없습니다.</div>'; return; }
+    el.innerHTML = `
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th>종목</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대 유리</th><th>최대 불리</th><th>보유 시간</th><th>상태</th></tr></thead>
+          <tbody>${items.map(t => `<tr>
+            <td style="font-weight:700;color:#e2e8f0;">${esc(t.symbol)}</td>
+            <td>${fmtKRW(t.entryPrice)}</td>
+            <td>${fmtKRW(t.currentPrice)}</td>
+            <td style="color:${pnlColor(t.pnlPercent)};font-weight:700;">${fmtPct(t.pnlPercent)}</td>
+            <td style="color:#34d399;">${fmtPct(t.maxFavorable)}</td>
+            <td style="color:#f87171;">${fmtPct(t.maxAdverse)}</td>
+            <td>${fmtHold(t.holdTimeMin)}</td>
+            <td>${syncBadge(t.status)}</td>
+          </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
 
-      const prevCoinCost = prev ? (Number(prev.totalCostKRW) || 0) : null;
-      const prevCash     = prev ? (Number(prev.cashKRW) || 0) : null;
-      const prevEstTotal = prevCoinCost != null && prevCash != null ? (prevCoinCost + prevCash) : null;
+  // ── 3. 종료 결과 ──
+  function renderResults() {
+    const el = document.getElementById('ops-results-content'); if (!el) return;
+    const items = (opsData.results && opsData.results.items) || [];
+    if (!items.length) { el.innerHTML = '<div class="ops-empty">종료된 trade가 없습니다.</div>'; return; }
+    el.innerHTML = `
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead><tr><th></th><th>종목</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
+          <tbody>${items.map(r => `<tr>
+            <td>${resultBadge(r.result)}</td>
+            <td style="font-weight:700;color:#e2e8f0;">${esc(r.symbol)}</td>
+            <td style="color:${pnlColor(r.pnlPercent)};font-weight:700;">${fmtPct(r.pnlPercent)}</td>
+            <td style="color:#94a3b8;font-size:0.78rem;">${esc(r.exitReason)}</td>
+            <td>${fmtKRW(r.entryPrice)}</td>
+            <td>${fmtKRW(r.exitPrice)}</td>
+            <td style="font-size:0.72rem;color:#475569;">${fmtRel(r.exitAt || r.created_at)}</td>
+          </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
 
-      const mkDelta = (curr, prv) => {
-        if (prv == null) return '';
-        const d = curr - prv;
-        if (d === 0) return '<span style="color:#64748b;">변동 없음</span>';
-        const color = d > 0 ? '#34d399' : '#f87171';
-        const str = d > 0 ? `+${fmtKRW(d)}` : fmtKRW(d);
-        return `<span style="color:${color};font-weight:600;">${str}</span>`;
-      };
+  // ── 4. 성과 요약 ──
+  function renderPerf() {
+    const el = document.getElementById('ops-perf-content'); if (!el) return;
+    const p = opsData.perf || {};
+    if (!p.total) { el.innerHTML = '<div class="ops-empty">성과 데이터가 없습니다. trade 결과가 쌓이면 자동 계산됩니다.</div>'; return; }
+    const expectColor = p.expectation > 0 ? '#34d399' : p.expectation < 0 ? '#f87171' : '#64748b';
+    el.innerHTML = `
+      <div class="ops-cards">
+        <div class="ops-card">
+          <div class="ops-card-label">승률</div>
+          <div class="ops-card-value" style="color:${p.winRate >= 0.5 ? '#34d399' : '#f87171'};">${(p.winRate * 100).toFixed(1)}%</div>
+          <div class="ops-card-sub">${p.wins}승 ${p.losses}패 / 최근 ${p.total}건</div>
+        </div>
+        <div class="ops-card">
+          <div class="ops-card-label">평균 손익비</div>
+          <div class="ops-card-value">${p.avgPnlRatio === Infinity ? '∞' : p.avgPnlRatio}</div>
+          <div class="ops-card-sub">평균 수익 ${fmtPct(p.avgWinPercent)} / 평균 손실 -${p.avgLossPercent}%</div>
+        </div>
+        <div class="ops-card">
+          <div class="ops-card-label">기대값</div>
+          <div class="ops-card-value" style="color:${expectColor};">${fmtPct(p.expectation)}</div>
+          <div class="ops-card-sub">건당 기대 수익률</div>
+        </div>
+        <div class="ops-card">
+          <div class="ops-card-label">최대 연속손실</div>
+          <div class="ops-card-value" style="color:#f87171;">${p.maxConsecutiveLoss}</div>
+          <div class="ops-card-sub">연속 패배 횟수</div>
+        </div>
+        <div class="ops-card">
+          <div class="ops-card-label">최대낙폭</div>
+          <div class="ops-card-value" style="color:#f87171;">${p.maxDrawdownPercent}%</div>
+          <div class="ops-card-sub">누적 PnL 고점 대비</div>
+        </div>
+      </div>`;
+  }
 
-      // 1. KRW 현금
-      cashCard = `
+  // ── 5. 시스템 상태 (시스템 + 잔고 + 워크플로) ──
+  function renderSystem() {
+    const el = document.getElementById('ops-system-content'); if (!el) return;
+    const d = opsData.system || {};
+    const sys = d.system;
+    const bal = d.balance;
+    const wfs = d.workflows || [];
+
+    let html = '';
+
+    // 시스템 상태 뱃지
+    html += `<div class="ops-cards" style="margin-bottom:16px;">
+      <div class="ops-card" style="grid-column:1/-1;">
+        <div class="ops-card-label">시스템 상태</div>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:6px;">
+          ${sys ? sysStatusBadge(sys.status) : sysStatusBadge('normal')}
+          <span style="color:#94a3b8;font-size:0.85rem;">${sys ? esc(sys.reason) : '상태 정보 없음 (kind=system_status 미수신)'}</span>
+        </div>
+        ${sys && sys.lastSyncFailure ? `<div style="margin-top:8px;font-size:0.78rem;color:#f87171;">동기화 실패: ${esc(sys.lastSyncFailure)}</div>` : ''}
+        ${sys && sys.lastCollectFailure ? `<div style="font-size:0.78rem;color:#f87171;">수집 실패: ${esc(sys.lastCollectFailure)}</div>` : ''}
+        ${sys && sys.updated_at ? `<div style="font-size:0.72rem;color:#475569;margin-top:4px;">마지막 업데이트 ${fmtRel(sys.updated_at)}</div>` : ''}
+      </div>
+    </div>`;
+
+    // 잔고 카드 (cashKRW / totalCostKRW 분리)
+    html += '<div class="ops-cards" style="margin-bottom:16px;">';
+    if (bal) {
+      const coinCost = Number(bal.totalCostKRW) || 0;
+      const cash = Number(bal.cashKRW) || 0;
+      html += `
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
           <div class="ops-card-value">${fmtKRW(cash)}</div>
-          <div class="ops-card-sub">
-            ${cash > 0 ? '계좌 미투입 잔고' : '0원 또는 미수신'}
-            ${prevCash != null ? ` · ${mkDelta(cash, prevCash)}` : ''}
-          </div>
-        </div>`;
-
-      // 2. 코인 원가 (= n8n의 totalCostKRW)
-      coinCard = `
+          <div class="ops-card-sub">${cash > 0 ? '계좌 미투입 잔고' : '0원'}</div>
+        </div>
         <div class="ops-card">
           <div class="ops-card-label">📊 코인 원가</div>
           <div class="ops-card-value">${fmtKRW(coinCost)}</div>
-          <div class="ops-card-sub">
-            종목 ${(latest.perCoin || []).length}개
-            ${prevCoinCost != null ? ` · ${mkDelta(coinCost, prevCoinCost)}` : ''}
-          </div>
-        </div>`;
-
-      // 3. 추정 합계 (프론트 계산: 코인 원가 + 현금)
-      sumCard = `
+          <div class="ops-card-sub">종목 ${(bal.perCoin || []).length}개</div>
+        </div>
         <div class="ops-card ops-card-sum">
           <div class="ops-card-label">🟰 추정 합계</div>
-          <div class="ops-card-value">${fmtKRW(estTotal)}</div>
-          <div class="ops-card-sub">
-            코인 원가 + KRW 현금
-            ${prevEstTotal != null ? ` · ${mkDelta(estTotal, prevEstTotal)}` : ''}
-          </div>
-        </div>`;
-
-      // 메타 라인 (계좌 수 + sync + 시간)
-      metaLine = `
-        <div class="ops-meta-line" style="grid-column:1/-1;">
-          🏦 계좌 ${latest.accountCount || 0}개
-          · ${syncBadge(latest.syncStatus)}
-          ${latest.errorType ? ` · <span style="color:#f87171;">${esc(latest.errorType)}</span>` : ''}
-          · 마지막 수신 ${fmtRel(latest.created_at)}
+          <div class="ops-card-value">${fmtKRW(coinCost + cash)}</div>
+          <div class="ops-card-sub">코인 원가 + 현금 · ${fmtRel(bal.created_at)}</div>
         </div>`;
     } else {
-      const empty = (label, hint) => `<div class="ops-card"><div class="ops-card-label">${label}</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">${hint}</div></div>`;
-      cashCard = empty('💵 KRW 현금', '잔고 webhook 대기 중');
-      coinCard = empty('📊 코인 원가', '잔고 webhook 대기 중');
-      sumCard  = empty('🟰 추정 합계', '잔고 webhook 대기 중');
-      metaLine = `<div class="ops-meta-line" style="grid-column:1/-1;">🏦 계좌 0개 · 잔고 webhook 미수신</div>`;
+      html += '<div class="ops-card" style="grid-column:1/-1;"><div class="ops-card-label">잔고</div><div class="ops-card-value" style="color:#475569;">데이터 없음</div><div class="ops-card-sub">balance webhook 대기 중</div></div>';
     }
+    html += '</div>';
 
-    // ── 워크플로 상태 카드 (운영 지표, 자산과는 별도 그룹) ──
-    const okCount   = runs.filter(r => r.status === 'ok').length;
-    const failCount = runs.filter(r => r.status === 'failed').length;
-    const partCount = runs.filter(r => r.status === 'partial').length;
-    const wfCard = `
-      <div class="ops-card" style="grid-column:1/-1;border-color:rgba(167,139,250,0.25);">
-        <div class="ops-card-label">⚙️ 워크플로 상태</div>
-        <div class="ops-card-value" style="font-size:1.1rem;">
-          ${runs.length} <span style="font-size:0.8rem;color:#64748b;">개 활성</span>
-          <span style="margin-left:14px;">
-            ${syncBadge('ok')} ${okCount}
-            · ${syncBadge('partial')} ${partCount}
-            · ${syncBadge('failed')} ${failCount}
-          </span>
-        </div>
-        <div class="ops-card-sub">자세한 내역은 ⚙️ 운영상태 탭에서 확인</div>
-      </div>`;
-
-    cardsEl.innerHTML = banner + cashCard + coinCard + sumCard + metaLine + wfCard;
-
-    // ── 코인별 원가 미니 테이블 (full-width) ──
-    if (latest && latest.perCoin && latest.perCoin.length) {
-      cardsEl.insertAdjacentHTML('beforeend', `
-        <div class="ops-card" style="grid-column:1/-1;">
-          <div class="ops-card-label">코인별 투입 내역</div>
-          <div style="margin-top:8px;display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:6px 12px;font-size:0.82rem;">
-            <div style="color:#64748b;font-weight:600;">심볼</div>
-            <div style="color:#64748b;font-weight:600;text-align:right;">수량</div>
-            <div style="color:#64748b;font-weight:600;text-align:right;">평균단가</div>
-            <div style="color:#64748b;font-weight:600;text-align:right;">투입금</div>
-            ${latest.perCoin.map(c => `
-              <div style="color:#e2e8f0;font-weight:600;">${esc(c.symbol)}</div>
-              <div style="color:#cbd5e1;text-align:right;">${c.qty}</div>
-              <div style="color:#cbd5e1;text-align:right;">${fmtKRW(c.avgCost)}</div>
-              <div style="color:#cbd5e1;text-align:right;">${fmtKRW(c.invested)}</div>
-            `).join('')}
-          </div>
-        </div>
-      `);
-    }
-
-    // ── 최근 이벤트 5건 ──
-    const recent = events.slice(0, 5);
-    if (!recent.length) {
-      feedEl.innerHTML = '<div class="ops-empty">최근 이벤트가 없습니다.</div>';
-    } else {
-      feedEl.innerHTML = recent.map(ev => renderEventRow(ev)).join('');
-    }
-  }
-
-  function renderEventRow(ev) {
-    const kindColors = { balance:'#60a5fa', workflow_run:'#a78bfa', event:'#34d399' };
-    const c = kindColors[ev.kind] || '#94a3b8';
-    const payload = ev.payload || {};
-    const summary = payload.title || payload.message || ev.workflow || ev.kind;
-    return `
-      <div class="ops-event-row">
-        <div class="ops-event-dot" style="background:${c};"></div>
-        <div style="flex:1;min-width:0;">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <span style="font-weight:600;color:#e2e8f0;font-size:0.85rem;">${esc(summary)}</span>
-            <span style="font-size:0.7rem;padding:1px 7px;border-radius:8px;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(ev.kind)}</span>
-            ${ev.workflow ? `<span style="font-size:0.7rem;color:#64748b;">${esc(ev.workflow)}</span>` : ''}
-            ${ev.syncStatus ? syncBadge(ev.syncStatus) : ''}
-          </div>
-          <div style="font-size:0.72rem;color:#475569;margin-top:2px;">${fmtRel(ev.created_at)}${ev.errorType ? ' · ' + esc(ev.errorType) : ''}</div>
-        </div>
-      </div>`;
-  }
-
-  function renderOpsStatus() {
-    const gridEl = document.getElementById('ops-status-grid');
-    const runsEl = document.getElementById('ops-status-runs');
-    if (!gridEl || !runsEl) return;
-    const data = opsLastFetch.runs || {};
-    const latestByWf = data.latestByWorkflow || [];
-    const runs = data.runs || [];
-
-    if (!latestByWf.length) {
-      gridEl.innerHTML = '<div class="ops-empty">워크플로 실행 기록이 없습니다.</div>';
-      runsEl.innerHTML = '';
-      return;
-    }
-
-    gridEl.innerHTML = latestByWf.map(r => `
-      <div class="ops-card">
-        <div class="ops-card-label">${esc(r.workflow || '(unknown)')}</div>
-        <div class="ops-card-value" style="font-size:1rem;">${syncBadge(r.status)}</div>
-        <div class="ops-card-sub">
-          마지막 실행 ${fmtRel(r.created_at)}
-          ${r.errorType ? `<br><span style="color:#f87171;">${esc(r.errorType)}</span>` : ''}
-          ${r.eventCount ? `<br>이벤트 ${r.eventCount}건` : ''}
-        </div>
-      </div>
-    `).join('');
-
-    runsEl.innerHTML = runs.map(r => `
-      <div class="ops-event-row">
-        <div class="ops-event-dot" style="background:${r.status==='ok'?'#34d399':r.status==='failed'?'#f87171':'#fbbf24'};"></div>
-        <div style="flex:1;min-width:0;">
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-            <span style="font-weight:600;color:#e2e8f0;font-size:0.85rem;">${esc(r.workflow || '(unknown)')}</span>
+    // 워크플로 상태
+    if (wfs.length) {
+      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">워크플로 상태</div>';
+      html += wfs.map(r => `
+        <div class="ops-event-row">
+          <div class="ops-event-dot" style="background:${r.status==='ok'?'#34d399':r.status==='failed'?'#f87171':'#fbbf24'};"></div>
+          <div style="flex:1;min-width:0;">
+            <span style="font-weight:600;color:#e2e8f0;">${esc(r.workflow || '(unknown)')}</span>
             ${syncBadge(r.status)}
-            ${r.errorType ? `<span style="font-size:0.7rem;color:#f87171;">${esc(r.errorType)}</span>` : ''}
-          </div>
-          <div style="font-size:0.72rem;color:#475569;margin-top:2px;">
-            ${fmtRel(r.created_at)}
-            ${r.durationMs != null ? ' · ' + r.durationMs + 'ms' : ''}
-            ${r.eventCount ? ' · ' + r.eventCount + '건' : ''}
+            ${r.errorType ? `<span style="font-size:0.7rem;color:#f87171;"> ${esc(r.errorType)}</span>` : ''}
+            <span style="font-size:0.72rem;color:#475569;margin-left:8px;">${fmtRel(r.created_at)}</span>
           </div>
         </div>
-      </div>
-    `).join('');
-  }
-
-  function renderOpsEvents() {
-    const el = document.getElementById('ops-events-timeline');
-    if (!el) return;
-    const events = ((opsLastFetch.events && opsLastFetch.events.items) || []);
-    const filtered = opsEventsKind ? events.filter(e => e.kind === opsEventsKind) : events;
-    if (!filtered.length) {
-      el.innerHTML = '<div class="ops-empty">표시할 이벤트가 없습니다.</div>';
-      return;
+      `).join('');
+    } else {
+      html += '<div class="ops-empty">워크플로 실행 기록이 없습니다.</div>';
     }
-    el.innerHTML = filtered.map(ev => renderEventRow(ev)).join('');
+
+    el.innerHTML = html;
   }
-  // 운영 그룹 진입 시 loadOps() 는 NAV_GROUPS.ops.onEnter 에서 호출됨

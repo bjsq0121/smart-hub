@@ -952,6 +952,32 @@
     .ops-chip:hover { color: #e2e8f0; }
     .ops-chip.active { background: rgba(99,102,241,0.15); border-color: rgba(99,102,241,0.45); color: #c7d2fe; }
 
+    /* ops 테이블 (신호/검증/결과) */
+    .ops-table-wrap { overflow-x: auto; }
+    .ops-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.82rem;
+    }
+    .ops-table th {
+      text-align: left;
+      padding: 8px 10px;
+      color: #64748b;
+      font-weight: 600;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      white-space: nowrap;
+    }
+    .ops-table td {
+      padding: 10px 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: #cbd5e1;
+      white-space: nowrap;
+    }
+    .ops-table tr:hover td { background: rgba(255,255,255,0.02); }
+
     /* 원가 기준 알림 배너 */
     .ops-banner {
       display: flex;
