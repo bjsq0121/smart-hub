@@ -1412,17 +1412,27 @@ async def api_paper_trades(
 @app.get("/api/trade-results")
 async def api_trade_results(
     limit: int = Query(default=100, le=500),
+    source: str | None = Query(default=None),
+    after: str | None = Query(default=None),
+    before: str | None = Query(default=None),
     user: dict = Depends(verify_firebase_token),
 ):
-    """종료 결과 목록 (최근순)."""
+    """종료 결과 목록 (최근순). source: n8n|backtest, after/before: ISO8601."""
     try:
         db = _get_firestore()
-        docs = list(
-            db.collection("trade_results")
-              .order_by("created_at", direction=_firestore.Query.DESCENDING)
-              .limit(limit).stream()
-        )
-        return {"items": [_doc_to_dict(d) for d in docs]}
+        q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        try:
+            if source:
+                q = q.where("source", "==", source)
+            items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            all_items = [_doc_to_dict(d) for d in db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING).limit(limit).stream()]
+            items = [i for i in all_items if i.get("source") == source] if source else all_items
+        if after:
+            items = [i for i in items if (i.get("occurredAt") or i.get("created_at", "")) >= after]
+        if before:
+            items = [i for i in items if (i.get("occurredAt") or i.get("created_at", "")) <= before]
+        return {"items": items}
     except Exception:
         return {"items": [], "error": "trade_results 조회 실패"}
 
@@ -1480,17 +1490,26 @@ def _compute_perf_stats(results: list[dict]) -> dict:
 @app.get("/api/performance")
 async def api_performance(
     count: int = Query(default=50, le=500),
+    source: str | None = Query(default=None),
+    after: str | None = Query(default=None),
+    before: str | None = Query(default=None),
     user: dict = Depends(verify_firebase_token),
 ):
-    """성과 요약 — 최근 N건 trade_results 기반 서버 계산. 방향별 분리 집계 포함."""
+    """성과 요약 — trade_results 기반 서버 계산. source: n8n|backtest, 기간 필터."""
     try:
         db = _get_firestore()
-        docs = list(
-            db.collection("trade_results")
-              .order_by("created_at", direction=_firestore.Query.DESCENDING)
-              .limit(count).stream()
-        )
-        results = [_doc_to_dict(d) for d in docs]
+        q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        try:
+            if source:
+                q = q.where("source", "==", source)
+            results = [_doc_to_dict(d) for d in q.limit(count).stream()]
+        except Exception:
+            all_docs = [_doc_to_dict(d) for d in db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING).limit(count).stream()]
+            results = [r for r in all_docs if r.get("source") == source] if source else all_docs
+        if after:
+            results = [r for r in results if (r.get("occurredAt") or r.get("created_at", "")) >= after]
+        if before:
+            results = [r for r in results if (r.get("occurredAt") or r.get("created_at", "")) <= before]
 
         overall = _compute_perf_stats(results)
 

@@ -181,6 +181,9 @@
   window.setPerfCount = (v) => { opsPerfCount = v; loadOps(); };
   window.setStageFilter = (v) => { opsStageFilter = v; renderSignals(); };
   window.setResultDirFilter = (v) => { opsResultDirFilter = v; renderResults(); };
+  window.setResultSource = (v) => { opsResultSource = v; renderResults(); };
+  window.setPerfSource = (v) => { opsPerfSource = v; loadOps(); };
+  window.setBtPeriod = (v) => { opsBtPeriod = v; loadOps(); };
   window.toggleFactors = (id) => {
     const r = document.getElementById('factors-' + id);
     if (r) r.style.display = r.style.display === 'none' ? 'table-row' : 'none';
@@ -1191,6 +1194,9 @@
   let opsResultFilter = '';       // 결과 W/L 필터
   let opsStageFilter = '';        // 신호 stage 필터: '' | 'candidate' | 'trade_ready' | 'no_trade'
   let opsResultDirFilter = '';    // 결과 방향 필터: '' | 'long' | 'short'
+  let opsPerfSource = '';         // 성과 source 필터: '' | 'n8n' | 'backtest'
+  let opsResultSource = '';       // 결과 source 필터: '' | 'n8n' | 'backtest'
+  let opsBtPeriod = '';           // 백테스트 기간: '' | '1m' | '3m' | '6m'
   const OPS_STALE_MS = 5 * 60 * 1000; // 5분
   const OPS_REFRESH_MS = 30 * 1000;   // 30초
 
@@ -1289,11 +1295,21 @@
       } catch (e) { return { error: '네트워크 오류' }; }
     }
     try {
+      // 성과/결과 source + 기간 파라미터
+      let perfQ = '/api/performance?count=' + opsPerfCount;
+      let resQ = '/api/trade-results?limit=100';
+      if (opsPerfSource) perfQ += '&source=' + opsPerfSource;
+      if (opsPerfSource === 'backtest' && opsBtPeriod) {
+        const now = new Date();
+        const months = { '1m': 1, '3m': 3, '6m': 6 }[opsBtPeriod] || 0;
+        if (months) { const d = new Date(now); d.setMonth(d.getMonth() - months); perfQ += '&after=' + d.toISOString(); resQ += '&after=' + d.toISOString(); }
+      }
+
       const [sig, tr, res, perf, sys] = await Promise.all([
         safe(fetch('/api/signals?limit=50',                    { headers: hdrs })),
         safe(fetch('/api/paper-trades?status=open',            { headers: hdrs })),
-        safe(fetch('/api/trade-results?limit=100',             { headers: hdrs })),
-        safe(fetch('/api/performance?count=' + opsPerfCount,   { headers: hdrs })),
+        safe(fetch(resQ,                                       { headers: hdrs })),
+        safe(fetch(perfQ,                                      { headers: hdrs })),
         safe(fetch('/api/system-status',                       { headers: hdrs })),
       ]);
       opsData = { signals: sig, trades: tr, results: res, perf, system: sys };
@@ -1481,17 +1497,25 @@
     const longs = allItems.filter(r => (r.direction || 'long') === 'long').length;
     const shorts = allItems.filter(r => r.direction === 'short').length;
 
-    // W/L + 방향 필터 적용
+    // W/L + 방향 + source 필터 적용
     let filtered = allItems;
+    if (opsResultSource) filtered = filtered.filter(r => (r.source || 'n8n') === opsResultSource);
     if (opsResultFilter) filtered = filtered.filter(r => r.result === opsResultFilter);
     if (opsResultDirFilter) filtered = filtered.filter(r => (opsResultDirFilter === 'long' ? (r.direction || 'long') === 'long' : r.direction === opsResultDirFilter));
 
+    const liveCnt = allItems.filter(r => (r.source || 'n8n') !== 'backtest').length;
+    const btCnt = allItems.filter(r => r.source === 'backtest').length;
+
     let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
-      <button class="ops-chip${!opsResultFilter?' active':''}" onclick="setResultFilter('')">전체 (${allItems.length})</button>
+      <button class="ops-chip${!opsResultSource?' active':''}" onclick="setResultSource('')">전체 (${allItems.length})</button>
+      <button class="ops-chip${opsResultSource==='n8n'?' active':''}" onclick="setResultSource('n8n')" style="color:#60a5fa;">실전 (${liveCnt})</button>
+      <button class="ops-chip${opsResultSource==='backtest'?' active':''}" onclick="setResultSource('backtest')" style="color:#fb923c;">백테스트 (${btCnt})</button>
+      <span style="border-left:1px solid rgba(255,255,255,0.1);margin:0 4px;"></span>
+      <button class="ops-chip${!opsResultFilter?' active':''}" onclick="setResultFilter('')">W/L</button>
       <button class="ops-chip${opsResultFilter==='win'?' active':''}" onclick="setResultFilter('win')" style="color:#34d399;">W (${wins})</button>
       <button class="ops-chip${opsResultFilter==='loss'?' active':''}" onclick="setResultFilter('loss')" style="color:#f87171;">L (${losses})</button>
       <span style="border-left:1px solid rgba(255,255,255,0.1);margin:0 4px;"></span>
-      <button class="ops-chip${!opsResultDirFilter?' active':''}" onclick="setResultDirFilter('')">전체 방향</button>
+      <button class="ops-chip${!opsResultDirFilter?' active':''}" onclick="setResultDirFilter('')">방향</button>
       <button class="ops-chip${opsResultDirFilter==='long'?' active':''}" onclick="setResultDirFilter('long')" style="color:#34d399;">Long (${longs})</button>
       <button class="ops-chip${opsResultDirFilter==='short'?' active':''}" onclick="setResultDirFilter('short')" style="color:#f87171;">Short (${shorts})</button>
     </div>`;
@@ -1505,8 +1529,10 @@
       <div class="ops-table-wrap">
         <table class="ops-table">
           <thead><tr><th></th><th>종목</th><th>방향</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
-          <tbody>${filtered.map(r => `<tr>
-            <td>${resultBadge(r.result)}</td>
+          <tbody>${filtered.map(r => {
+            const isBT = r.source === 'backtest';
+            return `<tr${isBT ? ' style="opacity:0.85;"' : ''}>
+            <td>${resultBadge(r.result)}${isBT ? ' <span style="font-size:0.6rem;color:#fb923c;font-weight:700;">BT</span>' : ''}</td>
             <td style="font-weight:700;color:#e2e8f0;">${esc(r.symbol)}</td>
             <td>${directionBadge(r.direction)}</td>
             <td style="color:${pnlColor(r.pnlPercent)};font-weight:700;">${fmtPct(r.pnlPercent)}</td>
@@ -1514,7 +1540,7 @@
             <td>${fmtKRW(r.entryPrice)}</td>
             <td>${fmtKRW(r.exitPrice)}</td>
             <td style="font-size:0.72rem;color:#475569;">${fmtRel(r.exitAt || r.created_at)}</td>
-          </tr>`).join('')}
+          </tr>`}).join('')}
           </tbody>
         </table>
       </div>`;
@@ -1547,6 +1573,26 @@
       verdictDesc = '일부 지표가 경계 수준 — 추가 데이터 필요';
     }
 
+    // 실전/백테스트 모드 칩
+    const isBt = opsPerfSource === 'backtest';
+    const sourceChipHtml = `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
+      <button class="ops-chip${!opsPerfSource?' active':''}" onclick="setPerfSource('')">전체</button>
+      <button class="ops-chip${opsPerfSource==='n8n'?' active':''}" onclick="setPerfSource('n8n')" style="color:#60a5fa;">실전 (live)</button>
+      <button class="ops-chip${isBt?' active':''}" onclick="setPerfSource('backtest')" style="color:#fb923c;">백테스트</button>
+      ${isBt ? `<span style="border-left:1px solid rgba(255,255,255,0.1);margin:0 4px;"></span>
+        <button class="ops-chip${opsBtPeriod===''?' active':''}" onclick="setBtPeriod('')">전체 기간</button>
+        <button class="ops-chip${opsBtPeriod==='1m'?' active':''}" onclick="setBtPeriod('1m')">1개월</button>
+        <button class="ops-chip${opsBtPeriod==='3m'?' active':''}" onclick="setBtPeriod('3m')">3개월</button>
+        <button class="ops-chip${opsBtPeriod==='6m'?' active':''}" onclick="setBtPeriod('6m')">6개월</button>` : ''}
+    </div>`;
+
+    // 모드 배너
+    const modeBanner = isBt
+      ? `<div style="padding:8px 14px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#fb923c;">🟠 백테스트 성과 — 과거 시뮬레이션이며 실전 결과가 아닙니다</div>`
+      : opsPerfSource === 'n8n'
+        ? `<div style="padding:8px 14px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#60a5fa;">🟢 실전 성과 — 실제 거래 기반</div>`
+        : '';
+
     // 20/50건 토글
     const toggleHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center;">
       <span style="font-size:0.78rem;color:#94a3b8;">기준:</span>
@@ -1565,7 +1611,7 @@
         <div style="font-size:0.72rem;color:#475569;margin-top:6px;">기준: 기대값 > 0, 승률 >= 40%, 연속손실 <= 5, 낙폭 <= 15%</div>
       </div>`;
 
-    el.innerHTML = toggleHtml + `
+    el.innerHTML = sourceChipHtml + modeBanner + toggleHtml + `
       <div class="ops-cards">
         ${verdictCard}
         <div class="ops-card">
