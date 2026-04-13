@@ -470,11 +470,11 @@
           t.style.display = 'inline-block';
         }
       });
-      // 로그인 직후 — 홈/도구 같은 public 화면에 있었다면 운영으로 자동 진입
+      // 로그인 직후 — 홈으로 이동 (메뉴 선택은 사용자가)
       const active = document.querySelector('.page.active');
       const publicLanding = !active || ['page-home','page-price','page-realestate','page-unit','page-news'].includes(active.id);
       if (publicLanding && typeof navGoto === 'function') {
-        navGoto('ops', 'live');
+        navGoto('home');
       }
     } else {
       loginBtn.style.display  = 'inline-block';
