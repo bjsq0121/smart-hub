@@ -1363,10 +1363,15 @@
       } catch (e) { return { error: '네트워크 오류' }; }
     }
     try {
-      // 성과/결과 source + 기간 파라미터
+      // 성과/결과 source + 전략 + 기간 파라미터
       let perfQ = '/api/performance?count=' + opsPerfCount;
       let resQ = '/api/trade-results?limit=100';
-      if (opsPerfSource) perfQ += '&source=' + opsPerfSource;
+      if (opsPerfSource) { perfQ += '&source=' + opsPerfSource; resQ += '&source=' + opsPerfSource; }
+      if (opsStrategy) {
+        const [sym, dir] = opsStrategy.split('_');
+        if (sym) perfQ += '&symbol=' + sym;
+        if (dir) perfQ += '&direction=' + dir;
+      }
       if (opsPerfSource === 'backtest' && opsBtPeriod) {
         const now = new Date();
         const months = { '1m': 1, '3m': 3, '6m': 6 }[opsBtPeriod] || 0;
@@ -1712,12 +1717,22 @@
       modeBanner = `<div style="padding:8px 14px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#60a5fa;">🟢 실전 성과 — 실제 거래 기반</div>`;
     }
 
+    // 전략 필터 배너
+    if (opsStrategy) {
+      const sKey = opsStrategy;
+      const sStatus = STRATEGY_STATUS[sKey] || 'research';
+      modeBanner += `<div style="padding:6px 14px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:10px;margin-bottom:10px;font-size:0.8rem;display:flex;align-items:center;gap:8px;">
+        ${strategyBadge(sStatus)} <span style="color:#e2e8f0;font-weight:600;">${sKey.replace('_',' ')}</span> <span style="color:#64748b;">전략 성과</span>
+      </div>`;
+    }
+
     if (!d.total) {
+      const stratLabel = opsStrategy ? opsStrategy.replace('_', ' ') + ' — ' : '';
       const msg = isBt
-        ? '백테스트 결과가 없습니다. 위 실행 폼에서 백테스트를 돌려보세요.'
+        ? `${stratLabel}백테스트 결과가 없습니다. 위 실행 폼에서 백테스트를 돌려보세요.`
         : opsPerfSource === 'n8n'
-          ? '실전 거래 결과가 없습니다. XRP SHORT 첫 진입 → 종료 후 자동 집계됩니다.'
-          : '거래 결과가 쌓이면 자동으로 성과가 계산됩니다.';
+          ? `${stratLabel}실전 거래 결과가 없습니다. 검증 데이터 축적 중... score 65+ 진입 → 종료 후 자동 집계됩니다.`
+          : `${stratLabel}거래 결과가 쌓이면 자동으로 성과가 계산됩니다.`;
       el.innerHTML = sourceChipHtml + modeBanner + emptyState('noData', msg); return;
     }
     const p = d;
@@ -1728,7 +1743,7 @@
     let verdict, verdictColor, verdictDesc;
     if (p.total < 10) {
       verdict = '판단 보류'; verdictColor = '#64748b';
-      verdictDesc = `데이터 ${p.total}건 — 최소 10건 이상 필요`;
+      verdictDesc = `검증 데이터 축적 중 (${p.total}/10건) — 10건 이상 쌓여야 판정 가능`;
     } else if (p.expectation > 0 && p.winRate >= 0.4 && p.maxConsecutiveLoss <= 5 && p.maxDrawdownPercent <= 15) {
       verdict = '검토 가능'; verdictColor = '#34d399';
       verdictDesc = '기대값 양수, 승률/낙폭 허용 범위 내';

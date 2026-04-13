@@ -1535,11 +1535,13 @@ def _compute_perf_stats(results: list[dict]) -> dict:
 async def api_performance(
     count: int = Query(default=50, le=500),
     source: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
     after: str | None = Query(default=None),
     before: str | None = Query(default=None),
     user: dict = Depends(verify_firebase_token),
 ):
-    """성과 요약 — trade_results 기반 서버 계산. source: n8n|backtest, 기간 필터."""
+    """성과 요약 — trade_results 기반 서버 계산. source/symbol/direction/기간 필터."""
     try:
         db = _get_firestore()
         q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
@@ -1550,6 +1552,12 @@ async def api_performance(
         except Exception:
             all_docs = [_doc_to_dict(d) for d in db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING).limit(count).stream()]
             results = [r for r in all_docs if r.get("source") == source] if source else all_docs
+        # 전략 필터 (클라이언트 사이드)
+        if symbol:
+            sym_upper = symbol.upper().replace("/KRW", "").replace("KRW-", "")
+            results = [r for r in results if (r.get("symbol", "").upper().replace("/KRW", "").replace("KRW-", "") == sym_upper)]
+        if direction:
+            results = [r for r in results if r.get("direction", "").upper() == direction.upper()]
         if after:
             results = [r for r in results if (r.get("occurredAt") or r.get("created_at", "")) >= after]
         if before:
