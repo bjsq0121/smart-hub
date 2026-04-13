@@ -1198,6 +1198,8 @@ async def webhook_ingest(env: IngestEnvelope):
             run_id = ref.id
         elif env.kind == "signal":
             norm = _normalize_signal(env.payload)
+            if not norm["symbol"]:
+                return {"ok": False, "eventId": event_doc.id, "error": "signal에 symbol이 비어있습니다."}
             ref = db.collection("signals").document()
             ref.set({
                 **norm,
@@ -1208,6 +1210,8 @@ async def webhook_ingest(env: IngestEnvelope):
             })
         elif env.kind == "paper_trade":
             norm = _normalize_paper_trade(env.payload)
+            if not norm["symbol"]:
+                return {"ok": False, "eventId": event_doc.id, "error": "paper_trade에 symbol이 비어있습니다."}
             trade_id = norm.get("tradeId") or event_doc.id
             ref = db.collection("paper_trades").document(trade_id)
             existing = ref.get()
