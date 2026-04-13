@@ -1614,23 +1614,23 @@
       const hasMarket = coinMarket > 0;
 
       // ── 원가 기준 ──
-      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">투입 원가</div>';
+      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">투입 원가 <span style="font-weight:400;font-size:0.72rem;">(내가 넣은 돈)</span></div>';
       html += '<div class="ops-cards" style="margin-bottom:12px;">';
       html += `
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
           <div class="ops-card-value">${fmtKRW(cash)}</div>
-          <div class="ops-card-sub">미투입 잔고 · ${syncBadge(bal.syncStatus)}</div>
+          <div class="ops-card-sub">매수에 안 쓴 현금 · ${syncBadge(bal.syncStatus)}</div>
         </div>
         <div class="ops-card">
-          <div class="ops-card-label">📊 코인 원가</div>
+          <div class="ops-card-label">📊 코인 매수 원가</div>
           <div class="ops-card-value">${fmtKRW(coinCost)}</div>
-          <div class="ops-card-sub">매수 누적 · 종목 ${(bal.perCoin || []).length}개</div>
+          <div class="ops-card-sub">매수 평균가 × 수량 · 종목 ${(bal.perCoin || []).length}개</div>
         </div>
         <div class="ops-card">
-          <div class="ops-card-label">🟰 원가 합계</div>
+          <div class="ops-card-label">🟰 투입 합계</div>
           <div class="ops-card-value">${fmtKRW(coinCost + cash)}</div>
-          <div class="ops-card-sub">현금 + 코인 원가</div>
+          <div class="ops-card-sub">현금 + 매수 원가 (현재 시세 아님)</div>
         </div>`;
       html += '</div>';
 
@@ -1642,30 +1642,30 @@
         const pnlColor_ = pnl > 0 ? '#34d399' : pnl < 0 ? '#f87171' : '#64748b';
         const pnlSign = pnl >= 0 ? '+' : '';
 
-        html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">현재 평가</div>';
+        html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">현재 평가 <span style="font-weight:400;font-size:0.72rem;">(지금 시세 기준)</span></div>';
         html += '<div class="ops-cards" style="margin-bottom:12px;">';
         html += `
           <div class="ops-card">
             <div class="ops-card-label">💰 코인 평가액</div>
             <div class="ops-card-value">${fmtKRW(coinMarket)}</div>
-            <div class="ops-card-sub">현재가 기준</div>
+            <div class="ops-card-sub">현재가 × 보유수량</div>
           </div>
           <div class="ops-card ops-card-sum">
             <div class="ops-card-label">🟰 총 평가자산</div>
             <div class="ops-card-value">${fmtKRW(totalEval)}</div>
-            <div class="ops-card-sub">현금 + 코인 평가액</div>
+            <div class="ops-card-sub">현금 + 코인 평가액 = 내 계좌 현재 가치</div>
           </div>
           <div class="ops-card" style="border-color:${pnlColor_}55;background:${pnlColor_}08;">
             <div class="ops-card-label">📈 평가손익</div>
             <div class="ops-card-value" style="color:${pnlColor_};">${pnlSign}${fmtKRW(pnl)}</div>
-            <div class="ops-card-sub" style="color:${pnlColor_};">${pnlSign}${pnlPct.toFixed(2)}% (평가 − 원가)</div>
+            <div class="ops-card-sub" style="color:${pnlColor_};">${pnlSign}${pnlPct.toFixed(2)}% (코인 평가액 − 매수 원가)</div>
           </div>`;
         html += '</div>';
       }
 
       html += `<div class="ops-meta-line" style="margin-bottom:16px;">
         🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}
-        ${!hasMarket ? ' · <span style="color:#64748b;">시세 미제공 — 원가만 표시</span>' : ''}
+        ${!hasMarket ? ' · <span style="color:#fbbf24;">현재가 미수신 — 위 숫자는 매수 원가이며 현재 시세가 아닙니다</span>' : ''}
         ${bal.errorType ? ` · <span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
       </div>`;
     } else {
