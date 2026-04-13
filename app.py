@@ -1231,17 +1231,30 @@ async def webhook_ingest(env: IngestEnvelope):
             })
             run_id = ref.id
         elif env.kind == "signal":
-            norm = _normalize_signal(env.payload)
-            if not norm["symbol"]:
-                return {"ok": False, "eventId": event_doc.id, "error": "signal에 symbol이 비어있습니다."}
-            ref = db.collection("signals").document()
-            ref.set({
-                **norm,
-                "source": env.source, "workflow": env.workflow,
-                "syncStatus": env.syncStatus, "errorType": env.errorType,
-                "occurredAt": env.occurredAt, "eventId": event_doc.id,
-                "created_at": _firestore.SERVER_TIMESTAMP,
-            })
+            # market:"stock" 이면 stock_signals 컬렉션으로 라우팅 (kind 오발송 방어)
+            if (env.payload.get("market") or "").lower() == "stock":
+                meta = {
+                    "source": env.source, "workflow": env.workflow,
+                    "syncStatus": env.syncStatus, "errorType": env.errorType,
+                    "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                }
+                norm = _normalize_stock_signal(env.payload, meta)
+                if not norm["symbol"]:
+                    return {"ok": False, "eventId": event_doc.id, "error": "stock signal에 symbol이 비어있습니다."}
+                ref = db.collection("stock_signals").document(norm["signalId"] or None)
+                ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
+            else:
+                norm = _normalize_signal(env.payload)
+                if not norm["symbol"]:
+                    return {"ok": False, "eventId": event_doc.id, "error": "signal에 symbol이 비어있습니다."}
+                ref = db.collection("signals").document()
+                ref.set({
+                    **norm,
+                    "source": env.source, "workflow": env.workflow,
+                    "syncStatus": env.syncStatus, "errorType": env.errorType,
+                    "occurredAt": env.occurredAt, "eventId": event_doc.id,
+                    "created_at": _firestore.SERVER_TIMESTAMP,
+                })
         elif env.kind == "paper_trade":
             norm = _normalize_paper_trade(env.payload)
             if not norm["symbol"]:
@@ -1497,6 +1510,42 @@ async def api_stock_alerts(
         return {"items": items}
     except Exception:
         return {"items": [], "error": "stock_alerts 조회 실패"}
+
+
+# ── 주식 데이터 정리 (코인 signals → stock_signals 이동) ──
+
+@app.post("/api/admin/migrate-stock-signals", dependencies=[Depends(verify_webhook_secret)])
+async def migrate_stock_signals():
+    """signals/ 컬렉션에 잘못 들어간 주식 데이터를 stock_signals/로 이동 후 삭제."""
+    try:
+        db = _get_firestore()
+        signals = db.collection("signals").stream()
+        moved = 0
+        for doc in signals:
+            data = doc.to_dict() or {}
+            # source=paperclip 이거나 market=stock 이면 주식 데이터
+            is_stock = (
+                (data.get("market") or "").lower() == "stock"
+                or data.get("source") == "paperclip"
+            )
+            if not is_stock:
+                continue
+            # stock_signals 로 복사
+            sig_id = data.get("signalId") or doc.id
+            target = db.collection("stock_signals").document(sig_id)
+            write_data = {**data, "market": "stock"}
+            if "created_at" not in write_data:
+                write_data["created_at"] = _firestore.SERVER_TIMESTAMP
+            target.set(write_data)
+            # 원본 삭제
+            doc.reference.delete()
+            moved += 1
+        return {"ok": True, "moved": moved}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+## clean-stock-data API 제거됨 — 실수로 실제 데이터까지 삭제 방지
 
 
 # ── crypto 검증 허브 GET 엔드포인트 ──

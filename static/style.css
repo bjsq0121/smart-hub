@@ -881,6 +881,8 @@
     }
     .ops-pane { display: none; }
     .ops-pane.active { display: block; }
+    .stock-ops-pane { display: none; }
+    .stock-ops-pane.active { display: block; }
     .admin-pane { display: none; }
     .admin-pane.active { display: block; }
     .ops-cards {
