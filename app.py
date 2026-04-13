@@ -1539,9 +1539,10 @@ async def api_performance(
     direction: str | None = Query(default=None),
     after: str | None = Query(default=None),
     before: str | None = Query(default=None),
+    excludeSymbols: str | None = Query(default=None),   # "SOL,DOGE" 쉼표 구분
     user: dict = Depends(verify_firebase_token),
 ):
-    """성과 요약 — trade_results 기반 서버 계산. source/symbol/direction/기간 필터."""
+    """성과 요약 — trade_results 기반 서버 계산. source/symbol/direction/기간/제외 필터."""
     try:
         db = _get_firestore()
         q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
@@ -1562,6 +1563,10 @@ async def api_performance(
             results = [r for r in results if (r.get("occurredAt") or r.get("created_at", "")) >= after]
         if before:
             results = [r for r in results if (r.get("occurredAt") or r.get("created_at", "")) <= before]
+        # 제외 전략 격리 (excludeSymbols 파라미터)
+        if excludeSymbols:
+            ex_set = {s.strip().upper() for s in excludeSymbols.split(",") if s.strip()}
+            results = [r for r in results if r.get("symbol", "").upper().replace("/KRW", "").replace("KRW-", "") not in ex_set]
 
         overall = _compute_perf_stats(results)
 

@@ -1371,6 +1371,12 @@
         const [sym, dir] = opsStrategy.split('_');
         if (sym) perfQ += '&symbol=' + sym;
         if (dir) perfQ += '&direction=' + dir;
+      } else {
+        // "전체" 모드: 제외 전략 자동 제외
+        const excludedSyms = [...new Set(Object.entries(STRATEGY_STATUS)
+          .filter(([,v]) => v === 'excluded')
+          .map(([k]) => k.split('_')[0]))];
+        if (excludedSyms.length) perfQ += '&excludeSymbols=' + excludedSyms.join(',');
       }
       if (opsPerfSource === 'backtest' && opsBtPeriod) {
         const now = new Date();
