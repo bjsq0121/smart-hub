@@ -1331,11 +1331,22 @@ async def api_signals(
     try:
         db = _get_firestore()
         q = db.collection("signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
-        if status:
-            q = q.where("status", "==", status)
-        if stage:
-            q = q.where("stage", "==", stage)
-        return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
+        try:
+            if status:
+                q = q.where("status", "==", status)
+            if stage:
+                q = q.where("stage", "==", stage)
+            items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            # 복합 인덱스 미생성 시 필터 없이 전체 조회 폴백
+            q = db.collection("signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
+            all_items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+            items = all_items
+            if status:
+                items = [i for i in items if i.get("status") == status]
+            if stage:
+                items = [i for i in items if i.get("stage") == stage]
+        return {"items": items}
     except Exception:
         return {"items": [], "error": "signals 조회 실패"}
 
@@ -1350,9 +1361,16 @@ async def api_paper_trades(
     try:
         db = _get_firestore()
         q = db.collection("paper_trades").order_by("created_at", direction=_firestore.Query.DESCENDING)
-        if status:
-            q = q.where("status", "==", status)
-        return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
+        try:
+            if status:
+                q = q.where("status", "==", status)
+            items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            # 복합 인덱스 미생성 시 필터 없이 전체 조회 폴백
+            q = db.collection("paper_trades").order_by("created_at", direction=_firestore.Query.DESCENDING)
+            all_items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+            items = [i for i in all_items if i.get("status") == status] if status else all_items
+        return {"items": items}
     except Exception:
         return {"items": [], "error": "paper_trades 조회 실패"}
 
