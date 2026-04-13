@@ -179,6 +179,12 @@
   window.setSignalFilter = (v) => { opsSignalFilter = v; renderSignals(); };
   window.setResultFilter = (v) => { opsResultFilter = v; renderResults(); };
   window.setPerfCount = (v) => { opsPerfCount = v; loadOps(); };
+  window.setStageFilter = (v) => { opsStageFilter = v; renderSignals(); };
+  window.setResultDirFilter = (v) => { opsResultDirFilter = v; renderResults(); };
+  window.toggleFactors = (id) => {
+    const r = document.getElementById('factors-' + id);
+    if (r) r.style.display = r.style.display === 'none' ? 'table-row' : 'none';
+  };
 
   // 상단 그룹 버튼 클릭
   document.getElementById('nav-groups')?.addEventListener('click', e => {
@@ -1139,6 +1145,8 @@
   let opsPerfCount = 50;          // 성과 20/50 토글
   let opsSignalFilter = '';       // 신호 종목 필터
   let opsResultFilter = '';       // 결과 W/L 필터
+  let opsStageFilter = '';        // 신호 stage 필터: '' | 'candidate' | 'trade_ready' | 'no_trade'
+  let opsResultDirFilter = '';    // 결과 방향 필터: '' | 'long' | 'short'
   const OPS_STALE_MS = 5 * 60 * 1000; // 5분
   const OPS_REFRESH_MS = 30 * 1000;   // 30초
 
@@ -1172,7 +1180,7 @@
   // signal/paper_trade 상태 전용 뱃지 (candidate/entered/expired/open/closed 등)
   function itemStatusBadge(status) {
     const map = {
-      candidate:['#60a5fa','후보'], entered:['#a78bfa','진입'], expired:['#64748b','만료'],
+      candidate:['#60a5fa','후보'], trade_ready:['#a78bfa','매매 후보'], entered:['#a78bfa','진입'], expired:['#64748b','만료'],
       rejected:['#f87171','거절'], open:['#fbbf24','진행 중'], closed:['#94a3b8','종료'],
     };
     const [c, label] = map[status] || ['#64748b', status || '-'];
@@ -1188,6 +1196,19 @@
     const map = { normal:['#34d399','정상'], caution:['#fbbf24','주의'], pause:['#f87171','중단'] };
     const [c, label] = map[s] || ['#64748b', s || '-'];
     return `<span style="display:inline-block;padding:4px 14px;border-radius:12px;font-size:0.85rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
+  }
+  // 방향 뱃지 (long / short / no_trade)
+  function directionBadge(dir) {
+    if (dir === 'long') return '<span style="color:#34d399;font-weight:700;">Long</span>';
+    if (dir === 'short') return '<span style="color:#f87171;font-weight:700;">Short</span>';
+    if (dir === 'no_trade') return '<span style="color:#64748b;font-weight:700;">제외</span>';
+    return '<span style="color:#64748b;">-</span>';
+  }
+  // 단계 뱃지 (candidate / trade_ready)
+  function stageBadge(stage) {
+    const map = { candidate:['#60a5fa','감시'], trade_ready:['#a78bfa','매매 후보'] };
+    const [c, label] = map[stage] || ['#60a5fa', '감시'];
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
   }
   // 빈 화면 구분 메시지
   function emptyState(type, extra) {
@@ -1275,7 +1296,7 @@
     setInterval(updateOpsTimestamp, 10000);
   }
 
-  // ── 1. 신호 후보 (종목 필터) ──
+  // ── 1. 신호 후보 (단계 필터 + 종목 필터 + 팩터 확장) ──
   function renderSignals() {
     const el = document.getElementById('ops-signals-content'); if (!el) return;
     const d = opsData.signals || {};
@@ -1284,30 +1305,88 @@
     const allItems = d.items || [];
     if (!allItems.length) { el.innerHTML = emptyState('noData', 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
 
-    // 종목 필터 칩
-    const symbols = [...new Set(allItems.map(s => s.symbol).filter(Boolean))].sort();
-    const items = opsSignalFilter ? allItems.filter(s => s.symbol === opsSignalFilter) : allItems;
+    // 단계/방향 기반 건수
+    const cntCandidate = allItems.filter(s => (s.stage || 'candidate') === 'candidate' && s.direction !== 'no_trade').length;
+    const cntReady = allItems.filter(s => s.stage === 'trade_ready').length;
+    const cntNoTrade = allItems.filter(s => s.direction === 'no_trade').length;
 
-    let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
-      <button class="ops-chip${!opsSignalFilter?' active':''}" onclick="setSignalFilter('')">전체 (${allItems.length})</button>
-      ${symbols.map(sym => `<button class="ops-chip${opsSignalFilter===sym?' active':''}" onclick="setSignalFilter('${sym}')">${esc(sym)}</button>`).join('')}
+    // 1) stage 필터 적용
+    let stageFiltered = allItems;
+    if (opsStageFilter === 'candidate') stageFiltered = allItems.filter(s => (s.stage || 'candidate') === 'candidate' && s.direction !== 'no_trade');
+    else if (opsStageFilter === 'trade_ready') stageFiltered = allItems.filter(s => s.stage === 'trade_ready');
+    else if (opsStageFilter === 'no_trade') stageFiltered = allItems.filter(s => s.direction === 'no_trade');
+
+    // 2) 종목 필터 적용
+    const symbols = [...new Set(stageFiltered.map(s => s.symbol).filter(Boolean))].sort();
+    const items = opsSignalFilter ? stageFiltered.filter(s => s.symbol === opsSignalFilter) : stageFiltered;
+
+    // 단계 필터 칩
+    let stageHtml = `<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+      <button class="ops-chip${!opsStageFilter?' active':''}" onclick="setStageFilter('')">전체 (${allItems.length})</button>
+      <button class="ops-chip${opsStageFilter==='candidate'?' active':''}" onclick="setStageFilter('candidate')" style="color:#60a5fa;">감시 (${cntCandidate})</button>
+      <button class="ops-chip${opsStageFilter==='trade_ready'?' active':''}" onclick="setStageFilter('trade_ready')" style="color:#a78bfa;">매매 후보 (${cntReady})</button>
+      <button class="ops-chip${opsStageFilter==='no_trade'?' active':''}" onclick="setStageFilter('no_trade')" style="color:#64748b;">제외 (${cntNoTrade})</button>
     </div>`;
 
-    el.innerHTML = filterHtml + `
+    // 종목 필터 칩
+    let symbolHtml = symbols.length > 1 ? `<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+      <button class="ops-chip${!opsSignalFilter?' active':''}" onclick="setSignalFilter('')">전체 종목</button>
+      ${symbols.map(sym => `<button class="ops-chip${opsSignalFilter===sym?' active':''}" onclick="setSignalFilter('${sym}')">${esc(sym)}</button>`).join('')}
+    </div>` : '';
+
+    // 팩터 렌더 헬퍼
+    function renderFactors(s) {
+      if (!s.factors || typeof s.factors !== 'object') return '<div style="color:#475569;font-size:0.78rem;">분석 팩터 없음</div>';
+      const labels = { trend:'추세', rsi:'RSI', timing:'진입 타이밍', volume:'거래량', riskReward:'R:R' };
+      return `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;">
+        ${Object.entries(s.factors).map(([k,v]) => {
+          const val = typeof v === 'object' && v !== null ? v : { value: v };
+          const scoreColor = (val.score || 0) >= 7 ? '#34d399' : (val.score || 0) >= 4 ? '#fbbf24' : '#f87171';
+          return `<div style="padding:6px 10px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid rgba(255,255,255,0.06);">
+            <div style="font-size:0.68rem;color:#64748b;text-transform:uppercase;">${esc(labels[k] || k)}</div>
+            <div style="font-size:0.85rem;color:#e2e8f0;font-weight:600;">${esc(String(val.value != null ? val.value : '-'))}</div>
+            ${val.score != null ? `<div style="font-size:0.68rem;color:${scoreColor};">점수 ${val.score}</div>` : ''}
+          </div>`;
+        }).join('')}
+      </div>`;
+    }
+
+    // 사유 표시 (no_trade면 제외 사유 함께)
+    function reasonCell(s) {
+      let html = `<span>${esc(s.scoreReason || '')}</span>`;
+      if (s.direction === 'no_trade' && s.noTradeReason) {
+        html += `<div style="margin-top:4px;font-size:0.72rem;color:#f87171;border-left:2px solid #f87171;padding-left:6px;">제외: ${esc(s.noTradeReason)}</div>`;
+      }
+      return html;
+    }
+
+    if (!items.length) {
+      const stageLabel = { candidate:'감시 후보', trade_ready:'매매 후보', no_trade:'제외' }[opsStageFilter] || '';
+      el.innerHTML = stageHtml + symbolHtml + emptyState('noData', stageLabel ? `현재 ${stageLabel} 신호가 없습니다.` : '필터에 해당하는 신호가 없습니다.');
+      return;
+    }
+
+    el.innerHTML = stageHtml + symbolHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>점수</th><th>사유</th><th>진입 후보가</th><th>손절 기준</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
-          <tbody>${items.map(s => {
+          <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
+          <tbody>${items.map((s, idx) => {
             const scoreCls = s.score >= 70 ? 'color:#34d399' : s.score >= 40 ? 'color:#fbbf24' : 'color:#f87171';
-            return `<tr>
-              <td style="font-weight:700;color:#e2e8f0;">${esc(s.symbol)}</td>
+            const isNoTrade = s.direction === 'no_trade';
+            const sid = String(s.signalId || s.id || idx).replace(/[^a-zA-Z0-9_-]/g, '_');
+            return `<tr class="${isNoTrade ? 'no-trade' : ''}" style="cursor:pointer;" onclick="toggleFactors('${sid}')">
+              <td style="font-weight:700;color:#e2e8f0;">${esc(s.symbol)} <span style="font-size:0.65rem;color:#475569;">&#9662;</span></td>
+              <td>${stageBadge(s.stage || 'candidate')}</td>
               <td style="${scoreCls};font-weight:700;">${s.score}</td>
-              <td style="color:#94a3b8;font-size:0.78rem;max-width:220px;white-space:normal;">${esc(s.scoreReason)}</td>
-              <td>${fmtKRW(s.entryPrice)}</td>
-              <td>${fmtKRW(s.stopLoss)}</td>
-              <td>${s.direction === 'long' ? '<span style="color:#34d399;">Long</span>' : '<span style="color:#f87171;">Short</span>'}</td>
+              <td style="color:#94a3b8;font-size:0.78rem;max-width:240px;white-space:normal;">${reasonCell(s)}</td>
+              <td>${isNoTrade ? '-' : fmtKRW(s.entryPrice)}</td>
+              <td>${isNoTrade ? '-' : fmtKRW(s.stopLoss)}</td>
+              <td>${directionBadge(s.direction)}</td>
               <td>${itemStatusBadge(s.status)}</td>
               <td style="font-size:0.72rem;color:#475569;">${fmtRel(s.created_at)}</td>
+            </tr>
+            <tr class="ops-factors-row" id="factors-${sid}" style="display:none;">
+              <td colspan="9" style="padding:10px 16px;">${renderFactors(s)}</td>
             </tr>`}).join('')}
           </tbody>
         </table>
@@ -1325,9 +1404,10 @@
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대유리</th><th>최대불리</th><th>보유시간</th><th>상태</th><th>진입</th><th>갱신</th></tr></thead>
+          <thead><tr><th>종목</th><th>방향</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대유리</th><th>최대불리</th><th>보유시간</th><th>상태</th><th>진입</th><th>갱신</th></tr></thead>
           <tbody>${items.map(t => `<tr>
             <td style="font-weight:700;color:#e2e8f0;">${esc(t.symbol)}</td>
+            <td>${directionBadge(t.direction)}</td>
             <td>${fmtKRW(t.entryPrice)}</td>
             <td>${fmtKRW(t.currentPrice)}</td>
             <td style="color:${pnlColor(t.pnlPercent)};font-weight:700;">${fmtPct(t.pnlPercent)}</td>
@@ -1343,7 +1423,7 @@
       </div>`;
   }
 
-  // ── 3. 종료 결과 (W/L 필터) ──
+  // ── 3. 종료 결과 (W/L 필터 + 방향 필터) ──
   function renderResults() {
     const el = document.getElementById('ops-results-content'); if (!el) return;
     const d = opsData.results || {};
@@ -1354,21 +1434,37 @@
 
     const wins = allItems.filter(r => r.result === 'win').length;
     const losses = allItems.filter(r => r.result === 'loss').length;
-    const items = opsResultFilter ? allItems.filter(r => r.result === opsResultFilter) : allItems;
+    const longs = allItems.filter(r => (r.direction || 'long') === 'long').length;
+    const shorts = allItems.filter(r => r.direction === 'short').length;
 
-    let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;">
+    // W/L + 방향 필터 적용
+    let filtered = allItems;
+    if (opsResultFilter) filtered = filtered.filter(r => r.result === opsResultFilter);
+    if (opsResultDirFilter) filtered = filtered.filter(r => (opsResultDirFilter === 'long' ? (r.direction || 'long') === 'long' : r.direction === opsResultDirFilter));
+
+    let filterHtml = `<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
       <button class="ops-chip${!opsResultFilter?' active':''}" onclick="setResultFilter('')">전체 (${allItems.length})</button>
       <button class="ops-chip${opsResultFilter==='win'?' active':''}" onclick="setResultFilter('win')" style="color:#34d399;">W (${wins})</button>
       <button class="ops-chip${opsResultFilter==='loss'?' active':''}" onclick="setResultFilter('loss')" style="color:#f87171;">L (${losses})</button>
+      <span style="border-left:1px solid rgba(255,255,255,0.1);margin:0 4px;"></span>
+      <button class="ops-chip${!opsResultDirFilter?' active':''}" onclick="setResultDirFilter('')">전체 방향</button>
+      <button class="ops-chip${opsResultDirFilter==='long'?' active':''}" onclick="setResultDirFilter('long')" style="color:#34d399;">Long (${longs})</button>
+      <button class="ops-chip${opsResultDirFilter==='short'?' active':''}" onclick="setResultDirFilter('short')" style="color:#f87171;">Short (${shorts})</button>
     </div>`;
+
+    if (!filtered.length) {
+      el.innerHTML = filterHtml + emptyState('noData', '필터에 해당하는 결과가 없습니다.');
+      return;
+    }
 
     el.innerHTML = filterHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th></th><th>종목</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
-          <tbody>${items.map(r => `<tr>
+          <thead><tr><th></th><th>종목</th><th>방향</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
+          <tbody>${filtered.map(r => `<tr>
             <td>${resultBadge(r.result)}</td>
             <td style="font-weight:700;color:#e2e8f0;">${esc(r.symbol)}</td>
+            <td>${directionBadge(r.direction)}</td>
             <td style="color:${pnlColor(r.pnlPercent)};font-weight:700;">${fmtPct(r.pnlPercent)}</td>
             <td style="color:#94a3b8;font-size:0.78rem;">${esc(r.exitReason)}</td>
             <td>${fmtKRW(r.entryPrice)}</td>
@@ -1454,6 +1550,33 @@
           <div class="ops-card-sub">누적 PnL 고점 대비</div>
         </div>
       </div>`;
+
+    // 방향별 성과 (byDirection) — 0건인 방향은 카드 미표시
+    const byDir = p.byDirection || {};
+    const lp = byDir.long || {};
+    const sp = byDir.short || {};
+    if (lp.total > 0 || sp.total > 0) {
+      let dirCards = '';
+      if (lp.total > 0) {
+        dirCards += `<div class="ops-card" style="border-color:rgba(52,211,153,0.3);">
+            <div class="ops-card-label" style="color:#34d399;">LONG</div>
+            <div class="ops-card-value">${lp.total}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
+            <div class="ops-card-sub">승률 ${((lp.winRate||0)*100).toFixed(1)}% · ${lp.wins||0}승 ${lp.losses||0}패</div>
+            <div class="ops-card-sub">기대값 ${fmtPct(lp.expectation||0)} · 손익비 ${lp.avgPnlRatio||0}</div>
+          </div>`;
+      }
+      if (sp.total > 0) {
+        dirCards += `<div class="ops-card" style="border-color:rgba(248,113,113,0.3);">
+            <div class="ops-card-label" style="color:#f87171;">SHORT</div>
+            <div class="ops-card-value">${sp.total}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
+            <div class="ops-card-sub">승률 ${((sp.winRate||0)*100).toFixed(1)}% · ${sp.wins||0}승 ${sp.losses||0}패</div>
+            <div class="ops-card-sub">기대값 ${fmtPct(sp.expectation||0)} · 손익비 ${sp.avgPnlRatio||0}</div>
+          </div>`;
+      }
+      el.innerHTML += `
+        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin:18px 0 8px;">방향별 성과</div>
+        <div class="ops-cards">${dirCards}</div>`;
+    }
   }
 
   // ── 5. 시스템 상태 (시스템 + 잔고 + 워크플로 + 실패 이력) ──
@@ -1483,36 +1606,73 @@
       </div>
     </div>`;
 
-    // 잔고 카드 (cashKRW / totalCostKRW 분리)
-    html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">잔고 (원가 기준)</div>';
-    html += '<div class="ops-cards" style="margin-bottom:16px;">';
+    // 잔고 카드 — 원가 + 평가 분리 표시
     if (bal) {
       const coinCost = Number(bal.totalCostKRW) || 0;
       const cash = Number(bal.cashKRW) || 0;
+      const coinMarket = Number(bal.totalMarketValue) || 0;
+      const hasMarket = coinMarket > 0;
+
+      // ── 원가 기준 ──
+      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">투입 원가</div>';
+      html += '<div class="ops-cards" style="margin-bottom:12px;">';
       html += `
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
           <div class="ops-card-value">${fmtKRW(cash)}</div>
-          <div class="ops-card-sub">${cash > 0 ? '계좌 미투입 잔고' : '0원'} · ${syncBadge(bal.syncStatus)}</div>
+          <div class="ops-card-sub">미투입 잔고 · ${syncBadge(bal.syncStatus)}</div>
         </div>
         <div class="ops-card">
           <div class="ops-card-label">📊 코인 원가</div>
           <div class="ops-card-value">${fmtKRW(coinCost)}</div>
-          <div class="ops-card-sub">종목 ${(bal.perCoin || []).length}개</div>
+          <div class="ops-card-sub">매수 누적 · 종목 ${(bal.perCoin || []).length}개</div>
         </div>
-        <div class="ops-card ops-card-sum">
-          <div class="ops-card-label">🟰 추정 합계</div>
+        <div class="ops-card">
+          <div class="ops-card-label">🟰 원가 합계</div>
           <div class="ops-card-value">${fmtKRW(coinCost + cash)}</div>
-          <div class="ops-card-sub">코인 원가 + 현금</div>
+          <div class="ops-card-sub">현금 + 코인 원가</div>
         </div>`;
-      html += `<div class="ops-meta-line" style="grid-column:1/-1;">
+      html += '</div>';
+
+      // ── 평가 기준 (시세가 있을 때만) ──
+      if (hasMarket) {
+        const totalEval = coinMarket + cash;
+        const pnl = coinMarket - coinCost;
+        const pnlPct = coinCost > 0 ? (pnl / coinCost * 100) : 0;
+        const pnlColor_ = pnl > 0 ? '#34d399' : pnl < 0 ? '#f87171' : '#64748b';
+        const pnlSign = pnl >= 0 ? '+' : '';
+
+        html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">현재 평가</div>';
+        html += '<div class="ops-cards" style="margin-bottom:12px;">';
+        html += `
+          <div class="ops-card">
+            <div class="ops-card-label">💰 코인 평가액</div>
+            <div class="ops-card-value">${fmtKRW(coinMarket)}</div>
+            <div class="ops-card-sub">현재가 기준</div>
+          </div>
+          <div class="ops-card ops-card-sum">
+            <div class="ops-card-label">🟰 총 평가자산</div>
+            <div class="ops-card-value">${fmtKRW(totalEval)}</div>
+            <div class="ops-card-sub">현금 + 코인 평가액</div>
+          </div>
+          <div class="ops-card" style="border-color:${pnlColor_}55;background:${pnlColor_}08;">
+            <div class="ops-card-label">📈 평가손익</div>
+            <div class="ops-card-value" style="color:${pnlColor_};">${pnlSign}${fmtKRW(pnl)}</div>
+            <div class="ops-card-sub" style="color:${pnlColor_};">${pnlSign}${pnlPct.toFixed(2)}% (평가 − 원가)</div>
+          </div>`;
+        html += '</div>';
+      }
+
+      html += `<div class="ops-meta-line" style="margin-bottom:16px;">
         🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}
+        ${!hasMarket ? ' · <span style="color:#64748b;">시세 미제공 — 원가만 표시</span>' : ''}
         ${bal.errorType ? ` · <span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
       </div>`;
     } else {
+      html += '<div class="ops-cards" style="margin-bottom:16px;">';
       html += `<div class="ops-card" style="grid-column:1/-1;">${emptyState('noData', 'balance webhook 대기 중')}</div>`;
+      html += '</div>';
     }
-    html += '</div>';
 
     // 워크플로 상태 (최근 실패 강조)
     html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">워크플로 상태</div>';

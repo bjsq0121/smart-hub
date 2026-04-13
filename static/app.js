@@ -1606,36 +1606,73 @@
       </div>
     </div>`;
 
-    // 잔고 카드 (cashKRW / totalCostKRW 분리)
-    html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">잔고 (원가 기준)</div>';
-    html += '<div class="ops-cards" style="margin-bottom:16px;">';
+    // 잔고 카드 — 원가 + 평가 분리 표시
     if (bal) {
       const coinCost = Number(bal.totalCostKRW) || 0;
       const cash = Number(bal.cashKRW) || 0;
+      const coinMarket = Number(bal.totalMarketValue) || 0;
+      const hasMarket = coinMarket > 0;
+
+      // ── 원가 기준 ──
+      html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">투입 원가</div>';
+      html += '<div class="ops-cards" style="margin-bottom:12px;">';
       html += `
         <div class="ops-card">
           <div class="ops-card-label">💵 KRW 현금</div>
           <div class="ops-card-value">${fmtKRW(cash)}</div>
-          <div class="ops-card-sub">${cash > 0 ? '계좌 미투입 잔고' : '0원'} · ${syncBadge(bal.syncStatus)}</div>
+          <div class="ops-card-sub">미투입 잔고 · ${syncBadge(bal.syncStatus)}</div>
         </div>
         <div class="ops-card">
           <div class="ops-card-label">📊 코인 원가</div>
           <div class="ops-card-value">${fmtKRW(coinCost)}</div>
-          <div class="ops-card-sub">종목 ${(bal.perCoin || []).length}개</div>
+          <div class="ops-card-sub">매수 누적 · 종목 ${(bal.perCoin || []).length}개</div>
         </div>
-        <div class="ops-card ops-card-sum">
-          <div class="ops-card-label">🟰 추정 합계</div>
+        <div class="ops-card">
+          <div class="ops-card-label">🟰 원가 합계</div>
           <div class="ops-card-value">${fmtKRW(coinCost + cash)}</div>
-          <div class="ops-card-sub">코인 원가 + 현금</div>
+          <div class="ops-card-sub">현금 + 코인 원가</div>
         </div>`;
-      html += `<div class="ops-meta-line" style="grid-column:1/-1;">
+      html += '</div>';
+
+      // ── 평가 기준 (시세가 있을 때만) ──
+      if (hasMarket) {
+        const totalEval = coinMarket + cash;
+        const pnl = coinMarket - coinCost;
+        const pnlPct = coinCost > 0 ? (pnl / coinCost * 100) : 0;
+        const pnlColor_ = pnl > 0 ? '#34d399' : pnl < 0 ? '#f87171' : '#64748b';
+        const pnlSign = pnl >= 0 ? '+' : '';
+
+        html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">현재 평가</div>';
+        html += '<div class="ops-cards" style="margin-bottom:12px;">';
+        html += `
+          <div class="ops-card">
+            <div class="ops-card-label">💰 코인 평가액</div>
+            <div class="ops-card-value">${fmtKRW(coinMarket)}</div>
+            <div class="ops-card-sub">현재가 기준</div>
+          </div>
+          <div class="ops-card ops-card-sum">
+            <div class="ops-card-label">🟰 총 평가자산</div>
+            <div class="ops-card-value">${fmtKRW(totalEval)}</div>
+            <div class="ops-card-sub">현금 + 코인 평가액</div>
+          </div>
+          <div class="ops-card" style="border-color:${pnlColor_}55;background:${pnlColor_}08;">
+            <div class="ops-card-label">📈 평가손익</div>
+            <div class="ops-card-value" style="color:${pnlColor_};">${pnlSign}${fmtKRW(pnl)}</div>
+            <div class="ops-card-sub" style="color:${pnlColor_};">${pnlSign}${pnlPct.toFixed(2)}% (평가 − 원가)</div>
+          </div>`;
+        html += '</div>';
+      }
+
+      html += `<div class="ops-meta-line" style="margin-bottom:16px;">
         🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}
+        ${!hasMarket ? ' · <span style="color:#64748b;">시세 미제공 — 원가만 표시</span>' : ''}
         ${bal.errorType ? ` · <span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
       </div>`;
     } else {
+      html += '<div class="ops-cards" style="margin-bottom:16px;">';
       html += `<div class="ops-card" style="grid-column:1/-1;">${emptyState('noData', 'balance webhook 대기 중')}</div>`;
+      html += '</div>';
     }
-    html += '</div>';
 
     // 워크플로 상태 (최근 실패 강조)
     html += '<div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin-bottom:8px;">워크플로 상태</div>';

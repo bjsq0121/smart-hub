@@ -1031,36 +1031,41 @@ _ALLOWED_SYNC = {"ok", "partial", "failed"}
 def _normalize_balance(payload: dict) -> dict:
     """잔고 페이로드를 balances/ 컬렉션 스키마로 정규화.
 
-    원가 기준 (cost basis) 만 다룸 — marketValue/평가금액/현재가 류는 의도적으로 무시.
+    원가 + 평가금액 병행 표시.
 
     n8n 계약:
       accountId    — 계좌 식별자
       accountCount — 계좌 수
       cashKRW      — 계좌 KRW 현금 잔고 (미투입분)
       totalCostKRW — 코인 매수 누적 원가 (= sum of perCoin[].invested)
-                     ※ 이름이 'total'이지만 실제 의미는 코인 원가.
-                        현금 포함 추정 합계는 프론트에서 계산한다.
-      perCoin[]    — 종목별 (symbol, qty, avgCost, invested)
+      perCoin[]    — 종목별 (symbol, qty, avgCost, invested, currentPrice)
+                     currentPrice 는 선택: 없으면 평가금액 0 → 프론트에서 평가 행 미표시
     """
     per_coin_in = payload.get("perCoin") or payload.get("per_coin") or []
     per_coin = []
+    total_market = 0.0
     for c in per_coin_in:
         if not isinstance(c, dict):
             continue
+        qty = float(c.get("qty") or c.get("quantity") or 0)
+        cur_price = float(c.get("currentPrice") or c.get("current_price") or 0)
         per_coin.append({
-            "symbol":   str(c.get("symbol") or c.get("ticker") or "")[:20],
-            "qty":      float(c.get("qty") or c.get("quantity") or 0),
-            "avgCost":  float(c.get("avgCost") or c.get("avg_cost") or 0),
-            "invested": float(c.get("invested") or c.get("investedKRW") or 0),
+            "symbol":       str(c.get("symbol") or c.get("ticker") or "")[:20],
+            "qty":          qty,
+            "avgCost":      float(c.get("avgCost") or c.get("avg_cost") or 0),
+            "invested":     float(c.get("invested") or c.get("investedKRW") or 0),
+            "currentPrice": cur_price,
         })
+        total_market += cur_price * qty
     cash_krw = float(payload.get("cashKRW") or payload.get("cash_krw") or 0)
     total_cost = float(payload.get("totalCostKRW") or payload.get("total_cost_krw") or 0)
     return {
-        "accountId":    str(payload.get("accountId") or payload.get("account_id") or "default"),
-        "accountCount": int(payload.get("accountCount") or payload.get("account_count") or 1),
-        "cashKRW":      cash_krw,
-        "totalCostKRW": total_cost,
-        "perCoin":      per_coin,
+        "accountId":        str(payload.get("accountId") or payload.get("account_id") or "default"),
+        "accountCount":     int(payload.get("accountCount") or payload.get("account_count") or 1),
+        "cashKRW":          cash_krw,
+        "totalCostKRW":     total_cost,
+        "totalMarketValue": round(total_market, 2),  # 0이면 시세 미제공
+        "perCoin":          per_coin,
     }
 
 
