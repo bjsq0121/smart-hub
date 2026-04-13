@@ -1024,7 +1024,7 @@ class IngestEnvelope(BaseModel):
     payload: dict = {}
 
 
-_ALLOWED_KINDS = {"event", "balance", "workflow_run", "signal", "paper_trade", "trade_result", "system_status"}
+_ALLOWED_KINDS = {"event", "balance", "workflow_run", "signal", "paper_trade", "trade_result", "system_status", "stock_signal", "stock_alert"}
 _ALLOWED_SYNC = {"ok", "partial", "failed"}
 
 
@@ -1153,6 +1153,27 @@ def _normalize_system_status(payload: dict) -> dict:
     }
 
 
+def _normalize_stock_signal(payload: dict, meta: dict) -> dict:
+    """주식 시그널. Paperclip 에이전트가 보냄."""
+    raw_factors = payload.get("factors")
+    return {
+        "signalId":      payload.get("signalId") or payload.get("signal_id", ""),
+        "symbol":        (payload.get("symbol") or "")[:20],
+        "score":         float(payload.get("score", 0)),
+        "scoreReason":   payload.get("scoreReason") or payload.get("score_reason", ""),
+        "entryPrice":    float(payload.get("entryPrice") or payload.get("entry_price", 0)),
+        "stopLoss":      float(payload.get("stopLoss") or payload.get("stop_loss", 0)),
+        "targetPrice":   float(payload.get("targetPrice") or payload.get("target_price", 0)),
+        "direction":     payload.get("direction", "long"),
+        "status":        payload.get("status", "candidate"),
+        "stage":         payload.get("stage", "candidate"),
+        "market":        "stock",
+        "factors":       raw_factors if isinstance(raw_factors, dict) else None,
+        "noTradeReason": payload.get("noTradeReason") or payload.get("no_trade_reason", ""),
+        **meta,
+    }
+
+
 @app.post("/webhook/ingest", dependencies=[Depends(verify_webhook_secret)])
 async def webhook_ingest(env: IngestEnvelope):
     """통합 진입점. envelope.kind 에 따라 events + (balances|workflow_runs) 에 기록.
@@ -1258,6 +1279,31 @@ async def webhook_ingest(env: IngestEnvelope):
                 "occurredAt": env.occurredAt, "eventId": event_doc.id,
                 "updated_at": _firestore.SERVER_TIMESTAMP,
             })
+        elif env.kind == "stock_signal":
+            meta = {
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+            }
+            norm = _normalize_stock_signal(env.payload, meta)
+            if not norm["symbol"]:
+                return {"ok": False, "eventId": event_doc.id, "error": "stock_signal에 symbol이 비어있습니다."}
+            ref = db.collection("stock_signals").document(norm["signalId"] or None)
+            ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
+        elif env.kind == "stock_alert":
+            doc = {
+                "alertType": env.payload.get("alertType") or env.payload.get("alert_type", "info"),
+                "title":     env.payload.get("title", ""),
+                "message":   env.payload.get("message", ""),
+                "symbol":    (env.payload.get("symbol") or "")[:20],
+                "severity":  env.payload.get("severity", "info"),
+                "market":    "stock",
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+            }
+            ref = db.collection("stock_alerts").document()
+            ref.set({**doc, "created_at": _firestore.SERVER_TIMESTAMP})
 
         return {"ok": True, "eventId": event_doc.id, "balanceId": balance_id, "runId": run_id}
     except HTTPException:
@@ -1394,6 +1440,63 @@ async def api_workflows_status(
         return {"runs": runs, "latestByWorkflow": list(latest_by_wf.values())}
     except Exception:
         return {"runs": [], "latestByWorkflow": [], "error": "workflow_runs 조회 실패"}
+
+
+# ── 주식운영 GET 엔드포인트 ──
+
+@app.get("/api/stock-signals")
+async def api_stock_signals(
+    limit: int = Query(default=50, le=200),
+    stage: str | None = Query(default=None),
+    direction: str | None = Query(default=None),
+    user: dict = Depends(verify_firebase_token),
+):
+    """주식 시그널 목록 (최근순). stage/direction 필터."""
+    try:
+        db = _get_firestore()
+        q = db.collection("stock_signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        try:
+            if stage:
+                q = q.where("stage", "==", stage)
+            if direction:
+                q = q.where("direction", "==", direction)
+            items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            q = db.collection("stock_signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
+            all_items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+            items = all_items
+            if stage:
+                items = [i for i in items if i.get("stage") == stage]
+            if direction:
+                items = [i for i in items if i.get("direction") == direction]
+        return {"items": items}
+    except Exception:
+        return {"items": [], "error": "stock_signals 조회 실패"}
+
+
+@app.get("/api/stock-alerts")
+async def api_stock_alerts(
+    limit: int = Query(default=30, le=100),
+    severity: str | None = Query(default=None),
+    user: dict = Depends(verify_firebase_token),
+):
+    """주식 알림 목록 (최근순). severity 필터: info | warning | critical."""
+    try:
+        db = _get_firestore()
+        q = db.collection("stock_alerts").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        try:
+            if severity:
+                q = q.where("severity", "==", severity)
+            items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            q = db.collection("stock_alerts").order_by("created_at", direction=_firestore.Query.DESCENDING)
+            all_items = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+            items = all_items
+            if severity:
+                items = [i for i in items if i.get("severity") == severity]
+        return {"items": items}
+    except Exception:
+        return {"items": [], "error": "stock_alerts 조회 실패"}
 
 
 # ── crypto 검증 허브 GET 엔드포인트 ──

@@ -67,7 +67,10 @@
       label: '📈 주식운영',
       auth: true,
       subs: [
-        { id: 'stock-dashboard', label: '📊 대시보드', page: 'page-stock-ops', stockOpsPane: 'dashboard' },
+        { id: 'stock-signals', label: '🎯 시그널',  page: 'page-stock-ops', stockOpsPane: 'signals' },
+        { id: 'stock-alerts',  label: '🔔 알림',    page: 'page-stock-ops', stockOpsPane: 'alerts' },
+        { id: 'stock-perf',    label: '📈 성과',    page: 'page-stock-ops', stockOpsPane: 'perf', soon: true,
+          soonTitle: '주식 성과', soonDesc: '주식 전략 성과 분석. 시그널 데이터 축적 후 추가됩니다.' },
       ],
       onEnter: () => { if (typeof loadStockOps === 'function') loadStockOps(); },
     },
