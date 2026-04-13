@@ -1081,15 +1081,19 @@ def _normalize_workflow_run(payload: dict, env: IngestEnvelope) -> dict:
 
 def _normalize_signal(payload: dict) -> dict:
     """후보 신호. n8n이 AI 분석 결과를 보냄."""
+    raw_factors = payload.get("factors")
     return {
-        "signalId":    str(payload.get("signalId") or payload.get("signal_id") or ""),
-        "symbol":      str(payload.get("symbol") or "")[:20],
-        "score":       float(payload.get("score") or 0),
-        "scoreReason": str(payload.get("scoreReason") or payload.get("score_reason") or ""),
-        "entryPrice":  float(payload.get("entryPrice") or payload.get("entry_price") or 0),
-        "stopLoss":    float(payload.get("stopLoss") or payload.get("stop_loss") or 0),
-        "direction":   str(payload.get("direction") or "long"),
-        "status":      str(payload.get("status") or "candidate"),
+        "signalId":       str(payload.get("signalId") or payload.get("signal_id") or ""),
+        "symbol":         str(payload.get("symbol") or "")[:20],
+        "score":          float(payload.get("score") or 0),
+        "scoreReason":    str(payload.get("scoreReason") or payload.get("score_reason") or ""),
+        "entryPrice":     float(payload.get("entryPrice") or payload.get("entry_price") or 0),
+        "stopLoss":       float(payload.get("stopLoss") or payload.get("stop_loss") or 0),
+        "direction":      str(payload.get("direction") or "long"),
+        "status":         str(payload.get("status") or "candidate"),
+        "stage":          str(payload.get("stage") or "candidate"),           # candidate | trade_ready
+        "factors":        raw_factors if isinstance(raw_factors, dict) else None,
+        "noTradeReason":  str(payload.get("noTradeReason") or payload.get("no_trade_reason") or ""),
     }
 
 
@@ -1099,6 +1103,7 @@ def _normalize_paper_trade(payload: dict) -> dict:
         "tradeId":      str(payload.get("tradeId") or payload.get("trade_id") or ""),
         "signalId":     str(payload.get("signalId") or payload.get("signal_id") or ""),
         "symbol":       str(payload.get("symbol") or "")[:20],
+        "direction":    str(payload.get("direction") or "long"),
         "entryPrice":   float(payload.get("entryPrice") or payload.get("entry_price") or 0),
         "currentPrice": float(payload.get("currentPrice") or payload.get("current_price") or 0),
         "pnlPercent":   float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
@@ -1115,6 +1120,7 @@ def _normalize_trade_result(payload: dict) -> dict:
         "tradeId":    str(payload.get("tradeId") or payload.get("trade_id") or ""),
         "signalId":   str(payload.get("signalId") or payload.get("signal_id") or ""),
         "symbol":     str(payload.get("symbol") or "")[:20],
+        "direction":  str(payload.get("direction") or "long"),
         "result":     str(payload.get("result") or ""),         # win | loss
         "pnlPercent": float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
         "exitReason": str(payload.get("exitReason") or payload.get("exit_reason") or ""),
@@ -1318,14 +1324,17 @@ async def api_workflows_status(
 async def api_signals(
     limit: int = Query(default=50, le=200),
     status: str | None = Query(default=None),
+    stage: str | None = Query(default=None),
     user: dict = Depends(verify_firebase_token),
 ):
-    """후보 신호 목록 (최근순)."""
+    """후보 신호 목록 (최근순). stage 필터: candidate | trade_ready."""
     try:
         db = _get_firestore()
         q = db.collection("signals").order_by("created_at", direction=_firestore.Query.DESCENDING)
         if status:
             q = q.where("status", "==", status)
+        if stage:
+            q = q.where("stage", "==", stage)
         return {"items": [_doc_to_dict(d) for d in q.limit(limit).stream()]}
     except Exception:
         return {"items": [], "error": "signals 조회 실패"}
@@ -1366,12 +1375,62 @@ async def api_trade_results(
         return {"items": [], "error": "trade_results 조회 실패"}
 
 
+def _compute_perf_stats(results: list[dict]) -> dict:
+    """trade_results 리스트로 성과 지표 계산."""
+    total = len(results)
+    if total == 0:
+        return {"total": 0, "wins": 0, "losses": 0, "winRate": 0,
+                "avgWinPercent": 0, "avgLossPercent": 0, "avgPnlRatio": 0,
+                "expectation": 0, "maxConsecutiveLoss": 0, "maxDrawdownPercent": 0}
+
+    wins = [r for r in results if r.get("result") == "win"]
+    losses = [r for r in results if r.get("result") == "loss"]
+    win_rate = len(wins) / total if total > 0 else 0
+
+    avg_win = sum(r.get("pnlPercent", 0) for r in wins) / len(wins) if wins else 0
+    avg_loss = sum(abs(r.get("pnlPercent", 0)) for r in losses) / len(losses) if losses else 0
+    avg_pnl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+
+    expectation = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+    max_consec = 0
+    cur_consec = 0
+    for r in results:
+        if r.get("result") == "loss":
+            cur_consec += 1
+            max_consec = max(max_consec, cur_consec)
+        else:
+            cur_consec = 0
+
+    cum = 0
+    peak = 0
+    max_dd = 0
+    for r in reversed(results):
+        cum += r.get("pnlPercent", 0)
+        peak = max(peak, cum)
+        dd = peak - cum
+        max_dd = max(max_dd, dd)
+
+    return {
+        "total": total,
+        "wins": len(wins),
+        "losses": len(losses),
+        "winRate": round(win_rate, 4),
+        "avgWinPercent": round(avg_win, 2),
+        "avgLossPercent": round(avg_loss, 2),
+        "avgPnlRatio": round(avg_pnl_ratio, 2),
+        "expectation": round(expectation, 2),
+        "maxConsecutiveLoss": max_consec,
+        "maxDrawdownPercent": round(max_dd, 2),
+    }
+
+
 @app.get("/api/performance")
 async def api_performance(
     count: int = Query(default=50, le=500),
     user: dict = Depends(verify_firebase_token),
 ):
-    """성과 요약 — 최근 N건 trade_results 기반 서버 계산."""
+    """성과 요약 — 최근 N건 trade_results 기반 서버 계산. 방향별 분리 집계 포함."""
     try:
         db = _get_firestore()
         docs = list(
@@ -1380,52 +1439,18 @@ async def api_performance(
               .limit(count).stream()
         )
         results = [_doc_to_dict(d) for d in docs]
-        total = len(results)
-        if total == 0:
-            return {"total": 0, "winRate": 0, "avgPnl": 0, "expectation": 0,
-                    "maxConsecutiveLoss": 0, "maxDrawdownPercent": 0}
 
-        wins = [r for r in results if r.get("result") == "win"]
-        losses = [r for r in results if r.get("result") == "loss"]
-        win_rate = len(wins) / total if total > 0 else 0
+        overall = _compute_perf_stats(results)
 
-        avg_win = sum(r.get("pnlPercent", 0) for r in wins) / len(wins) if wins else 0
-        avg_loss = sum(abs(r.get("pnlPercent", 0)) for r in losses) / len(losses) if losses else 0
-        avg_pnl_ratio = avg_win / avg_loss if avg_loss > 0 else 0
-
-        expectation = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
-
-        # 최대 연속 손실
-        max_consec = 0
-        cur_consec = 0
-        for r in results:
-            if r.get("result") == "loss":
-                cur_consec += 1
-                max_consec = max(max_consec, cur_consec)
-            else:
-                cur_consec = 0
-
-        # 최대 낙폭 (누적 PnL 기준)
-        cum = 0
-        peak = 0
-        max_dd = 0
-        for r in reversed(results):  # 시간순
-            cum += r.get("pnlPercent", 0)
-            peak = max(peak, cum)
-            dd = peak - cum
-            max_dd = max(max_dd, dd)
+        long_results = [r for r in results if r.get("direction", "long") == "long"]
+        short_results = [r for r in results if r.get("direction") == "short"]
 
         return {
-            "total": total,
-            "wins": len(wins),
-            "losses": len(losses),
-            "winRate": round(win_rate, 4),
-            "avgWinPercent": round(avg_win, 2),
-            "avgLossPercent": round(avg_loss, 2),
-            "avgPnlRatio": round(avg_pnl_ratio, 2),
-            "expectation": round(expectation, 2),
-            "maxConsecutiveLoss": max_consec,
-            "maxDrawdownPercent": round(max_dd, 2),
+            **overall,
+            "byDirection": {
+                "long": _compute_perf_stats(long_results),
+                "short": _compute_perf_stats(short_results),
+            },
         }
     except Exception:
         return {"total": 0, "error": "performance 계산 실패"}

@@ -1004,6 +1004,15 @@
     }
     .ops-banner-text { color: #cbd5e1; font-size: 0.78rem; line-height: 1.5; }
 
+    /* 팩터 확장 행 */
+    .ops-factors-row td {
+      background: rgba(255,255,255,0.015) !important;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+    }
+    /* no_trade 행 — 연한 표시 */
+    .ops-table tr.no-trade td { opacity: 0.6; }
+    .ops-table tr.no-trade:hover td { opacity: 1; }
+
     /* ════════════════════════════════
        커스텀 모달 (confirm/alert 대체)
     ════════════════════════════════ */
