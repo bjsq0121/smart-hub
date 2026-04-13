@@ -1120,18 +1120,25 @@ def _normalize_paper_trade(payload: dict) -> dict:
 
 
 def _normalize_trade_result(payload: dict) -> dict:
-    """종료 결과. paper trade 종료 시 n8n이 보냄."""
+    """종료 결과. 실시간(n8n) + 백테스트(backtest) 공용."""
+    raw_components = payload.get("components")
     return {
-        "tradeId":    str(payload.get("tradeId") or payload.get("trade_id") or ""),
-        "signalId":   str(payload.get("signalId") or payload.get("signal_id") or ""),
-        "symbol":     str(payload.get("symbol") or "")[:20],
-        "direction":  str(payload.get("direction") or "long"),
-        "result":     str(payload.get("result") or ""),         # win | loss
-        "pnlPercent": float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
-        "exitReason": str(payload.get("exitReason") or payload.get("exit_reason") or ""),
-        "exitAt":     payload.get("exitAt") or payload.get("exit_at"),
-        "entryPrice": float(payload.get("entryPrice") or payload.get("entry_price") or 0),
-        "exitPrice":  float(payload.get("exitPrice") or payload.get("exit_price") or 0),
+        "tradeId":      str(payload.get("tradeId") or payload.get("trade_id") or ""),
+        "signalId":     str(payload.get("signalId") or payload.get("signal_id") or ""),
+        "symbol":       str(payload.get("symbol") or "")[:20],
+        "direction":    str(payload.get("direction") or "long"),
+        "result":       str(payload.get("result") or ""),         # win | loss
+        "pnlPercent":   float(payload.get("pnlPercent") or payload.get("pnl_percent") or 0),
+        "exitReason":   str(payload.get("exitReason") or payload.get("exit_reason") or ""),
+        "exitAt":       payload.get("exitAt") or payload.get("exit_at"),
+        "entryAt":      payload.get("entryAt") or payload.get("entry_at"),
+        "entryPrice":   float(payload.get("entryPrice") or payload.get("entry_price") or 0),
+        "exitPrice":    float(payload.get("exitPrice") or payload.get("exit_price") or 0),
+        "holdTimeMin":  int(payload.get("holdTimeMin") or payload.get("hold_time_min") or 0),
+        "maxFavorable": float(payload.get("maxFavorable") or payload.get("max_favorable") or 0),
+        "maxAdverse":   float(payload.get("maxAdverse") or payload.get("max_adverse") or 0),
+        "confidence":   float(payload.get("confidence") or 0),
+        "components":   raw_components if isinstance(raw_components, dict) else None,
     }
 
 
@@ -1326,6 +1333,42 @@ async def refresh_balance(user: dict = Depends(verify_firebase_token)):
         return {"ok": True, **body}
     except Exception:
         return {"ok": False, "error": "n8n 워크플로 호출 실패"}
+
+
+class BacktestRequest(BaseModel):
+    market: str = "KRW-BTC"
+    startDate: str = ""
+    endDate: str = ""
+    scoreCutoff: int = 60
+    maxHoldMin: int = 1440
+
+
+@app.post("/api/backtest/run")
+async def run_backtest(req: BacktestRequest, user: dict = Depends(verify_firebase_token)):
+    """n8n 백테스트 워크플로를 트리거. smart-hub → n8n → 업비트 캔들 → 시뮬레이션 → ingest."""
+    import requests as _req
+    try:
+        resp = _req.post(
+            "https://n8n.banghub.kr/webhook/run-backtest",
+            headers={"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"},
+            json={
+                "market": req.market,
+                "startDate": req.startDate,
+                "endDate": req.endDate,
+                "scoreCutoff": req.scoreCutoff,
+                "maxHoldMin": req.maxHoldMin,
+            },
+            timeout=30,
+        )
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        if resp.status_code >= 400:
+            return {"ok": False, "error": body.get("message") or f"n8n 응답 {resp.status_code}"}
+        return {"ok": True, **body}
+    except Exception:
+        return {"ok": False, "error": "백테스트 워크플로 호출 실패"}
 
 
 @app.get("/api/workflows/status")

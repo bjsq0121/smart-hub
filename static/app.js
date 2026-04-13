@@ -184,6 +184,33 @@
   window.setResultSource = (v) => { opsResultSource = v; renderResults(); };
   window.setPerfSource = (v) => { opsPerfSource = v; loadOps(); };
   window.setBtPeriod = (v) => { opsBtPeriod = v; loadOps(); };
+  window.runBacktest = async () => {
+    const btn = document.getElementById('bt-run-btn');
+    const msg = document.getElementById('bt-run-msg');
+    if (!btn || btn.disabled) return;
+    const market = document.getElementById('bt-market')?.value || 'KRW-BTC';
+    const startDate = document.getElementById('bt-start')?.value || '';
+    const endDate = document.getElementById('bt-end')?.value || '';
+    const scoreCutoff = parseInt(document.getElementById('bt-cutoff')?.value || '60');
+    if (!startDate || !endDate) { if (msg) { msg.style.color = '#f87171'; msg.textContent = '시작일/종료일을 선택하세요'; } return; }
+    btn.disabled = true; btn.style.opacity = '0.5'; btn.textContent = '실행 중...';
+    if (msg) { msg.style.color = '#94a3b8'; msg.textContent = ''; }
+    try {
+      const hdrs = await authHeaders();
+      hdrs['Content-Type'] = 'application/json';
+      const r = await fetch('/api/backtest/run', { method: 'POST', headers: hdrs, body: JSON.stringify({ market, startDate, endDate, scoreCutoff }) });
+      const d = await r.json();
+      if (d.ok) {
+        if (msg) { msg.style.color = '#34d399'; msg.textContent = '완료 — 결과 로딩 중...'; }
+        setTimeout(() => { loadOps(); }, 3000);
+      } else {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || '실패'; }
+      }
+    } catch (e) {
+      if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
+    }
+    setTimeout(() => { if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.textContent = '실행'; } }, 10000);
+  };
   window.toggleFactors = (id) => {
     const r = document.getElementById('factors-' + id);
     if (r) r.style.display = r.style.display === 'none' ? 'table-row' : 'none';
@@ -1528,14 +1555,17 @@
     el.innerHTML = filterHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th></th><th>종목</th><th>방향</th><th>손익</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>종료 시각</th></tr></thead>
+          <thead><tr><th></th><th>종목</th><th>방향</th><th>손익</th><th>최대유리</th><th>최대불리</th><th>보유</th><th>종료 사유</th><th>진입가</th><th>종료가</th><th>시각</th></tr></thead>
           <tbody>${filtered.map(r => {
             const isBT = r.source === 'backtest';
             return `<tr${isBT ? ' style="opacity:0.85;"' : ''}>
             <td>${resultBadge(r.result)}${isBT ? ' <span style="font-size:0.6rem;color:#fb923c;font-weight:700;">BT</span>' : ''}</td>
-            <td style="font-weight:700;color:#e2e8f0;">${esc(r.symbol)}</td>
+            <td style="font-weight:700;color:#e2e8f0;">${esc(r.symbol)}${r.confidence ? ` <span style="font-size:0.6rem;color:#94a3b8;">${r.confidence}</span>` : ''}</td>
             <td>${directionBadge(r.direction)}</td>
             <td style="color:${pnlColor(r.pnlPercent)};font-weight:700;">${fmtPct(r.pnlPercent)}</td>
+            <td style="color:#34d399;font-size:0.78rem;">${r.maxFavorable ? fmtPct(r.maxFavorable) : '-'}</td>
+            <td style="color:#f87171;font-size:0.78rem;">${r.maxAdverse ? fmtPct(r.maxAdverse) : '-'}</td>
+            <td style="font-size:0.72rem;color:#94a3b8;">${r.holdTimeMin ? fmtHold(r.holdTimeMin) : '-'}</td>
             <td style="color:#94a3b8;font-size:0.78rem;">${esc(r.exitReason)}</td>
             <td>${fmtKRW(r.entryPrice)}</td>
             <td>${fmtKRW(r.exitPrice)}</td>
@@ -1586,12 +1616,31 @@
         <button class="ops-chip${opsBtPeriod==='6m'?' active':''}" onclick="setBtPeriod('6m')">6개월</button>` : ''}
     </div>`;
 
-    // 모드 배너
-    const modeBanner = isBt
-      ? `<div style="padding:8px 14px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#fb923c;">🟠 백테스트 성과 — 과거 시뮬레이션이며 실전 결과가 아닙니다</div>`
-      : opsPerfSource === 'n8n'
-        ? `<div style="padding:8px 14px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#60a5fa;">🟢 실전 성과 — 실제 거래 기반</div>`
-        : '';
+    // 모드 배너 + 백테스트 실행 폼
+    let modeBanner = '';
+    if (isBt) {
+      modeBanner = `<div style="padding:8px 14px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#fb923c;">🟠 백테스트 성과 — 과거 시뮬레이션이며 실전 결과가 아닙니다</div>
+        <div style="padding:12px 16px;background:rgba(255,255,255,0.02);border:1px solid rgba(255,255,255,0.08);border-radius:10px;margin-bottom:14px;">
+          <div style="font-size:0.78rem;color:#94a3b8;margin-bottom:8px;font-weight:600;">백테스트 실행</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end;">
+            <label style="font-size:0.72rem;color:#64748b;">코인<br>
+              <select id="bt-market" style="padding:5px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:#1e293b;color:#e2e8f0;font-size:0.78rem;">
+                <option value="KRW-BTC">BTC</option><option value="KRW-ETH">ETH</option><option value="KRW-XRP">XRP</option>
+                <option value="KRW-ETC">ETC</option><option value="KRW-TRX">TRX</option><option value="KRW-DOGE">DOGE</option>
+              </select></label>
+            <label style="font-size:0.72rem;color:#64748b;">시작일<br>
+              <input id="bt-start" type="date" style="padding:5px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:#1e293b;color:#e2e8f0;font-size:0.78rem;"></label>
+            <label style="font-size:0.72rem;color:#64748b;">종료일<br>
+              <input id="bt-end" type="date" style="padding:5px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:#1e293b;color:#e2e8f0;font-size:0.78rem;"></label>
+            <label style="font-size:0.72rem;color:#64748b;">진입 기준<br>
+              <input id="bt-cutoff" type="number" value="60" min="0" max="100" style="width:55px;padding:5px 8px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:#1e293b;color:#e2e8f0;font-size:0.78rem;"></label>
+            <button id="bt-run-btn" onclick="runBacktest()" style="padding:6px 16px;border-radius:14px;border:1px solid rgba(251,146,60,0.4);background:rgba(251,146,60,0.15);color:#fb923c;font-size:0.78rem;font-weight:600;cursor:pointer;">실행</button>
+            <span id="bt-run-msg" style="font-size:0.72rem;"></span>
+          </div>
+        </div>`;
+    } else if (opsPerfSource === 'n8n') {
+      modeBanner = `<div style="padding:8px 14px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#60a5fa;">🟢 실전 성과 — 실제 거래 기반</div>`;
+    }
 
     // 20/50건 토글
     const toggleHtml = `<div style="display:flex;gap:6px;margin-bottom:14px;align-items:center;">
