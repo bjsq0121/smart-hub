@@ -170,6 +170,7 @@
 
     // 5) 내부 pane (ops / admin)
     if (sub && sub.opsPane) setOpsPane(sub.opsPane);
+    if (sub && sub.stockOpsPane) setStockOpsPane(sub.stockOpsPane);
     if (sub && sub.adminPane) {
       document.querySelectorAll('#page-admin .admin-pane').forEach(p => {
         p.classList.toggle('active', p.id === 'admin-pane-' + sub.adminPane);
@@ -289,6 +290,8 @@
   });
   // 초기 진입 — 홈
   navGoto('home');
+
+  // 📈 주식운영 → static/js/stock-ops.js 로 분리됨
 
   /* ═══════════════════════════════════════
      최저가 비교

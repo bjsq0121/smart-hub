@@ -273,6 +273,27 @@
   </div>
 </div>
 
+<!-- ══════════════ 📈 주식운영 ══════════════ -->
+<div class="page" id="page-stock-ops">
+  <div style="max-width:1120px;margin:24px auto;padding:0 24px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
+      <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">
+        <span style="font-size:0.72rem;color:#60a5fa;border:1px solid rgba(96,165,250,0.3);background:rgba(96,165,250,0.08);padding:2px 8px;border-radius:8px;margin-right:8px;">주식운영</span>
+        Stock Operations
+      </h2>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="stock-ops-last-update" style="font-size:0.72rem;color:#475569;"></span>
+        <button onclick="if(typeof loadStockOps==='function')loadStockOps()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.78rem;cursor:pointer;">새로고침</button>
+      </div>
+    </div>
+
+    <!-- 📊 대시보드 -->
+    <section class="stock-ops-pane active" id="stock-ops-pane-dashboard">
+      <div id="stock-ops-dashboard-content"><div class="ops-empty">주식운영 준비 중...</div></div>
+    </section>
+  </div>
+</div>
+
 <!-- ══════════════ 관리 페이지 ══════════════ -->
 <div class="page" id="page-admin">
   <div style="max-width:720px;margin:24px auto;padding:0 24px;">
@@ -350,6 +371,7 @@
 </div>
 
 <script src="/static/app.js"></script>
+<script src="/static/js/stock-ops.js"></script>
 
 <!-- 커스텀 confirm/alert 모달 -->
 <div class="confirm-overlay" id="customModal">
