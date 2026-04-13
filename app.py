@@ -1314,9 +1314,16 @@ async def refresh_balance(user: dict = Depends(verify_firebase_token)):
             json={},
             timeout=15,
         )
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
         if resp.status_code >= 400:
-            return {"ok": False, "error": f"n8n 응답 {resp.status_code}"}
-        return resp.json()
+            return {"ok": False, "error": body.get("message") or f"n8n 응답 {resp.status_code}"}
+        # n8n cooldown 응답: {"error":"cooldown","message":"N초 후 재시도"}
+        if body.get("error") == "cooldown":
+            return {"ok": False, "cooldown": True, "error": body.get("message", "잠시 후 재시도")}
+        return {"ok": True, **body}
     except Exception:
         return {"ok": False, "error": "n8n 워크플로 호출 실패"}
 

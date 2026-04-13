@@ -186,7 +186,7 @@
     if (r) r.style.display = r.style.display === 'none' ? 'table-row' : 'none';
   };
 
-  // 잔고 새로고침 (n8n 트리거 → 재조회)
+  // 잔고 새로고침 (n8n 트리거 → 재조회, 60초 쿨다운)
   let _balRefreshCooldown = false;
   window.refreshBalance = async () => {
     const btn = document.getElementById('bal-refresh-btn');
@@ -195,7 +195,8 @@
     _balRefreshCooldown = true;
     btn.disabled = true;
     btn.style.opacity = '0.5';
-    if (msg) { msg.style.color = '#94a3b8'; msg.textContent = '요청 중...'; }
+    btn.textContent = '요청 중...';
+    if (msg) { msg.style.color = '#94a3b8'; msg.textContent = ''; }
     try {
       const hdrs = await authHeaders();
       const r = await fetch('/api/balances/refresh', { method: 'POST', headers: hdrs });
@@ -203,17 +204,30 @@
       if (d.ok) {
         if (msg) { msg.style.color = '#34d399'; msg.textContent = '요청 완료 — 수초 후 반영'; }
         setTimeout(() => { loadOps(); }, 5000);
+      } else if (d.cooldown) {
+        if (msg) { msg.style.color = '#fbbf24'; msg.textContent = d.error || '잠시 후 재시도'; }
       } else {
         if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || '실패'; }
       }
     } catch (e) {
       if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
     }
-    setTimeout(() => {
-      _balRefreshCooldown = false;
-      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
-      if (msg) msg.textContent = '';
-    }, 30000);
+    // 60초 쿨다운 (n8n 쿨다운과 동기화)
+    let remaining = 60;
+    btn.textContent = `${remaining}초`;
+    const timer = setInterval(() => {
+      remaining--;
+      if (remaining <= 0) {
+        clearInterval(timer);
+        _balRefreshCooldown = false;
+        btn.disabled = false;
+        btn.style.opacity = '1';
+        btn.textContent = '잔고 새로고침';
+        if (msg) msg.textContent = '';
+      } else {
+        btn.textContent = `${remaining}초`;
+      }
+    }, 1000);
   };
 
   // 상단 그룹 버튼 클릭
