@@ -1462,7 +1462,12 @@
     if (opsStrategy) allItems = allItems.filter(s => getStrategyKey(s.symbol, s.direction) === opsStrategy);
     // 제외 전략 기본 숨김 (전략 필터 미선택 시)
     if (!opsStrategy) allItems = allItems.filter(s => getStrategyStatus(s.symbol, s.direction, s) !== 'excluded');
-    if (!allItems.length) { el.innerHTML = emptyState('noData', opsStrategy ? `${opsStrategy.replace('_',' ')} 신호가 없습니다.` : 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
+    if (!allItems.length) {
+      const msg = opsStrategy
+        ? `${opsStrategy.replace('_',' ')} — 현재 발생한 신호가 없습니다. 조건 충족 시 자동으로 나타납니다.`
+        : '⚡ XRP SHORT: score 65 이상이면 매매 후보로 표시됩니다.\n🔬 BTC/ETH: 추세가 맞으면 연구용으로 기록됩니다.\n\n신호 대기 중... 1시간마다 스캔합니다.';
+      el.innerHTML = emptyState('noData', msg); return;
+    }
 
     // 단계/방향 기반 건수
     const cntCandidate = allItems.filter(s => (s.stage || 'candidate') === 'candidate' && s.direction !== 'no_trade').length;
@@ -1562,7 +1567,12 @@
     let items = d.items || [];
     if (opsStrategy) items = items.filter(t => getStrategyKey(t.symbol, t.direction) === opsStrategy);
     if (!opsStrategy) items = items.filter(t => getStrategyStatus(t.symbol, t.direction, t) !== 'excluded');
-    if (!items.length) { el.innerHTML = emptyState('noData', '진행 중인 paper trade가 없습니다.'); return; }
+    if (!items.length) {
+      const msg = opsStrategy
+        ? `${opsStrategy.replace('_',' ')} — 현재 열린 포지션이 없습니다.`
+        : '열린 포지션 없음. XRP SHORT score 65+ 달성 시 자동 진입됩니다.';
+      el.innerHTML = emptyState('noData', msg); return;
+    }
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
@@ -1594,7 +1604,12 @@
     let allItems = d.items || [];
     if (opsStrategy) allItems = allItems.filter(r => getStrategyKey(r.symbol, r.direction) === opsStrategy);
     if (!opsStrategy) allItems = allItems.filter(r => getStrategyStatus(r.symbol, r.direction, r) !== 'excluded');
-    if (!allItems.length) { el.innerHTML = emptyState('noData', '종료된 trade가 없습니다.'); return; }
+    if (!allItems.length) {
+      const msg = opsStrategy
+        ? `${opsStrategy.replace('_',' ')} — 종료된 거래가 없습니다.`
+        : '종료된 실전 거래가 없습니다. paper trade가 종료되면 여기에 쌓입니다.\n백테스트 결과는 위 필터에서 "백테스트"를 선택하세요.';
+      el.innerHTML = emptyState('noData', msg); return;
+    }
 
     const wins = allItems.filter(r => r.result === 'win').length;
     const losses = allItems.filter(r => r.result === 'loss').length;
@@ -1659,28 +1674,8 @@
     const d = opsData.perf || {};
     const diag = diagnose(d);
     if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
-    if (!d.total) { el.innerHTML = emptyState('noData', 'trade 결과가 쌓이면 자동 계산됩니다.'); return; }
-    const p = d;
-    const safeRatio = (v) => (v == null || !isFinite(v)) ? '0' : String(v);
-    const expectColor = p.expectation > 0 ? '#34d399' : p.expectation < 0 ? '#f87171' : '#64748b';
 
-    // 실전 검토 판정 (규칙 기반)
-    let verdict, verdictColor, verdictDesc;
-    if (p.total < 10) {
-      verdict = '판단 보류'; verdictColor = '#64748b';
-      verdictDesc = `데이터 ${p.total}건 — 최소 10건 이상 필요`;
-    } else if (p.expectation > 0 && p.winRate >= 0.4 && p.maxConsecutiveLoss <= 5 && p.maxDrawdownPercent <= 15) {
-      verdict = '검토 가능'; verdictColor = '#34d399';
-      verdictDesc = '기대값 양수, 승률/낙폭 허용 범위 내';
-    } else if (p.expectation <= 0 || p.maxDrawdownPercent > 20 || p.maxConsecutiveLoss > 7) {
-      verdict = '보류'; verdictColor = '#f87171';
-      verdictDesc = p.expectation <= 0 ? '기대값이 음수입니다' : p.maxDrawdownPercent > 20 ? '최대낙폭 20% 초과' : '연속손실 7회 초과';
-    } else {
-      verdict = '경계'; verdictColor = '#fbbf24';
-      verdictDesc = '일부 지표가 경계 수준 — 추가 데이터 필요';
-    }
-
-    // 실전/백테스트 모드 칩
+    // 모드 칩 (0건이어도 표시해야 하므로 먼저 생성)
     const isBt = opsPerfSource === 'backtest';
     const sourceChipHtml = `<div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;align-items:center;">
       <button class="ops-chip${!opsPerfSource?' active':''}" onclick="setPerfSource('')">전체</button>
@@ -1692,8 +1687,6 @@
         <button class="ops-chip${opsBtPeriod==='3m'?' active':''}" onclick="setBtPeriod('3m')">3개월</button>
         <button class="ops-chip${opsBtPeriod==='6m'?' active':''}" onclick="setBtPeriod('6m')">6개월</button>` : ''}
     </div>`;
-
-    // 모드 배너 + 백테스트 실행 폼
     let modeBanner = '';
     if (isBt) {
       modeBanner = `<div style="padding:8px 14px;background:rgba(251,146,60,0.08);border:1px solid rgba(251,146,60,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#fb923c;">🟠 백테스트 성과 — 과거 시뮬레이션이며 실전 결과가 아닙니다</div>
@@ -1717,6 +1710,34 @@
         </div>`;
     } else if (opsPerfSource === 'n8n') {
       modeBanner = `<div style="padding:8px 14px;background:rgba(96,165,250,0.08);border:1px solid rgba(96,165,250,0.3);border-radius:10px;margin-bottom:12px;font-size:0.8rem;color:#60a5fa;">🟢 실전 성과 — 실제 거래 기반</div>`;
+    }
+
+    if (!d.total) {
+      const msg = isBt
+        ? '백테스트 결과가 없습니다. 위 실행 폼에서 백테스트를 돌려보세요.'
+        : opsPerfSource === 'n8n'
+          ? '실전 거래 결과가 없습니다. XRP SHORT 첫 진입 → 종료 후 자동 집계됩니다.'
+          : '거래 결과가 쌓이면 자동으로 성과가 계산됩니다.';
+      el.innerHTML = sourceChipHtml + modeBanner + emptyState('noData', msg); return;
+    }
+    const p = d;
+    const safeRatio = (v) => (v == null || !isFinite(v)) ? '0' : String(v);
+    const expectColor = p.expectation > 0 ? '#34d399' : p.expectation < 0 ? '#f87171' : '#64748b';
+
+    // 실전 검토 판정 (규칙 기반)
+    let verdict, verdictColor, verdictDesc;
+    if (p.total < 10) {
+      verdict = '판단 보류'; verdictColor = '#64748b';
+      verdictDesc = `데이터 ${p.total}건 — 최소 10건 이상 필요`;
+    } else if (p.expectation > 0 && p.winRate >= 0.4 && p.maxConsecutiveLoss <= 5 && p.maxDrawdownPercent <= 15) {
+      verdict = '검토 가능'; verdictColor = '#34d399';
+      verdictDesc = '기대값 양수, 승률/낙폭 허용 범위 내';
+    } else if (p.expectation <= 0 || p.maxDrawdownPercent > 20 || p.maxConsecutiveLoss > 7) {
+      verdict = '보류'; verdictColor = '#f87171';
+      verdictDesc = p.expectation <= 0 ? '기대값이 음수입니다' : p.maxDrawdownPercent > 20 ? '최대낙폭 20% 초과' : '연속손실 7회 초과';
+    } else {
+      verdict = '경계'; verdictColor = '#fbbf24';
+      verdictDesc = '일부 지표가 경계 수준 — 추가 데이터 필요';
     }
 
     // 20/50건 토글
