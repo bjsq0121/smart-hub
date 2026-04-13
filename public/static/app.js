@@ -52,7 +52,7 @@
       defaultPage: 'page-home',
     },
     ops: {
-      label: '📊 운영',
+      label: '🪙 코인운영',
       auth: true,
       subs: [
         { id: 'signals', label: '🎯 신호',    page: 'page-ops', opsPane: 'signals' },
@@ -62,6 +62,14 @@
         { id: 'system',  label: '⚙️ 시스템', page: 'page-ops', opsPane: 'system' },
       ],
       onEnter: () => { if (typeof loadOps === 'function') loadOps(); },
+    },
+    stockOps: {
+      label: '📈 주식운영',
+      auth: true,
+      subs: [
+        { id: 'stock-dashboard', label: '📊 대시보드', page: 'page-stock-ops', stockOpsPane: 'dashboard' },
+      ],
+      onEnter: () => { if (typeof loadStockOps === 'function') loadStockOps(); },
     },
     research: {
       label: '🔬 리서치',
@@ -102,6 +110,12 @@
   function setOpsPane(opsPane) {
     document.querySelectorAll('#page-ops .ops-pane').forEach(p => {
       p.classList.toggle('active', p.id === 'ops-pane-' + opsPane);
+    });
+  }
+
+  function setStockOpsPane(pane) {
+    document.querySelectorAll('#page-stock-ops .stock-ops-pane').forEach(p => {
+      p.classList.toggle('active', p.id === 'stock-ops-pane-' + pane);
     });
   }
 
