@@ -1242,7 +1242,9 @@
     const dir = (direction || 'long').toUpperCase();
     return sym + '_' + dir;
   }
-  function getStrategyStatus(symbol, direction) {
+  function getStrategyStatus(symbol, direction, item) {
+    // n8n이 보내는 strategyStatus 우선, 없으면 로컬 맵 참조
+    if (item && item.strategyStatus) return item.strategyStatus;
     return STRATEGY_STATUS[getStrategyKey(symbol, direction)] || 'research';
   }
   function strategyBadge(status) {
@@ -1459,7 +1461,7 @@
     // 전략 필터 적용
     if (opsStrategy) allItems = allItems.filter(s => getStrategyKey(s.symbol, s.direction) === opsStrategy);
     // 제외 전략 기본 숨김 (전략 필터 미선택 시)
-    if (!opsStrategy) allItems = allItems.filter(s => getStrategyStatus(s.symbol, s.direction) !== 'excluded');
+    if (!opsStrategy) allItems = allItems.filter(s => getStrategyStatus(s.symbol, s.direction, s) !== 'excluded');
     if (!allItems.length) { el.innerHTML = emptyState('noData', opsStrategy ? `${opsStrategy.replace('_',' ')} 신호가 없습니다.` : 'n8n에서 kind=signal 로 보내면 여기에 나타납니다.'); return; }
 
     // 단계/방향 기반 건수
@@ -1531,7 +1533,7 @@
             const scoreCls = s.score >= 70 ? 'color:#34d399' : s.score >= 40 ? 'color:#fbbf24' : 'color:#f87171';
             const isNoTrade = s.direction === 'no_trade';
             const sid = String(s.signalId || s.id || idx).replace(/[^a-zA-Z0-9_-]/g, '_');
-            const sStatus = getStrategyStatus(s.symbol, s.direction);
+            const sStatus = getStrategyStatus(s.symbol, s.direction, s);
             return `<tr class="${isNoTrade ? 'no-trade' : ''}" style="cursor:pointer;" onclick="toggleFactors('${sid}')">
               <td style="font-weight:700;color:#e2e8f0;">${esc(s.symbol)} <span style="font-size:0.65rem;color:#475569;">&#9662;</span><br>${strategyBadge(sStatus)}</td>
               <td>${stageBadge(s.stage || 'candidate')}<br>${actionBadge(sStatus)}</td>
@@ -1559,14 +1561,14 @@
     if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
     let items = d.items || [];
     if (opsStrategy) items = items.filter(t => getStrategyKey(t.symbol, t.direction) === opsStrategy);
-    if (!opsStrategy) items = items.filter(t => getStrategyStatus(t.symbol, t.direction) !== 'excluded');
+    if (!opsStrategy) items = items.filter(t => getStrategyStatus(t.symbol, t.direction, t) !== 'excluded');
     if (!items.length) { el.innerHTML = emptyState('noData', '진행 중인 paper trade가 없습니다.'); return; }
     el.innerHTML = `
       <div class="ops-table-wrap">
         <table class="ops-table">
           <thead><tr><th>종목</th><th>방향</th><th>진입가</th><th>현재가</th><th>손익</th><th>최대유리</th><th>최대불리</th><th>보유시간</th><th>상태</th><th>진입</th><th>갱신</th></tr></thead>
           <tbody>${items.map(t => `<tr>
-            <td style="font-weight:700;color:#e2e8f0;">${esc(t.symbol)}<br>${strategyBadge(getStrategyStatus(t.symbol, t.direction))}</td>
+            <td style="font-weight:700;color:#e2e8f0;">${esc(t.symbol)}<br>${strategyBadge(getStrategyStatus(t.symbol, t.direction, t))}</td>
             <td>${directionBadge(t.direction)}</td>
             <td>${fmtKRW(t.entryPrice)}</td>
             <td>${fmtKRW(t.currentPrice)}</td>
@@ -1591,7 +1593,7 @@
     if (diag) { el.innerHTML = emptyState(diag, d.error); return; }
     let allItems = d.items || [];
     if (opsStrategy) allItems = allItems.filter(r => getStrategyKey(r.symbol, r.direction) === opsStrategy);
-    if (!opsStrategy) allItems = allItems.filter(r => getStrategyStatus(r.symbol, r.direction) !== 'excluded');
+    if (!opsStrategy) allItems = allItems.filter(r => getStrategyStatus(r.symbol, r.direction, r) !== 'excluded');
     if (!allItems.length) { el.innerHTML = emptyState('noData', '종료된 trade가 없습니다.'); return; }
 
     const wins = allItems.filter(r => r.result === 'win').length;

@@ -1099,6 +1099,7 @@ def _normalize_signal(payload: dict) -> dict:
         "stage":          str(payload.get("stage") or "candidate"),           # candidate | trade_ready
         "factors":        raw_factors if isinstance(raw_factors, dict) else None,
         "noTradeReason":  str(payload.get("noTradeReason") or payload.get("no_trade_reason") or ""),
+        "strategyStatus": str(payload.get("strategyStatus") or payload.get("strategy_status") or ""),
     }
 
 
