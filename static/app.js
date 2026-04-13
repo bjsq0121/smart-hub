@@ -1360,14 +1360,20 @@
       return html;
     }
 
+    if (!items.length) {
+      const stageLabel = { candidate:'감시 후보', trade_ready:'매매 후보', no_trade:'제외' }[opsStageFilter] || '';
+      el.innerHTML = stageHtml + symbolHtml + emptyState('noData', stageLabel ? `현재 ${stageLabel} 신호가 없습니다.` : '필터에 해당하는 신호가 없습니다.');
+      return;
+    }
+
     el.innerHTML = stageHtml + symbolHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
           <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
-          <tbody>${items.map(s => {
+          <tbody>${items.map((s, idx) => {
             const scoreCls = s.score >= 70 ? 'color:#34d399' : s.score >= 40 ? 'color:#fbbf24' : 'color:#f87171';
             const isNoTrade = s.direction === 'no_trade';
-            const sid = s.signalId || s.id || '';
+            const sid = String(s.signalId || s.id || idx).replace(/[^a-zA-Z0-9_-]/g, '_');
             return `<tr class="${isNoTrade ? 'no-trade' : ''}" style="cursor:pointer;" onclick="toggleFactors('${sid}')">
               <td style="font-weight:700;color:#e2e8f0;">${esc(s.symbol)} <span style="font-size:0.65rem;color:#475569;">&#9662;</span></td>
               <td>${stageBadge(s.stage || 'candidate')}</td>
@@ -1445,6 +1451,11 @@
       <button class="ops-chip${opsResultDirFilter==='long'?' active':''}" onclick="setResultDirFilter('long')" style="color:#34d399;">Long (${longs})</button>
       <button class="ops-chip${opsResultDirFilter==='short'?' active':''}" onclick="setResultDirFilter('short')" style="color:#f87171;">Short (${shorts})</button>
     </div>`;
+
+    if (!filtered.length) {
+      el.innerHTML = filterHtml + emptyState('noData', '필터에 해당하는 결과가 없습니다.');
+      return;
+    }
 
     el.innerHTML = filterHtml + `
       <div class="ops-table-wrap">
@@ -1540,27 +1551,31 @@
         </div>
       </div>`;
 
-    // 방향별 성과 (byDirection)
+    // 방향별 성과 (byDirection) — 0건인 방향은 카드 미표시
     const byDir = p.byDirection || {};
     const lp = byDir.long || {};
     const sp = byDir.short || {};
     if (lp.total > 0 || sp.total > 0) {
-      el.innerHTML += `
-        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin:18px 0 8px;">방향별 성과</div>
-        <div class="ops-cards">
-          <div class="ops-card" style="border-color:rgba(52,211,153,0.3);">
+      let dirCards = '';
+      if (lp.total > 0) {
+        dirCards += `<div class="ops-card" style="border-color:rgba(52,211,153,0.3);">
             <div class="ops-card-label" style="color:#34d399;">LONG</div>
-            <div class="ops-card-value">${lp.total || 0}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
+            <div class="ops-card-value">${lp.total}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
             <div class="ops-card-sub">승률 ${((lp.winRate||0)*100).toFixed(1)}% · ${lp.wins||0}승 ${lp.losses||0}패</div>
             <div class="ops-card-sub">기대값 ${fmtPct(lp.expectation||0)} · 손익비 ${lp.avgPnlRatio||0}</div>
-          </div>
-          <div class="ops-card" style="border-color:rgba(248,113,113,0.3);">
+          </div>`;
+      }
+      if (sp.total > 0) {
+        dirCards += `<div class="ops-card" style="border-color:rgba(248,113,113,0.3);">
             <div class="ops-card-label" style="color:#f87171;">SHORT</div>
-            <div class="ops-card-value">${sp.total || 0}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
+            <div class="ops-card-value">${sp.total}<span style="font-size:0.75rem;color:#94a3b8;">건</span></div>
             <div class="ops-card-sub">승률 ${((sp.winRate||0)*100).toFixed(1)}% · ${sp.wins||0}승 ${sp.losses||0}패</div>
             <div class="ops-card-sub">기대값 ${fmtPct(sp.expectation||0)} · 손익비 ${sp.avgPnlRatio||0}</div>
-          </div>
-        </div>`;
+          </div>`;
+      }
+      el.innerHTML += `
+        <div style="font-size:0.82rem;color:#94a3b8;font-weight:600;margin:18px 0 8px;">방향별 성과</div>
+        <div class="ops-cards">${dirCards}</div>`;
     }
   }
 
