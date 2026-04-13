@@ -1303,6 +1303,24 @@ async def api_balances_latest(user: dict = Depends(verify_firebase_token)):
         return {"latest": None, "previous": None, "error": "balances 조회 실패"}
 
 
+N8N_BALANCE_WEBHOOK = os.getenv("N8N_BALANCE_WEBHOOK", "")
+
+
+@app.post("/api/balance/refresh")
+async def api_balance_refresh(user: dict = Depends(verify_firebase_token)):
+    """n8n 잔고 워크플로를 트리거해서 최신 잔고를 가져오게 한다."""
+    if not N8N_BALANCE_WEBHOOK:
+        raise HTTPException(status_code=503, detail="잔고 새로고침 웹훅이 설정되지 않았습니다. N8N_BALANCE_WEBHOOK 환경변수를 확인하세요.")
+    try:
+        import requests as _req
+        resp = _req.post(N8N_BALANCE_WEBHOOK, json={"trigger": "manual", "user": user.get("email", "")}, timeout=15)
+        if resp.status_code >= 400:
+            return {"ok": False, "error": f"n8n 응답 {resp.status_code}"}
+        return {"ok": True, "message": "잔고 새로고침 요청 완료. 수초 후 반영됩니다."}
+    except Exception as e:
+        return {"ok": False, "error": "n8n 워크플로 호출 실패"}
+
+
 @app.get("/api/workflows/status")
 async def api_workflows_status(
     limit: int = Query(default=50, le=200),

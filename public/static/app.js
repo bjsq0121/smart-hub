@@ -186,6 +186,36 @@
     if (r) r.style.display = r.style.display === 'none' ? 'table-row' : 'none';
   };
 
+  // 잔고 새로고침 (n8n 트리거 → 재조회)
+  let _balRefreshCooldown = false;
+  window.refreshBalance = async () => {
+    const btn = document.getElementById('bal-refresh-btn');
+    const msg = document.getElementById('bal-refresh-msg');
+    if (_balRefreshCooldown || !btn) return;
+    _balRefreshCooldown = true;
+    btn.disabled = true;
+    btn.style.opacity = '0.5';
+    if (msg) { msg.style.color = '#94a3b8'; msg.textContent = '요청 중...'; }
+    try {
+      const hdrs = await authHeaders();
+      const r = await fetch('/api/balance/refresh', { method: 'POST', headers: hdrs });
+      const d = await r.json();
+      if (d.ok) {
+        if (msg) { msg.style.color = '#34d399'; msg.textContent = '요청 완료 — 수초 후 반영'; }
+        setTimeout(() => { loadOps(); }, 5000);
+      } else {
+        if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || '실패'; }
+      }
+    } catch (e) {
+      if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
+    }
+    setTimeout(() => {
+      _balRefreshCooldown = false;
+      if (btn) { btn.disabled = false; btn.style.opacity = '1'; }
+      if (msg) msg.textContent = '';
+    }, 30000);
+  };
+
   // 상단 그룹 버튼 클릭
   document.getElementById('nav-groups')?.addEventListener('click', e => {
     const btn = e.target.closest('.nav-group');
@@ -1663,10 +1693,12 @@
         html += '</div>';
       }
 
-      html += `<div class="ops-meta-line" style="margin-bottom:16px;">
-        🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}
-        ${!hasMarket ? ' · <span style="color:#fbbf24;">현재가 미수신 — 위 숫자는 매수 원가이며 현재 시세가 아닙니다</span>' : ''}
-        ${bal.errorType ? ` · <span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
+      html += `<div class="ops-meta-line" style="margin-bottom:16px;display:flex;align-items:center;flex-wrap:wrap;gap:8px;">
+        <span>🏦 계좌 ${bal.accountCount || 0}개 · 마지막 수신 ${fmtRel(bal.created_at)}</span>
+        <button id="bal-refresh-btn" onclick="refreshBalance()" style="padding:4px 12px;border-radius:14px;border:1px solid rgba(99,102,241,0.4);background:rgba(99,102,241,0.1);color:#a5b4fc;font-size:0.72rem;cursor:pointer;">잔고 새로고침</button>
+        <span id="bal-refresh-msg" style="font-size:0.72rem;"></span>
+        ${!hasMarket ? '<span style="color:#fbbf24;">현재가 미수신 — 위 숫자는 매수 원가이며 현재 시세가 아닙니다</span>' : ''}
+        ${bal.errorType ? `<span style="color:#f87171;">${esc(bal.errorType)}</span>` : ''}
       </div>`;
     } else {
       html += '<div class="ops-cards" style="margin-bottom:16px;">';
