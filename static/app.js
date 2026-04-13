@@ -198,7 +198,7 @@
     if (msg) { msg.style.color = '#94a3b8'; msg.textContent = '요청 중...'; }
     try {
       const hdrs = await authHeaders();
-      const r = await fetch('/api/balance/refresh', { method: 'POST', headers: hdrs });
+      const r = await fetch('/api/balances/refresh', { method: 'POST', headers: hdrs });
       const d = await r.json();
       if (d.ok) {
         if (msg) { msg.style.color = '#34d399'; msg.textContent = '요청 완료 — 수초 후 반영'; }
