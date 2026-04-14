@@ -245,55 +245,65 @@ function fmtHold(min) {
   if (min < 1440) return Math.floor(min/60) + '시간 ' + (min%60) + '분';
   return Math.floor(min/1440) + '일 ' + Math.floor((min%1440)/60) + '시간';
 }
-// syncStatus 전용 뱃지 (ok/partial/failed — 동기화 상태)
-function syncBadge(status) {
-  const map = { ok:'#34d399', partial:'#fbbf24', failed:'#f87171' };
-  const c = map[status] || '#64748b';
-  return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${esc(status||'-')}</span>`;
+// ── Tailwind 뱃지 (운영 대시보드 리디자인) ──
+// 색상 토큰: emerald=ok/win/long, rose=fail/loss/short, amber=partial/active, sky=candidate, violet=ready, slate=excluded/default
+function _badge(color, label, size) {
+  const sizeCls = size === 'lg'
+    ? 'px-3 py-1 text-sm'
+    : size === 'sm'
+    ? 'px-1.5 py-0.5 text-[10px]'
+    : 'px-2 py-0.5 text-xs';
+  return `<span class="inline-flex items-center rounded-md font-semibold ${sizeCls} bg-${color}-500/10 text-${color}-400 border border-${color}-500/30">${label}</span>`;
 }
-// signal/paper_trade 상태 전용 뱃지 (candidate/entered/expired/open/closed 등)
+
+function syncBadge(status) {
+  const map = { ok:'emerald', partial:'amber', failed:'rose' };
+  return _badge(map[status] || 'slate', esc(status || '-'));
+}
 function itemStatusBadge(status) {
   const map = {
-    candidate:['#60a5fa','후보'], trade_ready:['#a78bfa','매매 후보'], entered:['#a78bfa','진입'], expired:['#64748b','만료'],
-    rejected:['#f87171','거절'], open:['#fbbf24','진행 중'], closed:['#94a3b8','종료'],
+    candidate:['sky','후보'], trade_ready:['violet','매매 후보'], entered:['violet','진입'],
+    expired:['slate','만료'], rejected:['rose','거절'], open:['amber','진행 중'], closed:['slate','종료'],
   };
-  const [c, label] = map[status] || ['#64748b', status || '-'];
-  return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
+  const [color, label] = map[status] || ['slate', status || '-'];
+  return _badge(color, label);
 }
-function pnlColor(pct) { return pct > 0 ? '#34d399' : pct < 0 ? '#f87171' : '#64748b'; }
+function pnlColor(pct) { return pct > 0 ? 'text-emerald-400' : pct < 0 ? 'text-rose-400' : 'text-slate-500'; }
 function resultBadge(r) {
-  if (r === 'win') return '<span style="color:#34d399;font-weight:700;">W</span>';
-  if (r === 'loss') return '<span style="color:#f87171;font-weight:700;">L</span>';
-  return '<span style="color:#64748b;">-</span>';
+  if (r === 'win') return '<span class="inline-flex items-center justify-center w-6 h-6 rounded bg-emerald-500/15 text-emerald-400 font-bold text-xs">W</span>';
+  if (r === 'loss') return '<span class="inline-flex items-center justify-center w-6 h-6 rounded bg-rose-500/15 text-rose-400 font-bold text-xs">L</span>';
+  return '<span class="text-slate-600">-</span>';
 }
 function sysStatusBadge(s) {
-  const map = { normal:['#34d399','정상'], caution:['#fbbf24','주의'], pause:['#f87171','중단'] };
-  const [c, label] = map[s] || ['#64748b', s || '-'];
-  return `<span style="display:inline-block;padding:4px 14px;border-radius:12px;font-size:0.85rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
+  const map = { normal:['emerald','정상'], caution:['amber','주의'], pause:['rose','중단'] };
+  const [color, label] = map[s] || ['slate', s || '-'];
+  return _badge(color, label, 'lg');
 }
-// 방향 뱃지 (long / short / no_trade)
 function directionBadge(dir) {
-  if (dir === 'long') return '<span style="color:#34d399;font-weight:700;">Long</span>';
-  if (dir === 'short') return '<span style="color:#f87171;font-weight:700;">Short</span>';
-  if (dir === 'no_trade') return '<span style="color:#64748b;font-weight:700;">제외</span>';
-  return '<span style="color:#64748b;">-</span>';
+  if (dir === 'long') return '<span class="inline-flex items-center gap-1 text-emerald-400 font-bold text-sm">▲ Long</span>';
+  if (dir === 'short') return '<span class="inline-flex items-center gap-1 text-rose-400 font-bold text-sm">▼ Short</span>';
+  if (dir === 'no_trade') return '<span class="text-slate-500 font-semibold text-sm">제외</span>';
+  return '<span class="text-slate-600">-</span>';
 }
-// 단계 뱃지 (candidate / trade_ready)
 function stageBadge(stage) {
-  const map = { candidate:['#60a5fa','감시'], trade_ready:['#a78bfa','매매 후보'] };
-  const [c, label] = map[stage] || ['#60a5fa', '감시'];
-  return `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.7rem;font-weight:700;background:${c}22;color:${c};border:1px solid ${c}55;">${label}</span>`;
+  const map = { candidate:['sky','감시'], trade_ready:['violet','매매 후보'] };
+  const [color, label] = map[stage] || ['sky', '감시'];
+  return _badge(color, label);
 }
-// 빈 화면 구분 메시지
 function emptyState(type, extra) {
   const msgs = {
     noData:    ['📭', '데이터 없음', extra || 'n8n에서 해당 kind를 보내면 여기에 표시됩니다.'],
-    noIndex:   ['🔧', '인덱스 필요', extra || 'Firestore에 복합 인덱스를 생성해야 합니다. 콘솔 에러를 확인하세요.'],
-    authFail:  ['🔒', '인증 실패', extra || '로그인 세션이 만료되었거나 권한이 없습니다. 다시 로그인하세요.'],
-    apiFail:   ['⚠️', 'API 오류', extra || '서버 응답을 받지 못했습니다. 잠시 후 새로고침하세요.'],
+    noIndex:   ['🔧', '인덱스 필요', extra || 'Firestore에 복합 인덱스를 생성해야 합니다.'],
+    authFail:  ['🔒', '인증 실패', extra || '로그인 세션이 만료되었습니다. 다시 로그인하세요.'],
+    apiFail:   ['⚠️', 'API 오류', extra || '서버 응답을 받지 못했습니다.'],
   };
   const [icon, title, desc] = msgs[type] || msgs.noData;
-  return `<div class="ops-empty"><div style="font-size:1.6rem;margin-bottom:6px;">${icon}</div><div style="color:#e2e8f0;font-weight:600;margin-bottom:4px;">${title}</div><div>${desc}</div></div>`;
+  return `
+    <div class="flex flex-col items-center justify-center py-12 px-4 rounded-xl border border-dashed border-slate-700/60 bg-slate-800/20">
+      <div class="text-3xl mb-2">${icon}</div>
+      <div class="text-slate-300 font-semibold mb-1">${title}</div>
+      <div class="text-slate-500 text-sm text-center max-w-md">${desc}</div>
+    </div>`;
 }
 // API 응답 상태 분석 — 빈 화면 구분용
 function diagnose(data) {

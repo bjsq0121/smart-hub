@@ -4,6 +4,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>스마트 허브</title>
+  <!-- Tailwind CDN (운영 대시보드 리디자인) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            // 기존 디자인 톤 유지용
+            ink: { 950: '#0f0f1a', 900: '#111827', 800: '#1a1a2e', 700: '#242445' },
+            accent: { live: '#34d399', research: '#60a5fa', excluded: '#64748b' },
+          },
+          animation: {
+            'pulse-slow': 'pulse 3s cubic-bezier(0.4,0,0.6,1) infinite',
+          },
+        },
+      },
+    };
+  </script>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
@@ -230,45 +249,54 @@
   </div>
 </div>
 
-<!-- ══════════════ 🪙 코인 검증 허브 ══════════════ -->
+<!-- ══════════════ 🪙 코인 검증 허브 (Tailwind 리디자인) ══════════════ -->
 <div class="page" id="page-ops">
-  <div style="max-width:1120px;margin:24px auto;padding:0 24px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">
-      <h2 style="font-size:1.15rem;color:#e2e8f0;margin:0;">
-        <span style="font-size:0.72rem;color:#fbbf24;border:1px solid rgba(251,191,36,0.3);background:rgba(251,191,36,0.08);padding:2px 8px;border-radius:8px;margin-right:8px;">코인 검증</span>
-        Crypto Signal Validation
+  <div class="max-w-[1200px] mx-auto px-6 py-6">
+    <!-- 헤더 -->
+    <div class="flex justify-between items-center mb-4 gap-3 flex-wrap">
+      <h2 class="text-lg font-bold text-slate-200 flex items-center gap-3">
+        <span class="text-xs font-bold text-amber-400 bg-amber-400/10 border border-amber-400/30 px-2 py-0.5 rounded-md">
+          코인 검증
+        </span>
+        <span class="text-slate-100">Crypto Signal Validation</span>
       </h2>
-      <div style="display:flex;align-items:center;gap:10px;">
-        <span id="ops-last-update" style="font-size:0.72rem;color:#475569;"></span>
-        <button onclick="loadOps()" style="padding:6px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.1);background:transparent;color:#94a3b8;font-size:0.78rem;cursor:pointer;">새로고침</button>
+      <div class="flex items-center gap-3">
+        <span id="ops-last-update" class="text-xs text-slate-500"></span>
+        <button onclick="loadOps()" class="px-4 py-1.5 rounded-full border border-white/10 bg-white/0 hover:bg-white/5 text-slate-400 hover:text-slate-200 text-xs transition">
+          새로고침
+        </button>
       </div>
     </div>
-    <div id="ops-stale-warning" style="display:none;"></div>
-    <div id="ops-strategy-bar"></div>
+
+    <!-- stale 경고 배너 (동적 노출) -->
+    <div id="ops-stale-warning" class="hidden"></div>
+
+    <!-- 전략 바 -->
+    <div id="ops-strategy-bar" class="mb-4"></div>
 
     <!-- 🎯 신호 후보 -->
     <section class="ops-pane active" id="ops-pane-signals">
-      <div id="ops-signals-content"><div class="ops-empty">로딩 중...</div></div>
+      <div id="ops-signals-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- 📊 검증 중 (paper trade) -->
     <section class="ops-pane" id="ops-pane-trades">
-      <div id="ops-trades-content"><div class="ops-empty">로딩 중...</div></div>
+      <div id="ops-trades-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- 📋 종료 결과 -->
     <section class="ops-pane" id="ops-pane-results">
-      <div id="ops-results-content"><div class="ops-empty">로딩 중...</div></div>
+      <div id="ops-results-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- 📈 성과 요약 -->
     <section class="ops-pane" id="ops-pane-perf">
-      <div id="ops-perf-content"><div class="ops-empty">로딩 중...</div></div>
+      <div id="ops-perf-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- ⚙️ 시스템 상태 -->
     <section class="ops-pane" id="ops-pane-system">
-      <div id="ops-system-content"><div class="ops-empty">로딩 중...</div></div>
+      <div id="ops-system-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
   </div>
 </div>
