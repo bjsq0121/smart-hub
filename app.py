@@ -455,6 +455,165 @@ def _fetch_ohlcv(stock_code: str, days: int = 60) -> list[dict] | None:
     return None
 
 
+# ── 업종별 시세 / 투자자별 매매동향 ──────────────────────────
+_sector_cache: dict = {}   # {"data": [...], "ts": float}
+_investor_cache: dict = {} # {"data": {...}, "ts": float}
+SECTOR_CACHE_TTL_MARKET  = 300   # 장중 5분
+SECTOR_CACHE_TTL_OFF     = 1800  # 장외 30분
+INVESTOR_CACHE_TTL       = 300   # 5분
+
+# 주요 업종 코드 (KIS 업종코드)
+_SECTOR_CODES = {
+    "0001": "종합(KOSPI)",
+    "2001": "대형주",
+    "1001": "음식료품",
+    "1002": "섬유의복",
+    "1003": "종이목재",
+    "1004": "화학",
+    "1005": "의약품",
+    "1006": "비금속광물",
+    "1007": "철강금속",
+    "1008": "기계",
+    "1009": "전기전자",
+    "1010": "의료정밀",
+    "1011": "운수장비",
+    "1012": "유통업",
+    "1013": "전기가스업",
+    "1014": "건설업",
+    "1015": "운수창고업",
+    "1016": "통신업",
+    "1017": "금융업",
+    "1018": "은행",
+    "1019": "증권",
+    "1024": "보험",
+    "1025": "서비스업",
+    "1026": "제조업",
+}
+
+
+def _is_market_hours() -> bool:
+    """한국 장중 시간(09:00~15:30) 여부 판단"""
+    kst = datetime.now(timezone(timedelta(hours=9)))
+    if kst.weekday() >= 5:  # 주말
+        return False
+    t = kst.hour * 100 + kst.minute
+    return 900 <= t <= 1530
+
+
+def _fetch_sector_index() -> list[dict]:
+    """업종별 현재가 시세 조회 (TR: FHPUP02100000)"""
+    results = []
+    for code, name in _SECTOR_CODES.items():
+        try:
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "U",
+                "FID_INPUT_ISCD": code,
+            }
+            resp = requests.get(
+                f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-index-price",
+                headers=_kis_headers("FHPUP02100000"),
+                params=params,
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("rt_cd") == "0" and data.get("output"):
+                out = data["output"]
+                results.append({
+                    "code": code,
+                    "name": name,
+                    "bstp_nmix_prpr": out.get("bstp_nmix_prpr", "0"),      # 업종 현재가
+                    "bstp_nmix_prdy_vrss": out.get("bstp_nmix_prdy_vrss", "0"),  # 전일대비
+                    "bstp_nmix_prdy_ctrt": out.get("bstp_nmix_prdy_ctrt", "0"),  # 등락률
+                    "acml_vol": out.get("acml_vol", "0"),                   # 거래량
+                    "acml_tr_pbmn": out.get("acml_tr_pbmn", "0"),           # 거래대금
+                })
+            _time.sleep(0.05)  # API 호출 간격
+        except Exception:
+            pass
+    return results
+
+
+def _fetch_investor_trend(market: str = "KOSPI") -> dict:
+    """투자자별 매매동향 조회 (TR: FHPTJ04400000)
+
+    외국인/기관 순매수 상위 종목을 조회한다.
+    KIS API 제한에 따라 전체 시장 투자자별 매매동향을 가져온다.
+    """
+    mrkt_code = "0001" if market.upper() == "KOSPI" else "1001"
+    today = datetime.now(timezone(timedelta(hours=9))).strftime("%Y%m%d")
+    result = {"foreign": [], "institution": [], "date": today, "market": market}
+
+    try:
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "V",
+            "FID_INPUT_ISCD": mrkt_code,
+            "FID_INPUT_DATE_1": today,
+            "FID_INPUT_DATE_2": today,
+            "FID_PERIOD_DIV_CODE": "D",
+        }
+        resp = requests.get(
+            f"{KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/inquire-investor",
+            headers=_kis_headers("FHPTJ04400000"),
+            params=params,
+            timeout=10,
+        )
+        data = resp.json()
+        if data.get("rt_cd") == "0" and data.get("output"):
+            out = data["output"]
+            if isinstance(out, list) and len(out) > 0:
+                row = out[0]
+                result["summary"] = {
+                    "frgn_ntby_qty": row.get("frgn_ntby_qty", "0"),    # 외국인 순매수 수량
+                    "frgn_ntby_tr_pbmn": row.get("frgn_ntby_tr_pbmn", "0"),  # 외국인 순매수 금액
+                    "orgn_ntby_qty": row.get("orgn_ntby_qty", "0"),    # 기관 순매수 수량
+                    "orgn_ntby_tr_pbmn": row.get("orgn_ntby_tr_pbmn", "0"),  # 기관 순매수 금액
+                    "prsn_ntby_qty": row.get("prsn_ntby_qty", "0"),    # 개인 순매수 수량
+                    "prsn_ntby_tr_pbmn": row.get("prsn_ntby_tr_pbmn", "0"),  # 개인 순매수 금액
+                }
+            elif isinstance(out, dict):
+                result["summary"] = {
+                    "frgn_ntby_qty": out.get("frgn_ntby_qty", "0"),
+                    "frgn_ntby_tr_pbmn": out.get("frgn_ntby_tr_pbmn", "0"),
+                    "orgn_ntby_qty": out.get("orgn_ntby_qty", "0"),
+                    "orgn_ntby_tr_pbmn": out.get("orgn_ntby_tr_pbmn", "0"),
+                    "prsn_ntby_qty": out.get("prsn_ntby_qty", "0"),
+                    "prsn_ntby_tr_pbmn": out.get("prsn_ntby_tr_pbmn", "0"),
+                }
+    except Exception:
+        pass
+
+    # 외국인/기관 순매수 상위 종목 (거래량 상위 목록에서 보강)
+    try:
+        rank_items = _fetch_volume_rank(market)
+        foreign_top = []
+        for item in rank_items[:30]:
+            code = item.get("mksc_shrn_iscd", "") or item.get("stck_shrn_iscd", "")
+            name = item.get("hts_kor_isnm", "")
+            if not code:
+                continue
+            frgn_ntby = item.get("frgn_ntby_qty", "")
+            if frgn_ntby:
+                try:
+                    frgn_val = int(frgn_ntby)
+                    foreign_top.append({
+                        "symbol": code,
+                        "name": name,
+                        "netBuy": frgn_val,
+                        "price": item.get("stck_prpr", "0"),
+                        "change_rate": item.get("prdy_ctrt", "0"),
+                    })
+                except (ValueError, TypeError):
+                    pass
+        # 외국인 순매수 상위/하위 각 10개
+        foreign_top.sort(key=lambda x: x["netBuy"], reverse=True)
+        result["foreignBuy"] = foreign_top[:10]
+        result["foreignSell"] = foreign_top[-10:] if len(foreign_top) > 10 else []
+    except Exception:
+        pass
+
+    return result
+
+
 def _calc_rsi(closes: list[int], period: int = 14) -> float | None:
     """RSI 계산 (kis-trading/screener.py 로직)"""
     if len(closes) < period + 1:
@@ -702,6 +861,75 @@ async def stock_recommend(
     filtered.sort(key=lambda x: x["per"])
 
     return {"market": market, "total": len(filtered), "pool_size": len(stocks), "items": filtered}
+
+
+@app.get("/api/sector-heatmap")
+async def api_sector_heatmap(user: dict = Depends(verify_firebase_token)):
+    """업종별 시세 히트맵 데이터. 장중 5분 / 장외 30분 캐시."""
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return {"error": "KIS API 키가 설정되지 않았습니다."}
+
+    now = _time.time()
+    ttl = SECTOR_CACHE_TTL_MARKET if _is_market_hours() else SECTOR_CACHE_TTL_OFF
+    if _sector_cache.get("data") and now - _sector_cache.get("ts", 0) < ttl:
+        return {
+            "sectors": _sector_cache["data"],
+            "cached": True,
+            "marketOpen": _is_market_hours(),
+            "updatedAt": datetime.fromtimestamp(_sector_cache["ts"], tz=timezone(timedelta(hours=9))).isoformat(),
+        }
+
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            sectors = await loop.run_in_executor(ex, _fetch_sector_index)
+    except Exception:
+        return {"error": "업종 시세 조회 중 오류가 발생했습니다.", "sectors": []}
+
+    _sector_cache["data"] = sectors
+    _sector_cache["ts"] = now
+
+    return {
+        "sectors": sectors,
+        "cached": False,
+        "marketOpen": _is_market_hours(),
+        "updatedAt": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+    }
+
+
+@app.get("/api/investor-flow")
+async def api_investor_flow(
+    market: str = Query(default="KOSPI"),
+    user: dict = Depends(verify_firebase_token),
+):
+    """외국인/기관 투자자별 매매동향. 5분 캐시."""
+    if not KIS_APP_KEY or not KIS_APP_SECRET:
+        return {"error": "KIS API 키가 설정되지 않았습니다."}
+
+    cache_key = f"investor_{market.upper()}"
+    now = _time.time()
+    cached = _investor_cache.get(cache_key)
+    if cached and now - cached.get("ts", 0) < INVESTOR_CACHE_TTL:
+        return {
+            **cached["data"],
+            "cached": True,
+            "updatedAt": datetime.fromtimestamp(cached["ts"], tz=timezone(timedelta(hours=9))).isoformat(),
+        }
+
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            trend = await loop.run_in_executor(ex, _fetch_investor_trend, market)
+    except Exception:
+        return {"error": "투자자별 매매동향 조회 중 오류가 발생했습니다."}
+
+    _investor_cache[cache_key] = {"data": trend, "ts": now}
+
+    return {
+        **trend,
+        "cached": False,
+        "updatedAt": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+    }
 
 
 @app.post("/stock-ai")
@@ -1024,7 +1252,7 @@ class IngestEnvelope(BaseModel):
     payload: dict = {}
 
 
-_ALLOWED_KINDS = {"event", "balance", "workflow_run", "signal", "paper_trade", "trade_result", "system_status", "stock_signal", "stock_alert"}
+_ALLOWED_KINDS = {"event", "balance", "workflow_run", "signal", "paper_trade", "trade_result", "system_status", "stock_signal", "stock_alert", "position_update", "sector_flow"}
 _ALLOWED_SYNC = {"ok", "partial", "failed"}
 
 
@@ -1174,6 +1402,33 @@ def _normalize_stock_signal(payload: dict, meta: dict) -> dict:
     }
 
 
+def _normalize_position_update(payload: dict, meta: dict) -> dict:
+    """포지션 업데이트 정규화. 외부 시스템이 주기적으로 보냄."""
+    return {
+        "signalId": payload.get("signalId", ""),
+        "symbol": payload.get("symbol", ""),
+        "currentPrice": float(payload.get("currentPrice", 0)),
+        "returnPct": float(payload.get("returnPct", 0)),
+        "hitTarget": payload.get("hitTarget", False),
+        "hitStopLoss": payload.get("hitStopLoss", False),
+        "daysHeld": int(payload.get("daysHeld", 0)),
+        "maxFavorable": float(payload.get("maxFavorable", 0)),
+        "maxAdverse": float(payload.get("maxAdverse", 0)),
+        **meta,
+    }
+
+
+def _normalize_sector_flow(payload: dict, meta: dict) -> dict:
+    """업종별 시세 + 외국인/기관 매매동향 정규화. n8n 또는 외부 수집기가 보냄."""
+    return {
+        "sectors":          payload.get("sectors", []),           # [{name, change_pct, volume, ...}]
+        "foreignTop":       payload.get("foreignTop", []),       # [{symbol, name, netBuy, ...}]
+        "institutionalTop": payload.get("institutionalTop", []),
+        "market":           payload.get("market", "kospi"),
+        **meta,
+    }
+
+
 @app.post("/webhook/ingest", dependencies=[Depends(verify_webhook_secret)])
 async def webhook_ingest(env: IngestEnvelope):
     """통합 진입점. envelope.kind 에 따라 events + (balances|workflow_runs) 에 기록.
@@ -1317,6 +1572,24 @@ async def webhook_ingest(env: IngestEnvelope):
             }
             ref = db.collection("stock_alerts").document()
             ref.set({**doc, "created_at": _firestore.SERVER_TIMESTAMP})
+        elif env.kind == "position_update":
+            meta = {
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+            }
+            norm = _normalize_position_update(env.payload, meta)
+            ref = db.collection("position_updates").document()
+            ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
+        elif env.kind == "sector_flow":
+            meta = {
+                "source": env.source, "workflow": env.workflow,
+                "syncStatus": env.syncStatus, "errorType": env.errorType,
+                "occurredAt": env.occurredAt, "eventId": event_doc.id,
+            }
+            norm = _normalize_sector_flow(env.payload, meta)
+            ref = db.collection("sector_flows").document()
+            ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
 
         return {"ok": True, "eventId": event_doc.id, "balanceId": balance_id, "runId": run_id}
     except HTTPException:
@@ -1681,6 +1954,312 @@ def _compute_perf_stats(results: list[dict]) -> dict:
         "maxConsecutiveLoss": max_consec,
         "maxDrawdownPercent": round(max_dd, 2),
     }
+
+
+# ── 주식 시그널 포지션 트래킹 ──────────────────────────────
+
+# 종목명 → 종목코드 역방향 매핑 (KIS API는 코드 필요)
+_NAME_TO_CODE: dict[str, str] = {}
+for _mkt_stocks in _MAJOR_STOCKS.values():
+    for _code, _name in _mkt_stocks:
+        _NAME_TO_CODE[_name] = _code
+
+
+def _resolve_stock_code(symbol: str) -> str | None:
+    """시그널의 symbol(종목명 또는 종목코드)을 6자리 종목코드로 변환."""
+    if not symbol:
+        return None
+    # 이미 숫자 6자리면 종목코드로 간주
+    stripped = symbol.strip()
+    if re.match(r"^\d{6}$", stripped):
+        return stripped
+    # 종목명으로 역방향 조회
+    return _NAME_TO_CODE.get(stripped)
+
+
+# 포지션 트래킹 캐시 (10분 TTL)
+_position_perf_cache: dict = {}
+_POSITION_CACHE_TTL = 600  # 10분
+
+
+def _track_signal_performance(signal: dict) -> dict:
+    """개별 주식 시그널의 현재 포지션 성과를 계산.
+
+    KIS API로 현재가/일봉을 조회하여 수익률, 목표/손절 도달 여부,
+    최대 유리 이탈(MFE) 등을 계산한다.
+    """
+    symbol = signal.get("symbol", "")
+    stock_code = _resolve_stock_code(symbol)
+    entry_price = float(signal.get("entryPrice", 0))
+    target_price = float(signal.get("targetPrice", 0))
+    stop_loss = float(signal.get("stopLoss", 0))
+    direction = signal.get("direction", "long")
+
+    result = {
+        "signalId": signal.get("signalId") or signal.get("id", ""),
+        "symbol": symbol,
+        "stockCode": stock_code,
+        "direction": direction,
+        "entryPrice": entry_price,
+        "targetPrice": target_price,
+        "stopLoss": stop_loss,
+        "score": signal.get("score", 0),
+        "currentPrice": 0,
+        "returnPct": 0.0,
+        "hitTarget": False,
+        "hitStopLoss": False,
+        "maxFavorable": 0.0,
+        "daysHeld": 0,
+        "status": "unknown",
+    }
+
+    # 생성일로부터 경과일 계산
+    created_at = signal.get("created_at", "")
+    if created_at:
+        try:
+            if isinstance(created_at, str):
+                # ISO8601 형식
+                created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            elif hasattr(created_at, "isoformat"):
+                created_dt = created_at
+            else:
+                created_dt = None
+            if created_dt:
+                now_utc = datetime.now(timezone.utc)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                result["daysHeld"] = (now_utc - created_dt).days
+        except Exception:
+            pass
+
+    if not stock_code or entry_price <= 0:
+        result["status"] = "no_data"
+        return result
+
+    # 현재가 조회
+    try:
+        detail = _fetch_stock_detail(stock_code)
+        if detail:
+            current_price = int(str(detail.get("stck_prpr", "0")).replace(",", ""))
+            result["currentPrice"] = current_price
+        else:
+            result["status"] = "api_error"
+            return result
+    except Exception:
+        result["status"] = "api_error"
+        return result
+
+    # 수익률 계산 (방향 고려)
+    if entry_price > 0 and current_price > 0:
+        if direction == "short":
+            result["returnPct"] = round((entry_price - current_price) / entry_price * 100, 2)
+        else:
+            result["returnPct"] = round((current_price - entry_price) / entry_price * 100, 2)
+
+    # 일봉으로 최대 유리 이탈(MFE) 계산
+    try:
+        _time.sleep(0.1)  # KIS API 속도제한 방어
+        ohlcv = _fetch_ohlcv(stock_code, days=max(result["daysHeld"] + 5, 30))
+        if ohlcv:
+            # 시그널 생성 이후의 일봉만 필터
+            created_str = ""
+            if created_at:
+                try:
+                    if isinstance(created_at, str):
+                        created_str = created_at[:10].replace("-", "")
+                    elif hasattr(created_at, "strftime"):
+                        created_str = created_at.strftime("%Y%m%d")
+                except Exception:
+                    pass
+
+            highs = []
+            lows = []
+            for candle in ohlcv:
+                stck_bsop_date = candle.get("stck_bsop_date", "")
+                if created_str and stck_bsop_date < created_str:
+                    continue
+                h = int(str(candle.get("stck_hgpr", "0")).replace(",", ""))
+                l = int(str(candle.get("stck_lwpr", "0")).replace(",", ""))
+                if h > 0:
+                    highs.append(h)
+                if l > 0:
+                    lows.append(l)
+
+            if highs and entry_price > 0:
+                if direction == "short":
+                    best = min(lows) if lows else entry_price
+                    result["maxFavorable"] = round((entry_price - best) / entry_price * 100, 2)
+                else:
+                    best = max(highs)
+                    result["maxFavorable"] = round((best - entry_price) / entry_price * 100, 2)
+    except Exception:
+        pass  # MFE 계산 실패해도 나머지 결과는 반환
+
+    # 목표가/손절가 도달 여부
+    if target_price > 0 and current_price > 0:
+        if direction == "short":
+            result["hitTarget"] = current_price <= target_price
+        else:
+            result["hitTarget"] = current_price >= target_price
+    if stop_loss > 0 and current_price > 0:
+        if direction == "short":
+            result["hitStopLoss"] = current_price >= stop_loss
+        else:
+            result["hitStopLoss"] = current_price <= stop_loss
+
+    # 상태 결정
+    if result["hitTarget"]:
+        result["status"] = "target_hit"
+    elif result["hitStopLoss"]:
+        result["status"] = "stop_hit"
+    else:
+        result["status"] = "pending"
+
+    return result
+
+
+@app.get("/api/stock-signals/performance")
+async def api_stock_signal_performance(user: dict = Depends(verify_firebase_token)):
+    """주식 시그널 전체 성과 집계. 10분 캐시."""
+    now = _time.time()
+    cached = _position_perf_cache.get("aggregate")
+    if cached and now - cached["ts"] < _POSITION_CACHE_TTL:
+        return cached["data"]
+
+    try:
+        db = _get_firestore()
+        docs = list(
+            db.collection("stock_signals")
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(200).stream()
+        )
+        signals = [_doc_to_dict(d) for d in docs]
+
+        if not signals:
+            return {"totalSignals": 0, "error": "시그널이 없습니다."}
+
+        # 각 시그널별 성과 계산 (KIS API 속도제한 고려하여 순차 처리)
+        tracked = []
+        for sig in signals:
+            try:
+                perf = _track_signal_performance(sig)
+                tracked.append(perf)
+                _time.sleep(0.15)  # KIS API 속도제한 방어
+            except Exception:
+                tracked.append({
+                    "signalId": sig.get("signalId") or sig.get("id", ""),
+                    "symbol": sig.get("symbol", ""),
+                    "status": "error",
+                    "returnPct": 0,
+                    "hitTarget": False,
+                    "hitStopLoss": False,
+                })
+
+        # 집계 통계
+        total = len(tracked)
+        completed = [t for t in tracked if t.get("status") in ("target_hit", "stop_hit")]
+        pending = [t for t in tracked if t.get("status") == "pending"]
+        hit_target = [t for t in tracked if t.get("hitTarget")]
+        hit_stop = [t for t in tracked if t.get("hitStopLoss")]
+        valid = [t for t in tracked if t.get("status") not in ("unknown", "no_data", "error")]
+
+        returns = [t["returnPct"] for t in valid]
+        win_returns = [t["returnPct"] for t in valid if t["returnPct"] > 0]
+        loss_returns = [t["returnPct"] for t in valid if t["returnPct"] < 0]
+
+        avg_return = round(sum(returns) / len(returns), 2) if returns else 0
+        avg_win = round(sum(win_returns) / len(win_returns), 2) if win_returns else 0
+        avg_loss = round(sum(loss_returns) / len(loss_returns), 2) if loss_returns else 0
+
+        hit_rate = round(len(hit_target) / len(completed), 4) if completed else 0
+
+        best = max(valid, key=lambda t: t["returnPct"]) if valid else None
+        worst = min(valid, key=lambda t: t["returnPct"]) if valid else None
+
+        # 점수 구간별 성과 (6-7, 7-8, 8-9, 9-10)
+        score_buckets = {"6-7": [], "7-8": [], "8-9": [], "9-10": []}
+        for t in valid:
+            s = float(t.get("score", 0))
+            if 6 <= s < 7:
+                score_buckets["6-7"].append(t["returnPct"])
+            elif 7 <= s < 8:
+                score_buckets["7-8"].append(t["returnPct"])
+            elif 8 <= s < 9:
+                score_buckets["8-9"].append(t["returnPct"])
+            elif 9 <= s <= 10:
+                score_buckets["9-10"].append(t["returnPct"])
+
+        perf_by_score = {}
+        for bucket, rets in score_buckets.items():
+            perf_by_score[bucket] = {
+                "count": len(rets),
+                "avgReturn": round(sum(rets) / len(rets), 2) if rets else 0,
+            }
+
+        # 방향별 성과 (long vs short)
+        long_valid = [t for t in valid if t.get("direction") == "long"]
+        short_valid = [t for t in valid if t.get("direction") == "short"]
+        long_returns = [t["returnPct"] for t in long_valid]
+        short_returns = [t["returnPct"] for t in short_valid]
+
+        perf_by_direction = {
+            "long": {
+                "count": len(long_valid),
+                "avgReturn": round(sum(long_returns) / len(long_returns), 2) if long_returns else 0,
+                "hitTarget": len([t for t in long_valid if t["hitTarget"]]),
+                "hitStopLoss": len([t for t in long_valid if t["hitStopLoss"]]),
+            },
+            "short": {
+                "count": len(short_valid),
+                "avgReturn": round(sum(short_returns) / len(short_returns), 2) if short_returns else 0,
+                "hitTarget": len([t for t in short_valid if t["hitTarget"]]),
+                "hitStopLoss": len([t for t in short_valid if t["hitStopLoss"]]),
+            },
+        }
+
+        response = {
+            "totalSignals": total,
+            "hitTarget": len(hit_target),
+            "hitStopLoss": len(hit_stop),
+            "pendingCount": len(pending),
+            "hitRate": hit_rate,
+            "avgReturn": avg_return,
+            "avgWinReturn": avg_win,
+            "avgLossReturn": avg_loss,
+            "bestSignal": {
+                "signalId": best["signalId"], "symbol": best["symbol"],
+                "returnPct": best["returnPct"],
+            } if best else None,
+            "worstSignal": {
+                "signalId": worst["signalId"], "symbol": worst["symbol"],
+                "returnPct": worst["returnPct"],
+            } if worst else None,
+            "performanceByScore": perf_by_score,
+            "performanceByDirection": perf_by_direction,
+        }
+
+        _position_perf_cache["aggregate"] = {"ts": now, "data": response}
+        return response
+
+    except Exception:
+        return {"totalSignals": 0, "error": "성과 집계 실패"}
+
+
+@app.get("/api/stock-signals/{signal_id}/track")
+async def api_stock_signal_track(signal_id: str, user: dict = Depends(verify_firebase_token)):
+    """개별 주식 시그널 포지션 트래킹. 현재가, 수익률, 목표/손절 상태."""
+    try:
+        db = _get_firestore()
+        doc = db.collection("stock_signals").document(signal_id).get()
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail="시그널을 찾을 수 없습니다.")
+        signal = _doc_to_dict(doc)
+        perf = _track_signal_performance(signal)
+        return perf
+    except HTTPException:
+        raise
+    except Exception:
+        return {"error": "시그널 트래킹 실패"}
 
 
 @app.get("/api/performance")
