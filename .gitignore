@@ -20,6 +20,7 @@ venv/
 # Claude
 .claude/
 .gstack/
+_workspace/
 
 # Firebase
 .firebase/

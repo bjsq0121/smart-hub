@@ -2356,6 +2356,93 @@ async def api_system_status(user: dict = Depends(verify_firebase_token)):
         return {"system": None, "balance": None, "workflows": [], "error": "system-status 조회 실패"}
 
 
+# ── heartbeat 감지 상수 (data-architect 설계: schema_events_heartbeat.md §3-2) ──
+# 실측(2026-04-15) 결과 실제 events.source 값은 "system-heartbeat-001" 이다.
+# data-architect 문서의 "system-heart" 는 코드 관찰 기반 추정이었음 — 실데이터와 불일치.
+HEARTBEAT_SOURCE = "system-heartbeat-001"
+HEARTBEAT_LIVE_MAX_SEC = 90        # 1분 cadence + 0.5 틱 버퍼
+HEARTBEAT_LAGGING_MAX_SEC = 300    # 5분 (프론트 OPS_STALE_MS 와 동일)
+HEARTBEAT_EXPECTED_PER_HOUR = 60
+
+
+@app.get("/api/system/heartbeat")
+async def api_system_heartbeat(user: dict = Depends(verify_firebase_token)):
+    """n8n heartbeat(system-heartbeat-001) 정체 감지.
+
+    events 컬렉션에서 source==system-heartbeat-001 최신 1건 + 최근 1h 개수 조회.
+    status 판정은 서버 (live/lagging/stale/unknown). 임계값은 응답에 포함.
+    """
+    try:
+        db = _get_firestore()
+        now = datetime.now(timezone.utc)
+
+        # 가장 최근 heartbeat 1건
+        last_docs = list(
+            db.collection("events")
+              .where("source", "==", HEARTBEAT_SOURCE)
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
+              .limit(1).stream()
+        )
+        last_doc = last_docs[0].to_dict() if last_docs else None
+        last_at = last_doc.get("created_at") if last_doc else None
+
+        last_iso: str | None = None
+        age_sec: float | None = None
+        status: str
+        if last_at and hasattr(last_at, "isoformat"):
+            last_iso = last_at.isoformat()
+            age_sec = (now - last_at).total_seconds()
+            if age_sec < HEARTBEAT_LIVE_MAX_SEC:
+                status = "live"
+            elif age_sec < HEARTBEAT_LAGGING_MAX_SEC:
+                status = "lagging"
+            else:
+                status = "stale"
+        else:
+            status = "unknown"
+
+        # 최근 1h 개수 (같은 인덱스 재사용: source== + created_at range)
+        one_hour_ago = now - timedelta(hours=1)
+        recent_docs = list(
+            db.collection("events")
+              .where("source", "==", HEARTBEAT_SOURCE)
+              .where("created_at", ">", one_hour_ago)
+              .stream()
+        )
+        recent_count_1h = len(recent_docs)
+
+        return {
+            "source": HEARTBEAT_SOURCE,
+            "lastHeartbeatAt": last_iso,
+            "ageSec": age_sec,
+            "status": status,
+            "thresholds": {
+                "liveMaxSec": HEARTBEAT_LIVE_MAX_SEC,
+                "laggingMaxSec": HEARTBEAT_LAGGING_MAX_SEC,
+                "staleMinSec": HEARTBEAT_LAGGING_MAX_SEC,
+            },
+            "recentCount1h": recent_count_1h,
+            "expectedPerHour": HEARTBEAT_EXPECTED_PER_HOUR,
+            "serverNow": now.isoformat(),
+        }
+    except Exception as e:
+        return {
+            "source": HEARTBEAT_SOURCE,
+            "lastHeartbeatAt": None,
+            "ageSec": None,
+            "status": "unknown",
+            "thresholds": {
+                "liveMaxSec": HEARTBEAT_LIVE_MAX_SEC,
+                "laggingMaxSec": HEARTBEAT_LAGGING_MAX_SEC,
+                "staleMinSec": HEARTBEAT_LAGGING_MAX_SEC,
+            },
+            "recentCount1h": 0,
+            "expectedPerHour": HEARTBEAT_EXPECTED_PER_HOUR,
+            "serverNow": datetime.now(timezone.utc).isoformat(),
+            "error": f"heartbeat 조회 실패: {type(e).__name__}",
+        }
+
+
 class InviteRequest(BaseModel):
     email: str
     password: str
