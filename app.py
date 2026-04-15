@@ -2407,6 +2407,7 @@ async def api_system_heartbeat(user: dict = Depends(verify_firebase_token)):
             db.collection("events")
               .where("source", "==", HEARTBEAT_SOURCE)
               .where("created_at", ">", one_hour_ago)
+              .order_by("created_at", direction=_firestore.Query.DESCENDING)
               .stream()
         )
         recent_count_1h = len(recent_docs)
