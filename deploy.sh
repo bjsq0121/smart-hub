@@ -6,6 +6,31 @@
 
 set -e
 
+# .env 자동 로드 (이미 export된 값이 있으면 그대로 둠 — 쉘 export 우선)
+ENV_FILE="$(dirname "$0")/.env"
+if [ -f "$ENV_FILE" ]; then
+  echo "▶ .env 로드: $ENV_FILE"
+  set -a
+  # shellcheck disable=SC1090
+  . "$ENV_FILE"
+  set +a
+else
+  echo "⚠️  .env 없음 — 쉘에 export된 변수만 사용"
+fi
+
+# 필수 env 사전 검증 (빈 값 주입 방지)
+REQUIRED_ENVS=(KIS_APP_KEY KIS_APP_SECRET KIS_ACCOUNT_NO KIS_ACCOUNT_PROD NAVER_CLIENT_ID NAVER_CLIENT_SECRET MOLIT_API_KEY TELEGRAM_TOKEN TELEGRAM_CHAT_ID WEBHOOK_SECRET)
+MISSING=()
+for v in "${REQUIRED_ENVS[@]}"; do
+  if [ -z "${!v}" ]; then MISSING+=("$v"); fi
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  echo "❌ 다음 env 변수가 비어 있습니다 (배포 중단):"
+  printf '   - %s\n' "${MISSING[@]}"
+  echo "   .env 파일에 추가하거나 쉘에서 export 후 다시 실행하세요."
+  exit 1
+fi
+
 PROJECT_ID=${1:-$(gcloud config get-value project)}
 REGION="asia-northeast3"
 SERVICE_NAME="smart-hub-api"
