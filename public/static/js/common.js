@@ -81,6 +81,7 @@ const NAV_GROUPS = {
       { id: 'stock-signals', label: '🎯 시그널',  page: 'page-stock-ops', stockOpsPane: 'signals' },
       { id: 'stock-alerts',  label: '🔔 알림',    page: 'page-stock-ops', stockOpsPane: 'alerts' },
       { id: 'stock-perf',    label: '📈 성과',    page: 'page-stock-ops', stockOpsPane: 'perf' },
+      { id: 'stock-trade',   label: '💱 매매',    page: 'page-stock-ops', stockOpsPane: 'trade' },
     ],
     onEnter: () => { if (typeof loadStockOps === 'function') loadStockOps(); },
   },
@@ -130,6 +131,7 @@ function setStockOpsPane(pane) {
   document.querySelectorAll('#page-stock-ops .stock-ops-pane').forEach(p => {
     p.classList.toggle('active', p.id === 'stock-ops-pane-' + pane);
   });
+  if (pane === 'trade' && typeof loadStockTrade === 'function') loadStockTrade();
 }
 
 function renderSubNav(groupId) {

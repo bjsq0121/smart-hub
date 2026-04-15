@@ -329,6 +329,28 @@
     <section class="stock-ops-pane" id="stock-ops-pane-perf">
       <div id="stock-perf-content"><div class="ops-empty">로딩 중...</div></div>
     </section>
+
+    <!-- 💱 주식 매매 (KIS 실계좌 readonly + paper 매매) -->
+    <section class="stock-ops-pane" id="stock-ops-pane-trade">
+      <div id="stock-trade-content"><div class="ops-empty">로딩 중...</div></div>
+    </section>
+  </div>
+</div>
+
+<!-- 매매 확인 모달 (stock-ops trade) -->
+<div id="stk-order-modal" class="fixed inset-0 z-[9998] hidden items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+  <div class="w-full max-w-md rounded-2xl border border-slate-700/60 bg-slate-900/95 p-5 shadow-2xl">
+    <div class="text-sm font-semibold text-slate-200 mb-3">주문 확인</div>
+    <div id="stk-order-modal-body" class="text-sm text-slate-300 space-y-2"></div>
+    <label class="mt-4 flex items-center gap-2 text-xs text-slate-400 cursor-pointer">
+      <input type="checkbox" id="stk-order-confirm-check" class="rounded border-slate-600 bg-slate-800" />
+      위 내용을 확인했습니다 (paper 주문)
+    </label>
+    <div id="stk-order-modal-error" class="hidden mt-3 text-xs text-rose-400"></div>
+    <div class="mt-4 flex justify-end gap-2">
+      <button id="stk-order-modal-cancel" class="px-3 py-1.5 rounded-lg border border-slate-700 text-slate-400 text-xs hover:bg-slate-800">취소</button>
+      <button id="stk-order-modal-ok" class="px-3 py-1.5 rounded-lg border border-violet-500/40 bg-violet-500/15 text-violet-300 text-xs font-semibold disabled:opacity-40" disabled>실행</button>
+    </div>
   </div>
 </div>
 

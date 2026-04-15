@@ -291,6 +291,196 @@ _stock_cache: dict = {}
 STOCK_CACHE_TTL = 1800  # 30분
 _KIS_TOKEN_FILE = "/tmp/kis_token.json"
 
+# ── 주식 검색/시세/심볼명 캐시 (schema_stock_search §2-A/2-B/2-D) ─────
+#
+# 전부 process-local dict. Cloud Run min-instances=1이라 재시작 시에만 증발.
+# GIL 덕분에 단일 dict 갱신은 락 없이 안전.
+#
+# _stock_search_cache: q(정규화)→(ts, items) — TTL 1h, 최대 512 엔트리
+# _quote_cache:        symbol→(ts, quote dict) — TTL 5s(장중) / 30s(장외)
+# _symbol_name_cache:  symbol→name — 검색·시세 hit 누적 (TTL 무제한, LRU 2048)
+_stock_search_cache: dict = {}
+_quote_cache: dict = {}
+_symbol_name_cache: dict = {}
+STOCK_SEARCH_CACHE_TTL      = 3600
+STOCK_SEARCH_CACHE_MAX      = 512
+QUOTE_CACHE_TTL_MARKET      = 5
+QUOTE_CACHE_TTL_OFF         = 30
+SYMBOL_NAME_CACHE_MAX       = 2048
+
+# Naver autocomplete 고정 UA (UA 없어도 200이지만 과도 로그/차단 방지)
+_NAVER_SEARCH_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/120.0.0.0 Safari/537.36"
+)
+
+
+def _remember_symbol_name(symbol: str, name: str) -> None:
+    if not symbol or not name:
+        return
+    if len(_symbol_name_cache) >= SYMBOL_NAME_CACHE_MAX:
+        # 가장 오래된 키 제거 (dict는 삽입 순서 유지)
+        try:
+            _symbol_name_cache.pop(next(iter(_symbol_name_cache)))
+        except StopIteration:
+            pass
+    _symbol_name_cache[symbol] = name
+
+
+def _lookup_symbol_name(symbol: str) -> str:
+    """심볼→이름 lookup. 검색/시세 캐시 누적에서만 조회 (외부 API 호출 없음)."""
+    if not symbol:
+        return ""
+    n = _symbol_name_cache.get(symbol)
+    if n:
+        return n
+    # _quote_cache에서 fallback
+    q = _quote_cache.get(symbol)
+    if q and isinstance(q, tuple) and len(q) == 2:
+        name = (q[1] or {}).get("name") or ""
+        if name:
+            _remember_symbol_name(symbol, name)
+            return name
+    return ""
+
+
+def _normalize_naver_search_row(row: dict, rank: int) -> dict | None:
+    """Naver autocomplete 응답 1행을 표준 shape으로 변환.
+
+    실제 응답 필드: {code, name, typeCode, typeName, category, nationCode, ...}.
+    target=stock일 때 items는 1차원 배열 (schema 추정의 2차원은 틀렸음, Phase 2 실증).
+    """
+    if not isinstance(row, dict):
+        return None
+    code = (row.get("code") or "").strip()
+    name = (row.get("name") or "").strip()
+    if not code or not name:
+        return None
+    market = (row.get("typeCode") or row.get("typeName") or "").strip().upper() or "UNKNOWN"
+    # typeName이 한글인 경우 매핑
+    if market in ("코스피", "KOSPI"):
+        market = "KOSPI"
+    elif market in ("코스닥", "KOSDAQ"):
+        market = "KOSDAQ"
+    elif market in ("코넥스", "KONEX"):
+        market = "KONEX"
+    return {
+        "code":   code[:10],
+        "name":   name[:80],
+        "market": market,
+        "rank":   rank,
+    }
+
+
+def _fetch_naver_stock_search(q: str, limit: int) -> list[dict]:
+    """Naver 종목 자동완성 호출. 실패 시 빈 배열 (예외 삼킴, 로그 최소)."""
+    try:
+        resp = requests.get(
+            "https://ac.stock.naver.com/ac",
+            params={"q": q, "target": "stock"},
+            headers={"User-Agent": _NAVER_SEARCH_UA},
+            timeout=4,
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+    raw_items = data.get("items")
+    if not isinstance(raw_items, list):
+        return []
+    out: list[dict] = []
+    rank = 0
+    for row in raw_items:
+        # 방어: 혹시 하위 배열 구조로 오면 flatten
+        if isinstance(row, list):
+            for sub in row:
+                norm = _normalize_naver_search_row(sub, rank)
+                if norm:
+                    out.append(norm)
+                    rank += 1
+                    if len(out) >= limit:
+                        return out
+        else:
+            norm = _normalize_naver_search_row(row, rank)
+            if norm:
+                out.append(norm)
+                rank += 1
+                if len(out) >= limit:
+                    break
+    return out
+
+
+def _kis_quote_normalize(symbol: str, detail: dict) -> dict:
+    """_fetch_stock_detail 응답(output)을 프론트 표준 shape로 변환."""
+    def _f(k) -> float:
+        try:
+            return float(detail.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    def _i(k) -> int:
+        try:
+            return int(float(detail.get(k) or 0))
+        except (TypeError, ValueError):
+            return 0
+    price      = _f("stck_prpr")
+    prev_close = _f("stck_prdy_clpr")
+    change_amt = _f("prdy_vrss")
+    sign       = (detail.get("prdy_vrss_sign") or "").strip()
+    # KIS 부호: 1=상한, 2=상승, 3=보합, 4=하한, 5=하락. 하락이면 음수 강제.
+    if sign in ("4", "5") and change_amt > 0:
+        change_amt = -change_amt
+    change_pct = _f("prdy_ctrt")
+    if sign in ("4", "5") and change_pct > 0:
+        change_pct = -change_pct
+    return {
+        "symbol":       symbol,
+        "name":         (detail.get("hts_kor_isnm") or "").strip(),
+        "price":        price,
+        "prevClose":    prev_close,
+        "changeAmount": change_amt,
+        "changePct":    change_pct,
+        "open":         _f("stck_oprc"),
+        "high":         _f("stck_hgpr"),
+        "low":          _f("stck_lwpr"),
+        "volume":       _i("acml_vol"),
+        "sector":       (detail.get("bstp_kor_isnm") or "").strip(),
+    }
+
+
+def _fetch_quote(symbol: str) -> tuple[dict | None, bool]:
+    """시세 조회. 반환 (quote|None, stale).
+
+    상태 플래그는 quote dict 내부의 `_source`("cache"|"fresh"|"stale")로 추가 노출.
+    - 캐시 hit이고 TTL 내: (cached, False) — quote._source="cache"
+    - 캐시 miss → KIS 호출 성공: 저장 후 (fresh, False) — quote._source="fresh"
+    - KIS 호출 실패:
+        - stale 캐시 있으면 (stale, True) — quote._source="stale"
+        - 없으면 (None, False)
+    """
+    now = _time.time()
+    ttl = QUOTE_CACHE_TTL_MARKET if _is_market_hours() else QUOTE_CACHE_TTL_OFF
+    cached = _quote_cache.get(symbol)
+    if cached and now - cached[0] < ttl:
+        q = dict(cached[1]); q["_source"] = "cache"
+        return q, False
+    # TTL 경과 또는 miss → KIS 호출
+    try:
+        detail = _fetch_stock_detail(symbol)
+    except Exception:
+        detail = None
+    if not detail:
+        if cached:
+            q = dict(cached[1]); q["_source"] = "stale"
+            return q, True
+        return None, False
+    quote = _kis_quote_normalize(symbol, detail)
+    _quote_cache[symbol] = (now, quote)
+    _remember_symbol_name(symbol, quote.get("name", ""))
+    q = dict(quote); q["_source"] = "fresh"
+    return q, False
+
 
 def _save_token_to_file(token: str, expires_at: float):
     """토큰을 파일에 저장 (Cloud Run 콜드스타트 대비)"""
@@ -1518,6 +1708,8 @@ def _normalize_paper_trade(payload: dict) -> dict:
             pass
     if payload.get("clientNote") or payload.get("client_note"):
         out["clientNote"] = str(payload.get("clientNote") or payload.get("client_note") or "")[:500]
+    if payload.get("symbolName") or payload.get("symbol_name"):
+        out["symbolName"] = str(payload.get("symbolName") or payload.get("symbol_name") or "")[:80]
     if payload.get("userEmail") or payload.get("user_email"):
         out["userEmail"] = str(payload.get("userEmail") or payload.get("user_email") or "").lower()[:200]
     if payload.get("marketHours") is not None or payload.get("market_hours") is not None:
@@ -2653,12 +2845,12 @@ def _paper_cleanup_tokens():
 
 
 def _paper_stock_price(symbol: str) -> float:
-    """현재가 조회 — 기존 _fetch_stock_detail 재사용. 실패 시 0.0 반환."""
+    """현재가 조회 — _fetch_quote 재사용(시세+이름 캐시 공유). 실패 시 0.0."""
     try:
-        d = _fetch_stock_detail(symbol)
-        if not d:
+        quote, _stale = _fetch_quote(symbol)
+        if not quote:
             return 0.0
-        return float(d.get("stck_prpr") or 0)
+        return float(quote.get("price") or 0)
     except Exception:
         return 0.0
 
@@ -2791,15 +2983,21 @@ async def api_stock_paper_order_prepare(
             detail=f"단건 주문 한도 초과 (≤ {PAPER_MAX_AMOUNT_PER_ORDER:,}원)."
         )
 
-    # 종목명 조회 (보유 종목에 있으면 그 이름, 없으면 빈 문자열)
-    name = ""
-    try:
-        for h in _kis_account_cache.get("data", {}).get("holdings", []) or []:
-            if h.get("symbol") == symbol:
-                name = h.get("name", "")
-                break
-    except Exception:
-        pass
+    # 종목명 조회 순서:
+    #   1) 검색/시세 캐시 lookup (외부 호출 없음)
+    #   2) KIS 보유종목 캐시
+    #   3) current_price 조회가 성공했다면 _quote_cache에 이미 name 포함
+    name = _lookup_symbol_name(symbol)
+    if not name:
+        try:
+            for h in _kis_account_cache.get("data", {}).get("holdings", []) or []:
+                if h.get("symbol") == symbol:
+                    name = h.get("name", "") or name
+                    break
+        except Exception:
+            pass
+    if name:
+        _remember_symbol_name(symbol, name)
 
     _paper_cleanup_tokens()
     token = _secrets.token_urlsafe(18)
@@ -2834,6 +3032,7 @@ def _paper_apply_position_txn(db, user_email: str, trade_doc: dict) -> dict:
     반환: {"position": {...}, "matchedTradeIds": [...], "realizedPnlKRW": float, "avgEntryPrice": float}
     """
     symbol = trade_doc["symbol"]
+    symbol_name = trade_doc.get("symbolName") or ""
     side   = trade_doc["side"]
     qty    = int(trade_doc["qty"])
     fill   = float(trade_doc["fillPrice"])
@@ -2848,7 +3047,7 @@ def _paper_apply_position_txn(db, user_email: str, trade_doc: dict) -> dict:
                 new_qty = int(pos.get("qty", 0)) + qty
                 new_invested = float(pos.get("totalInvested", 0)) + fill * qty
                 new_avg = new_invested / new_qty if new_qty > 0 else 0.0
-                tx.set(pos_ref, {
+                buy_update = {
                     "symbol":        symbol,
                     "assetClass":    "stock",
                     "qty":           new_qty,
@@ -2857,9 +3056,14 @@ def _paper_apply_position_txn(db, user_email: str, trade_doc: dict) -> dict:
                     "lastTradeId":   trade_doc["tradeId"],
                     "userEmail":     user_email,
                     "updated_at":    _firestore.SERVER_TIMESTAMP,
-                }, merge=True)
+                }
+                # 이름이 있을 때만 덮어쓰기 (빈값으로 기존값 날리지 않도록)
+                if symbol_name:
+                    buy_update["name"] = symbol_name
+                    buy_update["symbolName"] = symbol_name
+                tx.set(pos_ref, buy_update, merge=True)
             else:
-                tx.set(pos_ref, {
+                buy_create = {
                     "symbol":        symbol,
                     "assetClass":    "stock",
                     "qty":           qty,
@@ -2869,7 +3073,11 @@ def _paper_apply_position_txn(db, user_email: str, trade_doc: dict) -> dict:
                     "userEmail":     user_email,
                     "openedAt":      _firestore.SERVER_TIMESTAMP,
                     "updated_at":    _firestore.SERVER_TIMESTAMP,
-                })
+                }
+                if symbol_name:
+                    buy_create["name"] = symbol_name
+                    buy_create["symbolName"] = symbol_name
+                tx.set(pos_ref, buy_create)
             return {
                 "position": {"symbol": symbol, "qty": (int(pos["qty"]) + qty) if pos else qty,
                              "avgCost": round(((float(pos["totalInvested"]) + fill*qty) / (int(pos["qty"]) + qty)) if pos else fill, 4)},
@@ -2939,14 +3147,24 @@ async def api_stock_paper_order(
     if not market_hours:
         raise HTTPException(status_code=400, detail="market_closed")
 
-    # 3) 체결가 확정 — market: 현재가 조회 / limit: limitPrice
+    # 3) 체결가 + 종목명 확정 — market: _fetch_quote로 현재가·이름 동시 조회
+    symbol_name = _lookup_symbol_name(symbol)
     if price_type == "market":
-        current = _paper_stock_price(symbol)
-        if current <= 0:
+        quote, _stale = _fetch_quote(symbol)
+        if not quote or float(quote.get("price") or 0) <= 0:
             raise HTTPException(status_code=502, detail="price_fetch_failed")
-        fill_price = current
+        fill_price = float(quote.get("price") or 0)
+        if not symbol_name:
+            symbol_name = (quote.get("name") or "")
     else:
         fill_price = float(limit_price or 0)
+        # limit 주문이라도 종목명을 한 번 시도 (캐시 hit이면 비용 없음)
+        if not symbol_name:
+            quote, _stale = _fetch_quote(symbol)
+            if quote:
+                symbol_name = (quote.get("name") or "")
+    if symbol_name:
+        _remember_symbol_name(symbol, symbol_name)
 
     # 4) 금액 한도
     order_amount = fill_price * qty
@@ -2975,6 +3193,7 @@ async def api_stock_paper_order(
     trade_doc = {
         "tradeId":    trade_id,
         "symbol":     symbol,
+        "symbolName": symbol_name or "",
         "side":       side,
         "qty":        qty,
         "fillPrice":  fill_price,
@@ -2993,6 +3212,7 @@ async def api_stock_paper_order(
         "tradeId":      trade_id,
         "signalId":     "",
         "symbol":       symbol,
+        "symbolName":   symbol_name or "",
         "direction":    "long",           # 주식은 항상 long (공매도 미지원)
         "entryPrice":   fill_price,
         "currentPrice": fill_price,
@@ -3150,9 +3370,13 @@ async def api_stock_paper_orders(
                 continue
             if symbol and d.get("symbol") != symbol:
                 continue
+            sym = d.get("symbol") or ""
+            stored_name = d.get("symbolName") or d.get("name") or ""
+            sym_name = stored_name or _lookup_symbol_name(sym) or None
             items.append({
                 "tradeId":    d.get("tradeId"),
-                "symbol":     d.get("symbol"),
+                "symbol":     sym,
+                "symbolName": sym_name,
                 "side":       d.get("side"),
                 "qty":        d.get("qty"),
                 "fillPrice":  d.get("fillPrice") or d.get("entryPrice"),
@@ -3184,9 +3408,13 @@ async def api_stock_paper_orders(
                     continue
                 if symbol and d.get("symbol") != symbol:
                     continue
+                sym = d.get("symbol") or ""
+                stored_name = d.get("symbolName") or d.get("name") or ""
+                sym_name = stored_name or _lookup_symbol_name(sym) or None
                 items.append({
                     "tradeId":    d.get("tradeId"),
-                    "symbol":     d.get("symbol"),
+                    "symbol":     sym,
+                    "symbolName": sym_name,
                     "side":       d.get("side"),
                     "qty":        d.get("qty"),
                     "fillPrice":  d.get("fillPrice") or d.get("entryPrice"),
@@ -3202,6 +3430,136 @@ async def api_stock_paper_orders(
             return {"ok": True, "items": items, "indexFallback": True}
         except Exception:
             return {"ok": False, "items": [], "error": "paper_trades 조회 실패"}
+
+
+# ── 주식 검색/시세/일일한도 (schema_stock_search §4) ────────────
+@app.get("/api/stock/search")
+async def api_stock_search(
+    q: str = Query(..., min_length=1, max_length=32),
+    limit: int = Query(default=10, ge=1, le=20),
+    user: dict = Depends(verify_firebase_token),
+):
+    """Naver autocomplete 프록시. 1시간 메모리 캐시 + graceful degrade."""
+    _ensure_admin(user)
+    norm_q = (q or "").strip().lower()[:32]
+    if not norm_q:
+        raise HTTPException(status_code=400, detail="q must be 1~32 chars")
+
+    now = _time.time()
+    cached = _stock_search_cache.get(norm_q)
+    if cached and now - cached[0] < STOCK_SEARCH_CACHE_TTL:
+        items = cached[1][:limit]
+        return {"ok": True, "q": q, "source": "cache", "items": items}
+
+    # Naver 호출 (스레드풀에 태워 이벤트 루프 블록 방지)
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            items = await loop.run_in_executor(ex, _fetch_naver_stock_search, q, 20)
+    except Exception:
+        items = []
+
+    if not items:
+        # upstream 실패 — stale 캐시 있으면 그걸 쓰고, 없으면 빈 배열 degrade
+        if cached:
+            return {"ok": True, "q": q, "source": "cache_fallback",
+                    "items": cached[1][:limit], "error": "naver_upstream"}
+        return {"ok": True, "q": q, "source": "fallback", "items": [], "error": "naver_upstream"}
+
+    # LRU cap
+    if len(_stock_search_cache) >= STOCK_SEARCH_CACHE_MAX:
+        try:
+            _stock_search_cache.pop(next(iter(_stock_search_cache)))
+        except StopIteration:
+            pass
+    _stock_search_cache[norm_q] = (now, items)
+    # 심볼→이름 누적
+    for it in items:
+        _remember_symbol_name(it.get("code", ""), it.get("name", ""))
+
+    return {"ok": True, "q": q, "source": "naver", "items": items[:limit]}
+
+
+@app.get("/api/stock/quote")
+async def api_stock_quote(
+    symbol: str = Query(..., min_length=5, max_length=6),
+    user: dict = Depends(verify_firebase_token),
+):
+    """KIS 현재가 조회. 5초(장중)/30초(장외) 메모리 캐시 + stale fallback."""
+    _ensure_admin(user)
+    sym = (symbol or "").strip()
+    if not sym.isdigit() or len(sym) not in (5, 6):
+        raise HTTPException(status_code=400, detail="symbol은 5~6자리 숫자 종목코드여야 합니다.")
+
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            quote, stale = await loop.run_in_executor(ex, _fetch_quote, sym)
+    except Exception:
+        quote, stale = None, False
+
+    if not quote:
+        raise HTTPException(status_code=503, detail="quote_fetch_failed")
+
+    kst = datetime.now(timezone(timedelta(hours=9))).isoformat()
+    source = quote.get("_source", "fresh")
+    cached = source in ("cache", "stale")
+    return {
+        "ok":         True,
+        "symbol":     sym,
+        "name":       quote.get("name", ""),
+        "price":      quote.get("price", 0),
+        "prevClose":  quote.get("prevClose", 0),
+        "changeAmount": quote.get("changeAmount", 0),
+        "changePct":  quote.get("changePct", 0),
+        "open":       quote.get("open", 0),
+        "high":       quote.get("high", 0),
+        "low":        quote.get("low", 0),
+        "volume":     quote.get("volume", 0),
+        "sector":     quote.get("sector", ""),
+        "marketHours": _is_market_hours(),
+        "cached":     bool(cached),
+        "stale":      bool(stale),
+        "timestamp":  kst,
+    }
+
+
+@app.get("/api/stock/paper/daily-stats")
+async def api_stock_paper_daily_stats(user: dict = Depends(verify_firebase_token)):
+    """오늘 누적 주문 건수/금액과 한도. _paper_today_stats 재사용 (fail-closed)."""
+    _ensure_admin(user)
+    user_email = (user.get("email") or "").lower()
+    kst_now = datetime.now(timezone(timedelta(hours=9)))
+    try:
+        db = _get_firestore()
+        daily_count, daily_amount = _paper_today_stats(db, user_email)
+    except Exception as e:
+        # 체결 경로와 동일한 fail-closed 정책 유지 (한도 우회 방지)
+        raise HTTPException(
+            status_code=503,
+            detail=f"daily_stats_unavailable: {type(e).__name__}",
+        )
+    remaining_count  = max(0, PAPER_DAILY_ORDER_COUNT_CAP - daily_count)
+    remaining_amount = max(0.0, PAPER_DAILY_AMOUNT_CAP - daily_amount)
+    return {
+        "ok":      True,
+        "date":    kst_now.strftime("%Y-%m-%d"),
+        "count":   daily_count,
+        "amountKRW": round(daily_amount, 2),
+        "caps": {
+            "count":     PAPER_DAILY_ORDER_COUNT_CAP,
+            "amountKRW": PAPER_DAILY_AMOUNT_CAP,
+        },
+        "remaining": {
+            "count":     remaining_count,
+            "amountKRW": round(remaining_amount, 2),
+        },
+        "singleOrder": {
+            "maxQty":       PAPER_MAX_QTY_PER_ORDER,
+            "maxAmountKRW": PAPER_MAX_AMOUNT_PER_ORDER,
+        },
+        "asOf":    kst_now.isoformat(),
+    }
 
 
 class InviteRequest(BaseModel):
