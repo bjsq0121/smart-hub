@@ -182,14 +182,15 @@ async function loadOps() {
       if (months) { const d = new Date(now); d.setMonth(d.getMonth() - months); perfQ += '&after=' + d.toISOString(); resQ += '&after=' + d.toISOString(); }
     }
 
-    const [sig, tr, res, perf, sys] = await Promise.all([
+    const [sig, tr, res, perf, sys, hb] = await Promise.all([
       safe(fetch('/api/signals?limit=50',                    { headers: hdrs })),
       safe(fetch('/api/paper-trades?status=open',            { headers: hdrs })),
       safe(fetch(resQ,                                       { headers: hdrs })),
       safe(fetch(perfQ,                                      { headers: hdrs })),
       safe(fetch('/api/system-status',                       { headers: hdrs })),
+      safe(fetch('/api/system/heartbeat',                    { headers: hdrs })),
     ]);
-    opsData = { signals: sig, trades: tr, results: res, perf, system: sys };
+    opsData = { signals: sig, trades: tr, results: res, perf, system: sys, heartbeat: hb };
   } catch (e) {
     opsData = {};
   }
@@ -675,6 +676,69 @@ function renderPerf() {
   }
 }
 
+// ── Heartbeat 카드 (system-heartbeat-001 감시) ──
+// 응답 shape: _workspace/api_shape_heartbeat.md
+// 소비 필드: status, lastHeartbeatAt, ageSec(참고), recentCount1h, expectedPerHour, source, error
+// 미사용 필드: thresholds.*, serverNow (클라이언트 보간 미구현 — ageSec 은 서버값만 표기)
+function renderHeartbeatCard(hb) {
+  // fetch 실패/누락 — placeholder + 콘솔 경고
+  if (!hb || hb.error) {
+    if (hb && hb.error) console.warn('[heartbeat] fetch error:', hb.error);
+    else console.warn('[heartbeat] 응답 없음');
+    return `
+      <div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4 mb-4">
+        ${cardLabel('💓 Heartbeat')}
+        <div class="flex items-center gap-3 flex-wrap">
+          ${_badge('slate', 'unknown')}
+          <span class="text-sm text-slate-500">— (응답 없음${hb && hb.error ? ': ' + esc(hb.error) : ''})</span>
+        </div>
+      </div>`;
+  }
+
+  const status = hb.status || 'unknown';
+  const last = hb.lastHeartbeatAt;
+  const cnt = (typeof hb.recentCount1h === 'number') ? hb.recentCount1h : null;
+  const expected = (typeof hb.expectedPerHour === 'number') ? hb.expectedPerHour : 60;
+  const src = hb.source || 'system-heartbeat-001';
+
+  // 필드 누락 경고
+  if (last === undefined) console.warn('[heartbeat] lastHeartbeatAt 필드 누락');
+  if (cnt === null) console.warn('[heartbeat] recentCount1h 필드 누락');
+
+  // status → color (기존 팔레트 재사용, 작은 배지만 사용)
+  const colorMap = { live: 'emerald', lagging: 'amber', stale: 'rose', unknown: 'slate' };
+  const labelMap = { live: 'live', lagging: 'lagging', stale: 'stale', unknown: 'unknown' };
+  const color = colorMap[status] || 'slate';
+  const badge = _badge(color, labelMap[status] || status);
+
+  // 마지막 수신: 상대시간 + 절대시각 툴팁
+  let lastCell;
+  if (last) {
+    const absStr = new Date(last).toLocaleString('ko-KR');
+    lastCell = `<span title="${esc(absStr)}">${fmtRel(last) || absStr}</span>`;
+  } else {
+    lastCell = '<span class="text-slate-600">—</span>';
+  }
+
+  // 1h 카운트 vs 기대치
+  const cntCell = (cnt === null)
+    ? '<span class="text-slate-600">—</span>'
+    : `<span class="${cnt === 0 ? 'text-rose-400' : cnt < expected * 0.9 ? 'text-amber-400' : 'text-slate-300'}">${cnt}</span><span class="text-slate-500"> / ${expected}</span>`;
+
+  return `
+    <div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4 mb-4">
+      ${cardLabel('💓 Heartbeat')}
+      <div class="flex items-center gap-3 flex-wrap">
+        ${badge}
+        <span class="text-xs text-slate-500">${esc(src)}</span>
+      </div>
+      <div class="mt-2 text-xs text-slate-400 flex flex-wrap gap-x-4 gap-y-1">
+        <span>마지막 수신: ${lastCell}</span>
+        <span>1h 수신: ${cntCell}</span>
+      </div>
+    </div>`;
+}
+
 // ── 5. 시스템 상태 ──
 function renderSystem() {
   const el = document.getElementById('ops-system-content'); if (!el) return;
@@ -700,6 +764,9 @@ function renderSystem() {
       ${sys && sys.lastCollectFailure ? `<div class="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300"><strong>수집 실패:</strong> ${esc(sys.lastCollectFailure)}</div>` : ''}
       ${sys && sys.updated_at ? `<div class="text-[11px] text-slate-500 mt-2">마지막 상태 업데이트: ${fmtRel(sys.updated_at)}</div>` : ''}
     </div>`;
+
+  // Heartbeat (system-heartbeat-001 감시) — 작은 카드 1개, 동등 가중
+  html += renderHeartbeatCard(opsData.heartbeat);
 
   // 잔고 — 원가 + 평가
   if (bal) {

@@ -48,6 +48,10 @@ service cloud.firestore {
       allow read: if request.auth != null;
       allow write: if false;
     }
+    // 주식 paper 포지션 (파생 캐시) — 서버 SDK만 접근
+    match /paper_positions/{symbol} {
+      allow read, write: if false;
+    }
     // 그 외 모든 컬렉션 차단
     match /{document=**} {
       allow read, write: if false;

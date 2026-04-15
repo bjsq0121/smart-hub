@@ -68,6 +68,8 @@ TELEGRAM_TOKEN      = os.getenv("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID", "")
 KIS_APP_KEY         = os.getenv("KIS_APP_KEY", "")
 KIS_APP_SECRET      = os.getenv("KIS_APP_SECRET", "")
+KIS_ACCOUNT_NO      = os.getenv("KIS_ACCOUNT_NO", "")      # 8자리 CANO (실계좌 주문/잔고 조회용)
+KIS_ACCOUNT_PROD    = os.getenv("KIS_ACCOUNT_PROD", "01")  # 2자리 ACNT_PRDT_CD (종합 01)
 KIS_BASE_URL        = "https://openapi.koreainvestment.com:9443"
 
 AI_NEWS_KEYWORDS = {
@@ -453,6 +455,147 @@ def _fetch_ohlcv(stock_code: str, days: int = 60) -> list[dict] | None:
     except Exception:
         pass
     return None
+
+
+# ── KIS 실계좌 잔고/보유종목 (paperless readonly 조회) ────────
+#
+# TR ID: TTTC8434R (실전, 주식잔고조회). 모의투자 환경에서는 VTTC8434R.
+# 엔드포인트: /uapi/domestic-stock/v1/trading/inquire-balance
+# 응답 필드 (한국투자증권 공식):
+#   output1[]: 보유 종목 리스트
+#     pdno            — 상품번호(종목코드 6자리)
+#     prdt_name       — 종목명
+#     hldg_qty        — 보유수량
+#     pchs_avg_pric   — 매입평균가
+#     prpr            — 현재가
+#     evlu_amt        — 평가금액
+#     evlu_pfls_amt   — 평가손익금액
+#     evlu_pfls_rt    — 평가손익률
+#   output2[0]: 계좌 요약
+#     dnca_tot_amt       — 예수금총금액
+#     ord_psbl_cash      — 주문가능현금
+#     tot_evlu_amt       — 총평가금액 (현금+주식평가)
+#     scts_evlu_amt      — 유가증권평가금액
+#     pchs_amt_smtl_amt  — 매입금액합계
+#     evlu_pfls_smtl_amt — 평가손익합계
+#     asst_icdc_amt      — 자산증감액
+#
+# 캐시: 30초 process-local (schema §2-A 결정). balance + holdings가 같은 응답이므로
+# 한 번의 KIS 호출로 둘 다 채운다.
+
+_kis_account_cache: dict = {"data": None, "ts": 0}
+KIS_ACCOUNT_CACHE_TTL = 30  # 초
+
+# KIS 매매한도 (서버 상수) — schema §2-F, 2-B
+PAPER_MAX_QTY_PER_ORDER     = 10_000          # 1주문 최대 주 수
+PAPER_MAX_AMOUNT_PER_ORDER  = 100_000_000     # 1주문 최대 원화금액 (1억)
+PAPER_DAILY_ORDER_COUNT_CAP = 50              # 1일 총 주문 건수
+PAPER_DAILY_AMOUNT_CAP      = 1_000_000_000   # 1일 총 체결금액 (10억)
+PAPER_CONFIRM_TOKEN_TTL     = 60              # 확인 토큰 유효 초
+
+
+def _kis_account_configured() -> bool:
+    return bool(KIS_APP_KEY and KIS_APP_SECRET and KIS_ACCOUNT_NO and KIS_ACCOUNT_PROD)
+
+
+def _fetch_kis_account_snapshot(force: bool = False) -> dict:
+    """실계좌 잔고 + 보유종목을 한 번에 조회 (TR TTTC8434R).
+
+    반환: {"summary": {...}, "holdings": [...], "fetchedAt": iso, "cached": bool}
+    실패 시 예외 전파 (호출자가 HTTPException으로 변환).
+    """
+    now = _time.time()
+    cached = _kis_account_cache.get("data")
+    if not force and cached and now - _kis_account_cache.get("ts", 0) < KIS_ACCOUNT_CACHE_TTL:
+        return {**cached, "cached": True}
+
+    if not _kis_account_configured():
+        raise RuntimeError("kis_account_not_configured")
+
+    params = {
+        "CANO":              KIS_ACCOUNT_NO,
+        "ACNT_PRDT_CD":      KIS_ACCOUNT_PROD,
+        "AFHR_FLPR_YN":      "N",    # 시간외단일가 여부
+        "OFL_YN":            "",
+        "INQR_DVSN":         "02",   # 조회구분 (01:대출일별 / 02:종목별)
+        "UNPR_DVSN":         "01",   # 단가구분
+        "FUND_STTL_ICLD_YN": "N",
+        "FNCG_AMT_AUTO_RDPT_YN": "N",
+        "PRCS_DVSN":         "00",   # 전일매매포함
+        "CTX_AREA_FK100":    "",
+        "CTX_AREA_NK100":    "",
+    }
+    headers = _kis_headers("TTTC8434R")
+    headers["custtype"] = "P"  # 개인
+    resp = requests.get(
+        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("rt_cd") != "0":
+        raise RuntimeError(f"kis_balance_error:{data.get('msg_cd', '')}:{data.get('msg1', '')[:80]}")
+
+    # output1: 보유 종목
+    holdings = []
+    for row in (data.get("output1") or []):
+        try:
+            qty = int(row.get("hldg_qty") or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            continue
+        def _f(k):
+            try:
+                return float(row.get(k) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+        holdings.append({
+            "symbol":       (row.get("pdno") or "")[:20],
+            "name":         row.get("prdt_name") or "",
+            "qty":          qty,
+            "avgCost":      _f("pchs_avg_pric"),
+            "currentPrice": _f("prpr"),
+            "evalAmount":   _f("evlu_amt"),
+            "pnlKRW":       _f("evlu_pfls_amt"),
+            "pnlPct":       _f("evlu_pfls_rt"),
+        })
+
+    # output2: 계좌 요약 (리스트 또는 dict)
+    out2 = data.get("output2") or []
+    summary_row = out2[0] if isinstance(out2, list) and out2 else (out2 if isinstance(out2, dict) else {})
+    def _sf(k):
+        try:
+            return float(summary_row.get(k) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    cash_krw     = _sf("dnca_tot_amt")
+    orderable    = _sf("ord_psbl_cash")
+    total_eval   = _sf("tot_evlu_amt")
+    pchs_smtl    = _sf("pchs_amt_smtl_amt")
+    pnl_smtl     = _sf("evlu_pfls_smtl_amt")
+    pnl_pct      = (pnl_smtl / pchs_smtl * 100.0) if pchs_smtl > 0 else 0.0
+
+    snapshot = {
+        "summary": {
+            "accountNo":      f"{KIS_ACCOUNT_NO}-{KIS_ACCOUNT_PROD}",
+            "cashKRW":        cash_krw,
+            "orderableKRW":   orderable,
+            "totalEvalKRW":   total_eval,
+            "stockEvalKRW":   _sf("scts_evlu_amt"),
+            "totalCostKRW":   pchs_smtl,
+            "totalPnlKRW":    pnl_smtl,
+            "totalPnlPct":    round(pnl_pct, 4),
+        },
+        "holdings":  holdings,
+        "fetchedAt": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+        "cached":    False,
+    }
+    _kis_account_cache["data"] = snapshot
+    _kis_account_cache["ts"] = now
+    return snapshot
 
 
 # ── 업종별 시세 / 투자자별 매매동향 ──────────────────────────
@@ -1332,8 +1475,13 @@ def _normalize_signal(payload: dict) -> dict:
 
 
 def _normalize_paper_trade(payload: dict) -> dict:
-    """검증 중 paper trade 상태 업데이트. n8n이 주기적으로 보냄."""
-    return {
+    """검증 중 paper trade 상태 업데이트. n8n(crypto) + smart-hub(stock) 공용.
+
+    크립토 기존 24건은 assetClass/side/qty 없음 → 미지정 시 'crypto'로 간주.
+    주식 신규 문서는 assetClass='stock', side='buy'|'sell', qty(int) 등 옵셔널 필드 채워 보냄.
+    옵셔널 필드는 None이면 키를 생략(merge=True 환경에서 기존 값 보존).
+    """
+    out: dict = {
         "tradeId":      str(payload.get("tradeId") or payload.get("trade_id") or ""),
         "signalId":     str(payload.get("signalId") or payload.get("signal_id") or ""),
         "symbol":       str(payload.get("symbol") or "")[:20],
@@ -1346,6 +1494,37 @@ def _normalize_paper_trade(payload: dict) -> dict:
         "holdTimeMin":  int(payload.get("holdTimeMin") or payload.get("hold_time_min") or 0),
         "status":       str(payload.get("status") or "open"),
     }
+    # 옵셔널 pass-through (주식 paper 매매 확장)
+    if payload.get("assetClass") or payload.get("asset_class"):
+        out["assetClass"] = str(payload.get("assetClass") or payload.get("asset_class")).lower()
+    if payload.get("side"):
+        out["side"] = str(payload.get("side")).lower()
+    if payload.get("qty") is not None:
+        try:
+            out["qty"] = int(payload.get("qty"))
+        except (TypeError, ValueError):
+            pass
+    if payload.get("priceType") or payload.get("price_type"):
+        out["priceType"] = str(payload.get("priceType") or payload.get("price_type")).lower()
+    if payload.get("limitPrice") is not None or payload.get("limit_price") is not None:
+        try:
+            out["limitPrice"] = float(payload.get("limitPrice") or payload.get("limit_price") or 0) or None
+        except (TypeError, ValueError):
+            pass
+    if payload.get("fillPrice") is not None or payload.get("fill_price") is not None:
+        try:
+            out["fillPrice"] = float(payload.get("fillPrice") or payload.get("fill_price") or 0)
+        except (TypeError, ValueError):
+            pass
+    if payload.get("clientNote") or payload.get("client_note"):
+        out["clientNote"] = str(payload.get("clientNote") or payload.get("client_note") or "")[:500]
+    if payload.get("userEmail") or payload.get("user_email"):
+        out["userEmail"] = str(payload.get("userEmail") or payload.get("user_email") or "").lower()[:200]
+    if payload.get("marketHours") is not None or payload.get("market_hours") is not None:
+        out["marketHours"] = bool(payload.get("marketHours") if payload.get("marketHours") is not None else payload.get("market_hours"))
+    if isinstance(payload.get("matchedTradeIds"), list):
+        out["matchedTradeIds"] = [str(x) for x in payload["matchedTradeIds"]][:50]
+    return out
 
 
 def _normalize_trade_result(payload: dict) -> dict:
@@ -2442,6 +2621,587 @@ async def api_system_heartbeat(user: dict = Depends(verify_firebase_token)):
             "serverNow": datetime.now(timezone.utc).isoformat(),
             "error": f"heartbeat 조회 실패: {type(e).__name__}",
         }
+
+
+# ── 주식운영: KIS 실계좌 조회 + paper 매매 ────────────────────
+#
+# schema_stock_trading.md Phase 2 구현.
+# - 전 엔드포인트 admin 한정 (verify_firebase_token + _ensure_admin).
+# - 실계좌 조회는 readonly. 실주문은 본 피처에서 호출하지 않음.
+# - paper 주문은 paper_trades(기존 컬렉션) + paper_positions(신규) 사용.
+# - confirmToken: 메모리 dict, TTL 60초. Cloud Run 다중 인스턴스에서는 miss 가능
+#   → 개인 프로젝트는 single-instance(기본) + min-instances=1 권장.
+#   사유: Firestore로 옮기면 write 2회(발급/소비) 추가 + 60초 TTL에 과설계.
+#   필요 시 후속에서 paper_confirm_tokens 컬렉션 마이그레이션.
+
+import hashlib as _hashlib
+import secrets as _secrets
+
+_paper_pending_tokens: dict = {}  # {token: {"expireAt": float, "orderHash": str, "userEmail": str}}
+
+
+def _paper_order_hash(symbol: str, side: str, qty: int, price_type: str, limit_price: float | None) -> str:
+    raw = f"{symbol}|{side}|{qty}|{price_type}|{limit_price or 0}"
+    return _hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _paper_cleanup_tokens():
+    now = _time.time()
+    expired = [k for k, v in _paper_pending_tokens.items() if v["expireAt"] <= now]
+    for k in expired:
+        _paper_pending_tokens.pop(k, None)
+
+
+def _paper_stock_price(symbol: str) -> float:
+    """현재가 조회 — 기존 _fetch_stock_detail 재사용. 실패 시 0.0 반환."""
+    try:
+        d = _fetch_stock_detail(symbol)
+        if not d:
+            return 0.0
+        return float(d.get("stck_prpr") or 0)
+    except Exception:
+        return 0.0
+
+
+def _paper_today_stats(db, user_email: str) -> tuple[int, float]:
+    """오늘 KST 기준 유저의 주식 paper 주문 건수/총 체결금액."""
+    kst = timezone(timedelta(hours=9))
+    today_start = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0)
+    count = 0
+    amount = 0.0
+    # fail-closed: 조회 실패(인덱스 미배포 등) 시 예외 전파 → 호출자가 503으로 차단.
+    # 한도 우회 방지가 우선. 인덱스는 firebase deploy --only firestore:indexes 로 배포.
+    q = (db.collection("paper_trades")
+           .where("userEmail", "==", user_email)
+           .where("created_at", ">=", today_start))
+    for doc in q.stream():
+        d = doc.to_dict() or {}
+        if (d.get("assetClass") or "") != "stock":
+            continue
+        count += 1
+        try:
+            amount += float(d.get("fillPrice") or d.get("entryPrice") or 0) * int(d.get("qty") or 0)
+        except (TypeError, ValueError):
+            pass
+    return count, amount
+
+
+class PaperOrderRequest(BaseModel):
+    symbol: str
+    side: str                               # buy | sell (정규화는 서버가 수행)
+    qty: int
+    priceType: str = "market"               # market | limit
+    limitPrice: float | None = None
+    clientNote: str = ""
+    confirmToken: str | None = None         # prepare 시엔 불필요
+
+
+def _paper_validate_order(req: PaperOrderRequest) -> tuple[str, str, int, str, float | None]:
+    """공통 검증 + 정규화. 반환: (symbol, side, qty, priceType, limitPrice)."""
+    symbol = (req.symbol or "").strip()
+    if not symbol or not symbol.isdigit() or len(symbol) not in (5, 6):
+        raise HTTPException(status_code=400, detail="symbol은 5~6자리 숫자 종목코드여야 합니다.")
+    side = (req.side or "").strip().lower()
+    if side not in ("buy", "sell"):
+        raise HTTPException(status_code=400, detail="side는 'buy' 또는 'sell'이어야 합니다.")
+    try:
+        qty = int(req.qty)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="qty는 정수여야 합니다.")
+    if qty < 1 or qty > PAPER_MAX_QTY_PER_ORDER:
+        raise HTTPException(status_code=400, detail=f"qty는 1 이상 {PAPER_MAX_QTY_PER_ORDER} 이하여야 합니다.")
+    price_type = (req.priceType or "market").strip().lower()
+    if price_type not in ("market", "limit"):
+        raise HTTPException(status_code=400, detail="priceType은 'market' 또는 'limit'이어야 합니다.")
+    limit_price = None
+    if price_type == "limit":
+        if req.limitPrice is None or float(req.limitPrice) <= 0:
+            raise HTTPException(status_code=400, detail="limit 주문은 양의 limitPrice가 필요합니다.")
+        limit_price = float(req.limitPrice)
+    return symbol, side, qty, price_type, limit_price
+
+
+@app.get("/api/stock/account/balance")
+async def api_stock_account_balance(user: dict = Depends(verify_firebase_token)):
+    """KIS 실계좌 예수금·총평가 요약 (readonly). 30초 메모리 캐시."""
+    _ensure_admin(user)
+    if not _kis_account_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="KIS 계좌 env 미설정 (KIS_ACCOUNT_NO/KIS_ACCOUNT_PROD). Cloud Run에 주입 필요.",
+        )
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            snap = await loop.run_in_executor(ex, _fetch_kis_account_snapshot, False)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"KIS 잔고 조회 실패: {str(e)[:120]}")
+    except Exception:
+        raise HTTPException(status_code=502, detail="KIS 잔고 조회 중 예기치 못한 오류.")
+    return {
+        "ok":        True,
+        "cached":    snap.get("cached", False),
+        "updatedAt": snap.get("fetchedAt"),
+        "account":   snap.get("summary", {}),
+    }
+
+
+@app.get("/api/stock/account/holdings")
+async def api_stock_account_holdings(user: dict = Depends(verify_firebase_token)):
+    """KIS 실계좌 보유 종목 리스트 (readonly). balance와 동일 TR로 같이 캐시."""
+    _ensure_admin(user)
+    if not _kis_account_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="KIS 계좌 env 미설정 (KIS_ACCOUNT_NO/KIS_ACCOUNT_PROD). Cloud Run에 주입 필요.",
+        )
+    try:
+        loop = asyncio.get_event_loop()
+        with concurrent.futures.ThreadPoolExecutor() as ex:
+            snap = await loop.run_in_executor(ex, _fetch_kis_account_snapshot, False)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=f"KIS 보유종목 조회 실패: {str(e)[:120]}")
+    except Exception:
+        raise HTTPException(status_code=502, detail="KIS 보유종목 조회 중 예기치 못한 오류.")
+    return {
+        "ok":        True,
+        "cached":    snap.get("cached", False),
+        "updatedAt": snap.get("fetchedAt"),
+        "holdings":  snap.get("holdings", []),
+    }
+
+
+@app.post("/api/stock/paper/order/prepare")
+async def api_stock_paper_order_prepare(
+    req: PaperOrderRequest, user: dict = Depends(verify_firebase_token)
+):
+    """2단계 확인용 토큰 발급. 주문 내용의 해시를 토큰에 묶어 60초 보관."""
+    _ensure_admin(user)
+    symbol, side, qty, price_type, limit_price = _paper_validate_order(req)
+
+    # 현재가 조회 (프리뷰용). 실패해도 prepare는 성공 (실체결은 order에서 재조회).
+    current_price = _paper_stock_price(symbol)
+    estimated = limit_price if price_type == "limit" else current_price
+    estimated_total = (estimated or 0) * qty
+
+    # 금액 한도
+    if estimated_total > PAPER_MAX_AMOUNT_PER_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"단건 주문 한도 초과 (≤ {PAPER_MAX_AMOUNT_PER_ORDER:,}원)."
+        )
+
+    # 종목명 조회 (보유 종목에 있으면 그 이름, 없으면 빈 문자열)
+    name = ""
+    try:
+        for h in _kis_account_cache.get("data", {}).get("holdings", []) or []:
+            if h.get("symbol") == symbol:
+                name = h.get("name", "")
+                break
+    except Exception:
+        pass
+
+    _paper_cleanup_tokens()
+    token = _secrets.token_urlsafe(18)
+    _paper_pending_tokens[token] = {
+        "expireAt":  _time.time() + PAPER_CONFIRM_TOKEN_TTL,
+        "orderHash": _paper_order_hash(symbol, side, qty, price_type, limit_price),
+        "userEmail": (user.get("email") or "").lower(),
+    }
+
+    return {
+        "ok":           True,
+        "confirmToken": token,
+        "expiresIn":    PAPER_CONFIRM_TOKEN_TTL,
+        "preview": {
+            "symbol":             symbol,
+            "name":                name,
+            "side":                side,
+            "qty":                 qty,
+            "priceType":           price_type,
+            "limitPrice":          limit_price,
+            "estimatedFillPrice":  estimated,
+            "estimatedTotal":      estimated_total,
+            "marketHours":         _is_market_hours(),
+        },
+    }
+
+
+def _paper_apply_position_txn(db, user_email: str, trade_doc: dict) -> dict:
+    """Firestore 트랜잭션으로 paper_positions를 FIFO 갱신.
+
+    trade_doc: 저장 직전 paper_trades 문서 (side/qty/fillPrice 포함).
+    반환: {"position": {...}, "matchedTradeIds": [...], "realizedPnlKRW": float, "avgEntryPrice": float}
+    """
+    symbol = trade_doc["symbol"]
+    side   = trade_doc["side"]
+    qty    = int(trade_doc["qty"])
+    fill   = float(trade_doc["fillPrice"])
+    pos_ref = db.collection("paper_positions").document(symbol)
+
+    @_firestore.transactional
+    def _txn(tx):
+        snap = pos_ref.get(transaction=tx)
+        pos = snap.to_dict() if snap.exists else None
+        if side == "buy":
+            if pos:
+                new_qty = int(pos.get("qty", 0)) + qty
+                new_invested = float(pos.get("totalInvested", 0)) + fill * qty
+                new_avg = new_invested / new_qty if new_qty > 0 else 0.0
+                tx.set(pos_ref, {
+                    "symbol":        symbol,
+                    "assetClass":    "stock",
+                    "qty":           new_qty,
+                    "avgCost":       round(new_avg, 4),
+                    "totalInvested": round(new_invested, 2),
+                    "lastTradeId":   trade_doc["tradeId"],
+                    "userEmail":     user_email,
+                    "updated_at":    _firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+            else:
+                tx.set(pos_ref, {
+                    "symbol":        symbol,
+                    "assetClass":    "stock",
+                    "qty":           qty,
+                    "avgCost":       round(fill, 4),
+                    "totalInvested": round(fill * qty, 2),
+                    "lastTradeId":   trade_doc["tradeId"],
+                    "userEmail":     user_email,
+                    "openedAt":      _firestore.SERVER_TIMESTAMP,
+                    "updated_at":    _firestore.SERVER_TIMESTAMP,
+                })
+            return {
+                "position": {"symbol": symbol, "qty": (int(pos["qty"]) + qty) if pos else qty,
+                             "avgCost": round(((float(pos["totalInvested"]) + fill*qty) / (int(pos["qty"]) + qty)) if pos else fill, 4)},
+                "matchedTradeIds": [],
+                "realizedPnlKRW":  0.0,
+                "avgEntryPrice":   round(fill, 4),
+            }
+        # sell
+        if not pos or int(pos.get("qty", 0)) < qty:
+            raise HTTPException(status_code=400, detail="insufficient_position: 보유 수량 부족")
+        avg_cost = float(pos.get("avgCost", 0))
+        remaining = int(pos["qty"]) - qty
+        realized  = (fill - avg_cost) * qty
+        if remaining <= 0:
+            tx.delete(pos_ref)
+            new_pos_view = {"symbol": symbol, "qty": 0, "avgCost": 0.0}
+        else:
+            new_invested = avg_cost * remaining
+            tx.set(pos_ref, {
+                "qty":           remaining,
+                "totalInvested": round(new_invested, 2),
+                "lastTradeId":   trade_doc["tradeId"],
+                "updated_at":    _firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+            new_pos_view = {"symbol": symbol, "qty": remaining, "avgCost": round(avg_cost, 4)}
+        return {
+            "position":        new_pos_view,
+            "matchedTradeIds": [pos.get("lastTradeId", "")],
+            "realizedPnlKRW":  round(realized, 2),
+            "avgEntryPrice":   round(avg_cost, 4),
+        }
+
+    return _txn(db.transaction())
+
+
+@app.post("/api/stock/paper/order")
+async def api_stock_paper_order(
+    req: PaperOrderRequest, user: dict = Depends(verify_firebase_token)
+):
+    """실제 paper 주문 실행. paper_trades 생성 + paper_positions FIFO 업데이트.
+
+    매도 시 평균 매입가 기준 1건의 trade_results 기록 (schema §5 결정).
+    """
+    _ensure_admin(user)
+    symbol, side, qty, price_type, limit_price = _paper_validate_order(req)
+    user_email = (user.get("email") or "").lower()
+
+    # 1) 확인 토큰 검증
+    if not req.confirmToken:
+        raise HTTPException(status_code=400, detail="confirm_token_missing")
+    _paper_cleanup_tokens()
+    tok = _paper_pending_tokens.get(req.confirmToken)
+    if not tok:
+        raise HTTPException(status_code=400, detail="confirm_token_invalid")
+    if tok["expireAt"] <= _time.time():
+        _paper_pending_tokens.pop(req.confirmToken, None)
+        raise HTTPException(status_code=400, detail="confirm_token_expired")
+    if tok["orderHash"] != _paper_order_hash(symbol, side, qty, price_type, limit_price):
+        raise HTTPException(status_code=400, detail="confirm_token_mismatch")
+    if tok["userEmail"] and tok["userEmail"] != user_email:
+        raise HTTPException(status_code=403, detail="confirm_token_user_mismatch")
+    # 단일 사용
+    _paper_pending_tokens.pop(req.confirmToken, None)
+
+    # 2) 장중 여부
+    market_hours = _is_market_hours()
+    if not market_hours:
+        raise HTTPException(status_code=400, detail="market_closed")
+
+    # 3) 체결가 확정 — market: 현재가 조회 / limit: limitPrice
+    if price_type == "market":
+        current = _paper_stock_price(symbol)
+        if current <= 0:
+            raise HTTPException(status_code=502, detail="price_fetch_failed")
+        fill_price = current
+    else:
+        fill_price = float(limit_price or 0)
+
+    # 4) 금액 한도
+    order_amount = fill_price * qty
+    if order_amount > PAPER_MAX_AMOUNT_PER_ORDER:
+        raise HTTPException(status_code=400, detail="order_amount_exceeded")
+
+    # 5) 일일 한도 (fail-closed: 조회 실패 시 503으로 차단)
+    db = _get_firestore()
+    try:
+        daily_count, daily_amount = _paper_today_stats(db, user_email)
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"daily_limit_query_failed: {type(e).__name__} — firestore.indexes.json 배포 필요",
+        )
+    if daily_count >= PAPER_DAILY_ORDER_COUNT_CAP:
+        raise HTTPException(status_code=400, detail="daily_limit_exceeded")
+    if daily_amount + order_amount > PAPER_DAILY_AMOUNT_CAP:
+        raise HTTPException(status_code=400, detail="daily_amount_exceeded")
+
+    # 6) tradeId 생성
+    kst_now = datetime.now(timezone(timedelta(hours=9)))
+    trade_id = f"pt_stock_{kst_now.strftime('%Y%m%d_%H%M%S')}_{side}_{symbol}"
+
+    # 7) paper_positions 트랜잭션 업데이트 (매수/매도 공용)
+    trade_doc = {
+        "tradeId":    trade_id,
+        "symbol":     symbol,
+        "side":       side,
+        "qty":        qty,
+        "fillPrice":  fill_price,
+    }
+    try:
+        txn_result = _paper_apply_position_txn(db, user_email, trade_doc)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"position_update_failed: {type(e).__name__}")
+
+    # 8) paper_trades 문서 생성
+    occurred_at = kst_now.isoformat()
+    pt_ref = db.collection("paper_trades").document(trade_id)
+    pt_doc = {
+        "tradeId":      trade_id,
+        "signalId":     "",
+        "symbol":       symbol,
+        "direction":    "long",           # 주식은 항상 long (공매도 미지원)
+        "entryPrice":   fill_price,
+        "currentPrice": fill_price,
+        "pnlPercent":   0.0,
+        "maxFavorable": 0.0,
+        "maxAdverse":   0.0,
+        "holdTimeMin":  0,
+        "status":       "open" if side == "buy" else "closed",
+        "assetClass":   "stock",
+        "side":         side,
+        "qty":          qty,
+        "priceType":    price_type,
+        "limitPrice":   limit_price,
+        "fillPrice":    fill_price,
+        "clientNote":   (req.clientNote or "")[:500],
+        "userEmail":    user_email,
+        "marketHours":  market_hours,
+        "source":       "smarthub-paper",
+        "workflow":     "stock-paper-order",
+        "syncStatus":   "ok",
+        "errorType":    None,
+        "occurredAt":   occurred_at,
+        "created_at":   _firestore.SERVER_TIMESTAMP,
+        "updated_at":   _firestore.SERVER_TIMESTAMP,
+    }
+    if side == "sell":
+        pt_doc["matchedTradeIds"] = txn_result.get("matchedTradeIds", [])
+    pt_ref.set(pt_doc)
+
+    # events/ 미러 (원장)
+    try:
+        db.collection("events").document().set({
+            "kind":       "paper_trade",
+            "source":     "smarthub-paper",
+            "workflow":   "stock-paper-order",
+            "syncStatus": "ok",
+            "errorType":  None,
+            "occurredAt": occurred_at,
+            "payload":    {k: v for k, v in pt_doc.items() if k not in ("created_at", "updated_at")},
+            "created_at": _firestore.SERVER_TIMESTAMP,
+        })
+    except Exception:
+        pass
+
+    # 매도면 trade_results 1건 기록 (평균 매입가 기준 통합)
+    if side == "sell":
+        try:
+            avg_entry = float(txn_result.get("avgEntryPrice") or 0)
+            realized  = float(txn_result.get("realizedPnlKRW") or 0)
+            pnl_pct   = ((fill_price - avg_entry) / avg_entry * 100.0) if avg_entry > 0 else 0.0
+            db.collection("trade_results").document().set({
+                "tradeId":     trade_id,
+                "signalId":    "",
+                "symbol":      symbol,
+                "direction":   "long",
+                "result":      "win" if realized > 0 else "loss",
+                "pnlPercent":  round(pnl_pct, 4),
+                "pnlKRW":      realized,
+                "exitReason":  "paper_manual_sell",
+                "exitAt":      occurred_at,
+                "entryAt":     None,
+                "entryPrice":  avg_entry,
+                "exitPrice":   fill_price,
+                "holdTimeMin": 0,
+                "maxFavorable": 0.0,
+                "maxAdverse":   0.0,
+                "confidence":   0.0,
+                "components":   None,
+                "assetClass":  "stock",
+                "matchedTradeIds": txn_result.get("matchedTradeIds", []),
+                "source":      "smarthub-paper",
+                "workflow":    "stock-paper-order",
+                "syncStatus":  "ok",
+                "errorType":   None,
+                "occurredAt":  occurred_at,
+                "created_at":  _firestore.SERVER_TIMESTAMP,
+            })
+        except Exception:
+            pass  # 결과 기록 실패가 주문 자체를 무효화하지 않음
+
+    return {
+        "ok":         True,
+        "tradeId":    trade_id,
+        "fillPrice":  fill_price,
+        "position":   txn_result.get("position"),
+        "realizedPnlKRW": txn_result.get("realizedPnlKRW", 0.0) if side == "sell" else None,
+    }
+
+
+@app.get("/api/stock/paper/positions")
+async def api_stock_paper_positions(user: dict = Depends(verify_firebase_token)):
+    """paper 포지션 리스트. 현재가는 KIS 시세(_fetch_stock_detail, 기존 캐시) 재사용."""
+    _ensure_admin(user)
+    user_email = (user.get("email") or "").lower()
+    try:
+        db = _get_firestore()
+        positions = []
+        for doc in db.collection("paper_positions").stream():
+            d = doc.to_dict() or {}
+            if (d.get("assetClass") or "") != "stock":
+                continue
+            if d.get("userEmail") and d.get("userEmail") != user_email:
+                continue
+            if int(d.get("qty") or 0) <= 0:
+                continue
+            symbol  = d.get("symbol") or doc.id
+            avg     = float(d.get("avgCost") or 0)
+            qty     = int(d.get("qty") or 0)
+            current = _paper_stock_price(symbol)
+            eval_amt = current * qty
+            pnl_krw  = (current - avg) * qty if current > 0 else 0.0
+            pnl_pct  = ((current - avg) / avg * 100.0) if avg > 0 and current > 0 else 0.0
+            opened = d.get("openedAt")
+            if opened and hasattr(opened, "isoformat"):
+                opened = opened.isoformat()
+            positions.append({
+                "symbol":       symbol,
+                "name":         d.get("name", ""),
+                "qty":          qty,
+                "avgCost":      avg,
+                "currentPrice": current,
+                "evalAmount":   round(eval_amt, 2),
+                "pnlKRW":       round(pnl_krw, 2),
+                "pnlPct":       round(pnl_pct, 4),
+                "openedAt":     opened,
+            })
+        positions.sort(key=lambda x: x["evalAmount"], reverse=True)
+        return {"ok": True, "positions": positions}
+    except Exception:
+        return {"ok": False, "positions": [], "error": "paper_positions 조회 실패"}
+
+
+@app.get("/api/stock/paper/orders")
+async def api_stock_paper_orders(
+    limit: int = Query(default=50, le=200),
+    side: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    user: dict = Depends(verify_firebase_token),
+):
+    """paper 주문 내역 (최근순). userEmail 필터 + assetClass='stock'."""
+    _ensure_admin(user)
+    user_email = (user.get("email") or "").lower()
+    try:
+        db = _get_firestore()
+        q = (db.collection("paper_trades")
+               .where("userEmail", "==", user_email)
+               .order_by("created_at", direction=_firestore.Query.DESCENDING)
+               .limit(limit))
+        items = []
+        for doc in q.stream():
+            d = _doc_to_dict(doc)
+            if (d.get("assetClass") or "") != "stock":
+                continue
+            if side and d.get("side") != side.lower():
+                continue
+            if symbol and d.get("symbol") != symbol:
+                continue
+            items.append({
+                "tradeId":    d.get("tradeId"),
+                "symbol":     d.get("symbol"),
+                "side":       d.get("side"),
+                "qty":        d.get("qty"),
+                "fillPrice":  d.get("fillPrice") or d.get("entryPrice"),
+                "priceType":  d.get("priceType"),
+                "limitPrice": d.get("limitPrice"),
+                "status":     d.get("status"),
+                "clientNote": d.get("clientNote", ""),
+                "createdAt":  d.get("created_at"),
+                "occurredAt": d.get("occurredAt"),
+            })
+        return {"ok": True, "items": items}
+    except Exception:
+        # 인덱스 누락 폴백: userEmail 필터 없이 최근 N건 가져와서 메모리 필터
+        # assetClass == stock으로 먼저 걸러 crypto 문서가 예산을 잠식하지 않게 함
+        try:
+            db = _get_firestore()
+            q = (db.collection("paper_trades")
+                   .where("assetClass", "==", "stock")
+                   .order_by("created_at", direction=_firestore.Query.DESCENDING)
+                   .limit(limit * 3))
+            items = []
+            for doc in q.stream():
+                d = _doc_to_dict(doc)
+                if (d.get("assetClass") or "") != "stock":
+                    continue
+                if d.get("userEmail") and d.get("userEmail") != user_email:
+                    continue
+                if side and d.get("side") != side.lower():
+                    continue
+                if symbol and d.get("symbol") != symbol:
+                    continue
+                items.append({
+                    "tradeId":    d.get("tradeId"),
+                    "symbol":     d.get("symbol"),
+                    "side":       d.get("side"),
+                    "qty":        d.get("qty"),
+                    "fillPrice":  d.get("fillPrice") or d.get("entryPrice"),
+                    "priceType":  d.get("priceType"),
+                    "limitPrice": d.get("limitPrice"),
+                    "status":     d.get("status"),
+                    "clientNote": d.get("clientNote", ""),
+                    "createdAt":  d.get("created_at"),
+                    "occurredAt": d.get("occurredAt"),
+                })
+                if len(items) >= limit:
+                    break
+            return {"ok": True, "items": items, "indexFallback": True}
+        except Exception:
+            return {"ok": False, "items": [], "error": "paper_trades 조회 실패"}
 
 
 class InviteRequest(BaseModel):
