@@ -15,9 +15,10 @@ echo "▶ GCP 프로젝트: ${PROJECT_ID}"
 echo "▶ 리전: ${REGION}"
 echo ""
 
-# 1. public/index.html 최신화
-echo "[1/5] public/index.html 동기화..."
+# 1. public/ 정적 자산 최신화 (index.html + static/*)
+echo "[1/5] public/ 동기화 (index.html + static/)..."
 cp index.html public/index.html
+rsync -a --delete static/ public/static/
 
 # 2. Docker 이미지 빌드 & 푸시
 echo "[2/5] Docker 이미지 빌드 및 푸시..."
