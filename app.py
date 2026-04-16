@@ -798,6 +798,10 @@ _AUTOTRADE_DEFAULTS: dict = {
     "maxPerSymbolKRW":  100_000,
     "minScore":         7.0,
     "allowedStages":    ["trade_ready"],
+    # 리스크 필터 (v2)
+    "maxConcurrentHoldings":  5,      # 동시 보유 종목 수 상한
+    "maxLossPerSymbolPct":    -5.0,   # 종목당 손실 한도 (%) — 강제 청산 트리거
+    "maxSectorConcentration": 2,      # 동일 섹터 최대 종목 수
 }
 _autotrade_config: dict = {**_AUTOTRADE_DEFAULTS}
 _autotrade_config_ts: float = 0.0  # 마지막 Firestore 로드 시각
@@ -866,19 +870,56 @@ def _resolve_symbol_code(symbol_raw: str) -> str | None:
             if re.fullmatch(r"\d{6}", code):
                 _remember_symbol_name(code, r.get("name", s))
                 return code
-    # 첫 번째 결과 fallback
-    if results:
-        code = results[0].get("code", "")
-        if re.fullmatch(r"\d{6}", code):
-            _remember_symbol_name(code, results[0].get("name", s))
-            return code
+    # 첫 번째 결과 fallback 제거 (v2) — 정확 매칭만 허용, 오주문 방지
+    # 매칭 실패 시 None 반환
     return None
 
 
+# ── 한국 공휴일 (2026년 하드코딩) ─────────────────────────────
+# 음력 명절은 연도별 고정 날짜. 향후 KRX 영업일 API로 대체 가능.
+# TODO: 2027년 이후 음력 날짜 업데이트 또는 KRX API 연동
+_KR_HOLIDAYS_2026 = {
+    # 신정
+    (1, 1),
+    # 설날 (2026-02-17 = 음력 1/1) + 전후 + 대체휴일
+    (2, 16), (2, 17), (2, 18), (2, 19),  # 2/19 대체휴일 (2/15 일요일)
+    # 삼일절
+    (3, 1),
+    # 어린이날
+    (5, 5),
+    # 석가탄신일 (2026-05-24)
+    (5, 24),
+    # 현충일
+    (6, 6),
+    # 광복절
+    (8, 15),
+    # 추석 (2026-10-04 = 음력 8/15) + 전후 + 대체휴일
+    (10, 3), (10, 4), (10, 5), (10, 6),  # 10/6 대체휴일 (10/4 일요일)
+    # 개천절
+    (10, 3),
+    # 한글날
+    (10, 9),
+    # 성탄절
+    (12, 25),
+}
+# TODO: 반장(수능일 11월 셋째 목, 연말 12/31) — 1시간 늦게 개장·30분 빨리 마감. 복잡하므로 미구현.
+
+
+def _is_kr_holiday(dt: datetime) -> bool:
+    """KST datetime이 한국 공휴일인지 확인. 2026년만 지원."""
+    if dt.year == 2026:
+        return (dt.month, dt.day) in _KR_HOLIDAYS_2026
+    # 2026년 외 연도: 양력 고정 공휴일만 체크 (음력 미지원)
+    solar_fixed = {(1, 1), (3, 1), (5, 5), (6, 6), (8, 15), (10, 3), (10, 9), (12, 25)}
+    return (dt.month, dt.day) in solar_fixed
+
+
 def _is_market_open_now() -> bool:
-    """KST 기준 장중(평일 09:00~15:20) 여부. 공휴일은 체크하지 않음(weekday만)."""
+    """KST 기준 장중(평일 09:00~15:20) 여부. 공휴일 포함."""
     kst = datetime.now(timezone(timedelta(hours=9)))
     if kst.weekday() >= 5:  # 토(5), 일(6)
+        return False
+    if _is_kr_holiday(kst):
         return False
     t = kst.hour * 100 + kst.minute
     return 900 <= t <= 1520
@@ -939,6 +980,18 @@ def _kis_place_order(symbol_code: str, side: str, qty: int, order_type: str = "m
         "ordNo":   ord_no,
         "raw":     data,
     }
+
+
+def _get_active_autotrade_orders(db) -> list[dict]:
+    """autotrade_orders에서 활성(entered/monitoring) 문서 목록 조회."""
+    active = []
+    for status_val in ("entered", "monitoring"):
+        docs = db.collection("autotrade_orders").where("status", "==", status_val).stream()
+        for d in docs:
+            rec = d.to_dict() or {}
+            rec["_doc_id"] = d.id
+            active.append(rec)
+    return active
 
 
 async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
@@ -1016,18 +1069,69 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         })
         return
 
-    # 4) symbol 해결 (종목명→종목코드)
-    symbol_code = _resolve_symbol_code(symbol_raw)
-    if not symbol_code:
-        _autotrade_log.warning(f"autotrade skip: symbol 해결 실패: {symbol_raw}")
-        _log_event("autotrade_error", {
-            "reason": "symbol_resolve_failed", "symbol": symbol_raw, "signalId": signal_doc_id,
+    # 4) symbol 해결 — symbolCode 우선 사용 (v2)
+    symbol_code_from_norm = (norm.get("symbolCode") or "").strip()
+    if symbol_code_from_norm and re.fullmatch(r"\d{6}", symbol_code_from_norm):
+        symbol_code = symbol_code_from_norm
+    else:
+        # fallback: 종목명으로 해결 (하위 호환)
+        symbol_code = await asyncio.to_thread(_resolve_symbol_code, symbol_raw)
+        if symbol_code:
+            _log_event("autotrade_skip", {
+                "reason": "symbolCode_missing_fallback_used", "symbol": symbol_raw,
+                "symbolCode": symbol_code, "signalId": signal_doc_id,
+                "warning": "symbolCode_missing",
+            })
+        if not symbol_code:
+            _autotrade_log.warning(f"autotrade skip: symbol 해결 실패: {symbol_raw}")
+            _log_event("autotrade_error", {
+                "reason": "symbol_resolve_failed", "symbol": symbol_raw,
+                "signalId": signal_doc_id, "warning": "symbolCode_missing",
+            })
+            return
+
+    # 4-b) 리스크 필터: 동시 보유 수 + 섹터 집중도 (v2)
+    active_orders = await asyncio.to_thread(_get_active_autotrade_orders, db)
+
+    max_concurrent = cfg.get("maxConcurrentHoldings", 5)
+    if len(active_orders) >= max_concurrent:
+        _autotrade_log.info(f"autotrade skip: 동시 보유 상한 도달 ({len(active_orders)}/{max_concurrent})")
+        _log_event("autotrade_skip", {
+            "reason": "max_concurrent_holdings", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id,
+            "currentCount": len(active_orders), "maxConcurrentHoldings": max_concurrent,
         })
         return
 
+    # 섹터 집중도 체크
+    max_sector_conc = cfg.get("maxSectorConcentration", 2)
+    factors = norm.get("factors") or {}
+    signal_sector = ""
+    if isinstance(factors, dict):
+        # factors에서 sector 정보 추출 (다양한 위치 시도)
+        sector_factor = factors.get("sector")
+        if isinstance(sector_factor, dict):
+            signal_sector = sector_factor.get("value", "")
+        elif isinstance(sector_factor, str):
+            signal_sector = sector_factor
+    if signal_sector:
+        same_sector_count = sum(
+            1 for o in active_orders
+            if (o.get("sector") or "") == signal_sector
+        )
+        if same_sector_count >= max_sector_conc:
+            _autotrade_log.info(f"autotrade skip: 섹터 집중 ({signal_sector}: {same_sector_count}/{max_sector_conc})")
+            _log_event("autotrade_skip", {
+                "reason": "max_sector_concentration", "symbol": symbol_raw,
+                "symbolCode": symbol_code, "signalId": signal_doc_id,
+                "sector": signal_sector, "sectorCount": same_sector_count,
+                "maxSectorConcentration": max_sector_conc,
+            })
+            return
+
     # 5) 현재 보유 + 잔액 확인
     try:
-        snapshot = _fetch_kis_account_snapshot(force=True)
+        snapshot = await asyncio.to_thread(_fetch_kis_account_snapshot, True)
     except Exception as e:
         _autotrade_log.error(f"autotrade error: 계좌 조회 실패: {e}")
         _log_event("autotrade_error", {
@@ -1064,7 +1168,7 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
 
     # 6) 현재가 조회
     try:
-        detail = _fetch_stock_detail(symbol_code)
+        detail = await asyncio.to_thread(_fetch_stock_detail, symbol_code)
         if not detail:
             raise ValueError("시세 조회 결과 없음")
         current_price = float(detail.get("stck_prpr") or 0)
@@ -1120,7 +1224,7 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
 
     # 9) KIS 실매수 주문
     try:
-        result = _kis_place_order(symbol_code, "buy", qty, "market")
+        result = await asyncio.to_thread(_kis_place_order, symbol_code, "buy", qty, "market")
     except Exception as e:
         _autotrade_log.error(f"autotrade error: 주문 전송 실패: {e}")
         _log_event("autotrade_error", {
@@ -1133,6 +1237,33 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         _log_event("autotrade_order", {
             **order_detail, "ordNo": result["ordNo"], "msg": result["msg"],
         })
+        # 10) autotrade_orders 문서 생성 (v2 — 모니터링 대상)
+        try:
+            order_doc = {
+                "signalId":    signal_doc_id,
+                "symbolCode":  symbol_code,
+                "symbolName":  symbol_raw,
+                "side":        "buy",
+                "qty":         qty,
+                "entryPrice":  current_price,  # 시장가 주문이므로 현재가를 추정 체결가로 사용
+                "stopLoss":    stop_loss,
+                "targetPrice": target_price,
+                "ordNo":       result["ordNo"],
+                "status":      "entered",
+                "enteredAt":   datetime.now(timezone(timedelta(hours=9))).isoformat(),
+                "exitedAt":    None,
+                "exitOrdNo":   None,
+                "exitPrice":   None,
+                "pnlKRW":      None,
+                "pnlPct":      None,
+                "exitReason":  None,
+                "sector":      signal_sector or None,
+                "created_at":  _firestore.SERVER_TIMESTAMP,
+            }
+            db.collection("autotrade_orders").document(signal_doc_id).set(order_doc)
+            _autotrade_log.info(f"autotrade_orders 문서 생성: {signal_doc_id}")
+        except Exception as e:
+            _autotrade_log.error(f"autotrade_orders 문서 생성 실패: {e}")
     else:
         _autotrade_log.warning(f"autotrade 주문 실패: {result['msg']}")
         _log_event("autotrade_error", {
@@ -1140,6 +1271,219 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             "ordNo": result.get("ordNo", ""), "msg": result["msg"],
             "rtCd": result["rtCd"],
         })
+
+
+# ── 자동매매 모니터링 루프 (v2) ─────────────────────────────────
+_monitor_task: asyncio.Task | None = None
+
+
+async def _autotrade_monitor_loop():
+    """장중 1분 간격 폴링 — 손절/익절/장마감 청산 + maxLossPerSymbolPct 강제 청산.
+
+    - enabled=false여도 기존 포지션의 손절/익절/장마감 청산은 계속 동작
+    - enabled=false는 "신규 진입만 중단"으로 해석
+    """
+    _autotrade_log.info("autotrade monitor loop started")
+    while True:
+        try:
+            kst_now = datetime.now(timezone(timedelta(hours=9)))
+            weekday = kst_now.weekday()
+            t = kst_now.hour * 100 + kst_now.minute
+
+            # 장외 시간이면 다음 장 개시까지 대기
+            if weekday >= 5 or _is_kr_holiday(kst_now) or t < 900 or t > 1525:
+                # 장외: 5분 간격 sleep으로 다음 장 대기
+                await asyncio.sleep(300)
+                continue
+
+            db = _get_firestore()
+            active_orders = await asyncio.to_thread(_get_active_autotrade_orders, db)
+
+            if not active_orders:
+                await asyncio.sleep(60)
+                continue
+
+            cfg = _load_autotrade_config()
+            max_loss_pct = cfg.get("maxLossPerSymbolPct", -5.0)
+
+            # 장마감 청산 시각: 15:15 KST (동시호가 전)
+            is_market_close_time = t >= 1515
+
+            for order in active_orders:
+                doc_id = order.get("_doc_id", "")
+                symbol_code = order.get("symbolCode", "")
+                entry_price = float(order.get("entryPrice") or 0)
+                sl = float(order.get("stopLoss") or 0)
+                tp = float(order.get("targetPrice") or 0)
+                qty = int(order.get("qty") or 0)
+
+                if not symbol_code or qty <= 0 or entry_price <= 0:
+                    continue
+
+                # 현재가 조회
+                try:
+                    detail = await asyncio.to_thread(_fetch_stock_detail, symbol_code)
+                    if not detail:
+                        continue
+                    current_price = float(detail.get("stck_prpr") or 0)
+                    if current_price <= 0:
+                        continue
+                except Exception as e:
+                    _autotrade_log.warning(f"monitor: 시세 조회 실패 {symbol_code}: {e}")
+                    continue
+
+                exit_reason = None
+                pnl_pct = (current_price - entry_price) / entry_price * 100
+
+                # 조건 체크 (우선순위: 손절 > 익절 > 강제손실한도 > 장마감)
+                if sl > 0 and current_price <= sl:
+                    exit_reason = "stop_loss"
+                elif tp > 0 and current_price >= tp:
+                    exit_reason = "take_profit"
+                elif max_loss_pct < 0 and pnl_pct <= max_loss_pct:
+                    exit_reason = "max_loss"
+                elif is_market_close_time:
+                    exit_reason = "market_close"
+
+                if not exit_reason:
+                    # status를 monitoring으로 갱신 (entered → monitoring)
+                    if order.get("status") == "entered":
+                        try:
+                            db.collection("autotrade_orders").document(doc_id).update({"status": "monitoring"})
+                        except Exception:
+                            pass
+                    continue
+
+                # 매도 주문 실행
+                _autotrade_log.info(
+                    f"monitor: 매도 트리거 {symbol_code} reason={exit_reason} "
+                    f"price={current_price} entry={entry_price} pnl={pnl_pct:.2f}%"
+                )
+
+                try:
+                    db.collection("autotrade_orders").document(doc_id).update({"status": "exit_triggered"})
+                except Exception:
+                    pass
+
+                try:
+                    sell_result = await asyncio.to_thread(
+                        _kis_place_order, symbol_code, "sell", qty, "market"
+                    )
+                except Exception as e:
+                    _autotrade_log.error(f"monitor: 매도 주문 전송 실패 {symbol_code}: {e}")
+                    try:
+                        db.collection("autotrade_orders").document(doc_id).update({
+                            "status": "failed",
+                        })
+                        db.collection("events").document().set({
+                            "kind": "autotrade_error",
+                            "reason": "exit_order_failed",
+                            "symbolCode": symbol_code,
+                            "exitReason": exit_reason,
+                            "error": str(e),
+                            "payload": {"reason": "exit_order_failed", "symbolCode": symbol_code, "error": str(e)},
+                            "created_at": _firestore.SERVER_TIMESTAMP,
+                        })
+                    except Exception:
+                        pass
+                    continue
+
+                if sell_result.get("success"):
+                    pnl_krw = (current_price - entry_price) * qty
+                    try:
+                        db.collection("autotrade_orders").document(doc_id).update({
+                            "status":     "exited",
+                            "exitedAt":   datetime.now(timezone(timedelta(hours=9))).isoformat(),
+                            "exitOrdNo":  sell_result.get("ordNo", ""),
+                            "exitPrice":  current_price,
+                            "pnlKRW":     round(pnl_krw, 0),
+                            "pnlPct":     round(pnl_pct, 4),
+                            "exitReason": exit_reason,
+                        })
+                    except Exception as e:
+                        _autotrade_log.error(f"monitor: autotrade_orders 업데이트 실패: {e}")
+
+                    try:
+                        db.collection("events").document().set({
+                            "kind": "autotrade_exit",
+                            "symbolCode": symbol_code,
+                            "symbolName": order.get("symbolName", ""),
+                            "exitReason": exit_reason,
+                            "exitPrice": current_price,
+                            "entryPrice": entry_price,
+                            "qty": qty,
+                            "pnlKRW": round(pnl_krw, 0),
+                            "pnlPct": round(pnl_pct, 4),
+                            "signalId": order.get("signalId", ""),
+                            "payload": {
+                                "symbolCode": symbol_code, "exitReason": exit_reason,
+                                "exitPrice": current_price, "entryPrice": entry_price,
+                                "qty": qty, "pnlKRW": round(pnl_krw, 0), "pnlPct": round(pnl_pct, 4),
+                            },
+                            "created_at": _firestore.SERVER_TIMESTAMP,
+                        })
+                    except Exception:
+                        pass
+                    _autotrade_log.info(
+                        f"monitor: 매도 성공 {symbol_code} reason={exit_reason} "
+                        f"pnl={pnl_krw:+,.0f}원 ({pnl_pct:+.2f}%)"
+                    )
+                else:
+                    _autotrade_log.warning(f"monitor: 매도 실패 {symbol_code}: {sell_result.get('msg')}")
+                    try:
+                        db.collection("autotrade_orders").document(doc_id).update({"status": "failed"})
+                        db.collection("events").document().set({
+                            "kind": "autotrade_error",
+                            "reason": "exit_order_rejected",
+                            "symbolCode": symbol_code,
+                            "exitReason": exit_reason,
+                            "msg": sell_result.get("msg", ""),
+                            "payload": {
+                                "reason": "exit_order_rejected", "symbolCode": symbol_code,
+                                "exitReason": exit_reason, "msg": sell_result.get("msg", ""),
+                            },
+                            "created_at": _firestore.SERVER_TIMESTAMP,
+                        })
+                    except Exception:
+                        pass
+
+                # API 호출 간격
+                await asyncio.sleep(0.1)
+
+        except Exception as e:
+            _autotrade_log.error(f"monitor loop error: {e}")
+
+        # 1분 간격 폴링
+        await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def _start_autotrade_monitor():
+    """서버 시작 시 모니터링 루프 1개 생성 (중복 방지)."""
+    global _monitor_task
+    if _monitor_task is None or _monitor_task.done():
+        _monitor_task = asyncio.create_task(_autotrade_monitor_loop())
+        _autotrade_log.info("autotrade monitor task created on startup")
+
+
+# ── 자동매매 주문 조회 엔드포인트 (v2) ──────────────────────────
+@app.get("/api/autotrade/orders")
+async def api_autotrade_orders(
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, le=200),
+    user: dict = Depends(verify_firebase_token),
+):
+    """자동매매 주문 목록 조회. status 필터 가능."""
+    _ensure_admin(user)
+    try:
+        db = _get_firestore()
+        q = db.collection("autotrade_orders").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        if status:
+            q = db.collection("autotrade_orders").where("status", "==", status).order_by("created_at", direction=_firestore.Query.DESCENDING)
+        docs = list(q.limit(limit).stream())
+        return {"items": [_doc_to_dict(d) for d in docs]}
+    except Exception:
+        return {"items": [], "error": "autotrade_orders 조회 실패"}
 
 
 # ── 업종별 시세 / 투자자별 매매동향 ──────────────────────────
@@ -2112,6 +2456,7 @@ def _normalize_stock_signal(payload: dict, meta: dict) -> dict:
     return {
         "signalId":      payload.get("signalId") or payload.get("signal_id", ""),
         "symbol":        (payload.get("symbol") or "")[:20],
+        "symbolCode":    payload.get("symbolCode") or payload.get("symbol_code", ""),
         "score":         float(payload.get("score", 0)),
         "scoreReason":   payload.get("scoreReason") or payload.get("score_reason", ""),
         "entryPrice":    float(payload.get("entryPrice") or payload.get("entry_price", 0)),
@@ -2544,6 +2889,12 @@ async def api_autotrade_config_get(user: dict = Depends(verify_firebase_token)):
     except Exception:
         extra["todayOrderCount"] = 0
     extra["marketOpen"] = _is_market_open_now()
+    # 활성 포지션 수 (v2)
+    try:
+        active_orders = _get_active_autotrade_orders(db)
+        extra["activePositionCount"] = len(active_orders)
+    except Exception:
+        extra["activePositionCount"] = 0
     return {**cfg, **extra}
 
 
@@ -2577,8 +2928,24 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
         valid_stages = {"candidate", "trade_ready"}
         if not isinstance(v, list) or not all(s in valid_stages for s in v):
             raise HTTPException(400, f"allowedStages must be subset of {valid_stages}")
+    # 리스크 필터 검증 (v2)
+    if "maxConcurrentHoldings" in body:
+        v = body["maxConcurrentHoldings"]
+        if not isinstance(v, int) or v < 1 or v > 20:
+            raise HTTPException(400, "maxConcurrentHoldings must be int 1~20")
+    if "maxLossPerSymbolPct" in body:
+        v = body["maxLossPerSymbolPct"]
+        if not isinstance(v, (int, float)) or v < -50.0 or v > 0:
+            raise HTTPException(400, "maxLossPerSymbolPct must be float -50.0~0")
+    if "maxSectorConcentration" in body:
+        v = body["maxSectorConcentration"]
+        if not isinstance(v, int) or v < 1 or v > 10:
+            raise HTTPException(400, "maxSectorConcentration must be int 1~10")
 
-    allowed_keys = {"enabled", "maxTotalKRW", "maxPerSymbolKRW", "minScore", "allowedStages"}
+    allowed_keys = {
+        "enabled", "maxTotalKRW", "maxPerSymbolKRW", "minScore", "allowedStages",
+        "maxConcurrentHoldings", "maxLossPerSymbolPct", "maxSectorConcentration",
+    }
     updates = {}
     changed = {}
     current_cfg = _load_autotrade_config(force=True)

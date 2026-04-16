@@ -56,6 +56,10 @@ service cloud.firestore {
     match /autotrade_processed/{signalId} {
       allow read, write: if false;
     }
+    // 자동매매 주문 상태 (v2) — 서버 SDK만 접근
+    match /autotrade_orders/{orderId} {
+      allow read, write: if false;
+    }
     match /settings/{docId} {
       allow read, write: if false;
     }
