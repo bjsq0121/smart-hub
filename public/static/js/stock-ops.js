@@ -213,11 +213,15 @@
     el.innerHTML = stageHtml + dirHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>목표가</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
+          <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>목표가</th><th>방향</th><th>상태</th><th>생성</th><th></th></tr></thead>
           <tbody>${items.map((s, idx) => {
             const scoreCls = s.score >= 8 ? 'color:#34d399' : s.score >= 6 ? 'color:#fbbf24' : 'color:#f87171';
             const sid = String(s.signalId || s.id || idx).replace(/[^a-zA-Z0-9_-]/g, '_');
             const isNew = newSignalIds.has(s.signalId || s.id);
+            const isTradeable = s.direction && s.direction !== 'no_trade';
+            const tradeBtnHtml = isTradeable
+              ? `<button type="button" class="stk-signal-trade-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 text-[10px] hover:border-violet-500/40 hover:text-violet-300 transition-colors" data-symbol="${esc(s.symbol)}" data-direction="${esc(s.direction)}" onclick="event.stopPropagation();">매매</button>`
+              : (s.direction === 'no_trade' ? `<span style="font-size:0.65rem;color:#475569;" title="${esc(s.noTradeReason || '비매매')}">—</span>` : '');
             return `<tr class="${isNew ? 'stk-new-row' : ''}" style="cursor:pointer;" onclick="toggleStockFactors('${sid}')">
               <td style="font-weight:700;color:#e2e8f0;">${isNew ? '<span style="color:#34d399;font-size:0.65rem;margin-right:4px;">NEW</span>' : ''}${esc(s.symbol)} <span style="font-size:0.65rem;color:#475569;">&#9662;</span></td>
               <td>${stageBadge(s.stage || 'candidate')}</td>
@@ -229,14 +233,33 @@
               <td>${directionBadge(s.direction)}</td>
               <td>${itemStatusBadge(s.status)}</td>
               <td style="font-size:0.72rem;color:#475569;">${fmtRel(s.created_at)}</td>
+              <td style="text-align:center;">${tradeBtnHtml}</td>
             </tr>
             <tr class="ops-factors-row" id="stk-factors-${sid}" style="display:none;">
-              <td colspan="10" style="padding:10px 16px;">${renderFactors(s.factors)}</td>
+              <td colspan="11" style="padding:10px 16px;">${renderFactors(s.factors)}</td>
             </tr>`;
           }).join('')}
           </tbody>
         </table>
       </div>`;
+
+    // 시그널 "매매" 버튼 클릭 바인딩
+    el.querySelectorAll('.stk-signal-trade-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const symbol = btn.dataset.symbol;
+        const direction = btn.dataset.direction;
+        const side = direction === 'long' ? 'buy' : direction === 'short' ? 'sell' : 'buy';
+        // 1) 매매 서브탭으로 전환
+        if (typeof setStockOpsPane === 'function') setStockOpsPane('trade');
+        // 2) 매매 패널에 symbol + side 자동 채움 + 시세 호출
+        // setStockOpsPane('trade')가 loadStockTrade를 트리거하므로 약간의 지연 후 채움
+        setTimeout(() => {
+          if (typeof fillStockOrderForm === 'function') {
+            window.fillStockOrderForm(symbol, side, 0);
+          }
+        }, 100);
+      });
+    });
   }
 
   /* ══════════════════════════════════
@@ -351,12 +374,30 @@
     positionsErr: null,
     orders: null,         // /api/stock/paper/orders
     ordersErr: null,
-    form: { symbol: '', side: 'buy', qty: '', priceType: 'market', limitPrice: '', clientNote: '' },
+    form: { symbol: '', side: 'buy', qty: '', priceType: 'market', limitPrice: '', clientNote: '', symbolName: '' },
     pending: null,        // {confirmToken, preview, payload, expiresAt}
     submitting: false,
     pollingTimer: null,
+    quotePollingTimer: null,
+    // 검색/시세/한도 (Phase 3)
+    search: {
+      q: '',                // 현재 쿼리
+      items: [],            // [{code,name,market,rank}]
+      open: false,          // 드롭다운 오픈 여부
+      activeIdx: -1,        // 키보드 선택 index
+      debounceTimer: null,
+      loading: false,
+    },
+    quote: null,            // {symbol,name,price,prevClose,changeAmount,changePct,open,high,low,volume,marketHours,stale,cached,timestamp}
+    quoteErr: null,
+    quoteSymbol: '',        // 마지막으로 조회한 symbol (중복 호출 방지)
+    dailyStats: null,       // {count,amountKRW,caps,remaining,singleOrder}
+    dailyStatsErr: null,
+    recentSymbols: null,    // [{symbol,symbolName,lastTradedAt,side}] — /api/stock/paper/recent-symbols
   };
   const TRADE_POLL_MS = 30_000;
+  const QUOTE_POLL_MS = 10_000;
+  const SEARCH_DEBOUNCE_MS = 200;
 
   const ERR_TXT = {
     confirm_token_missing: '확인 세션이 없습니다. 다시 시도해주세요.',
@@ -369,6 +410,10 @@
     order_amount_exceeded: '단건 주문 한도(1억원)를 초과했습니다.',
     daily_limit_exceeded: '오늘 paper 주문 건수 한도(50건)를 초과했습니다.',
     daily_amount_exceeded: '오늘 paper 주문 금액 한도(10억원)를 초과했습니다.',
+    quote_fetch_failed: '시세 조회 실패',
+    search_failed: '종목 검색 실패',
+    daily_stats_unavailable: '한도 조회 불가',
+    naver_upstream: '검색 서버 응답 없음',
   };
   function mapErr(detail) {
     if (!detail) return '알 수 없는 오류';
@@ -394,6 +439,86 @@
     return { ok: r.ok, status: r.status, body: body || {} };
   }
 
+  /* ── 검색/시세/한도 API 헬퍼 (Phase 3) ── */
+  async function fetchSymbolSearch(q) {
+    if (!q || !q.trim()) return { items: [] };
+    const r = await apiFetch('/api/stock/search?q=' + encodeURIComponent(q.trim()) + '&limit=10');
+    if (!r.ok) {
+      console.warn('[stock-trade] search_failed', r.status, r.body && r.body.detail);
+      return { items: [], error: (r.body && r.body.detail) || 'search_failed' };
+    }
+    return r.body || { items: [] };
+  }
+
+  async function fetchQuote(symbol) {
+    if (!symbol || !/^\d{5,6}$/.test(symbol)) return { ok: false, error: 'invalid_symbol' };
+    const r = await apiFetch('/api/stock/quote?symbol=' + encodeURIComponent(symbol));
+    if (!r.ok) {
+      return { ok: false, status: r.status, error: (r.body && r.body.detail) || 'quote_fetch_failed' };
+    }
+    return r.body || { ok: false };
+  }
+
+  async function fetchDailyStats() {
+    const r = await apiFetch('/api/stock/paper/daily-stats');
+    if (!r.ok) {
+      return { ok: false, status: r.status, error: (r.body && r.body.detail) || 'daily_stats_unavailable' };
+    }
+    return r.body || { ok: false };
+  }
+
+  /* ── 최근 거래 종목 로드 ── */
+  async function fetchRecentSymbols() {
+    const r = await apiFetch('/api/stock/paper/recent-symbols?limit=10');
+    if (!r.ok) {
+      console.warn('[stock-trade] recent-symbols fetch failed', r.status);
+      tradeState.recentSymbols = [];
+      return;
+    }
+    tradeState.recentSymbols = (r.body && r.body.items) || [];
+  }
+
+  /* ── 시세 미리보기 로드/갱신 ── */
+  async function refreshQuote(force) {
+    const sym = tradeState.form.symbol;
+    if (!/^\d{5,6}$/.test(sym)) {
+      tradeState.quote = null; tradeState.quoteErr = null; tradeState.quoteSymbol = '';
+      renderQuotePreview();
+      return;
+    }
+    // 동일 symbol 재조회는 폴링 주기에만 허용
+    if (!force && tradeState.quoteSymbol === sym && tradeState.quote) {
+      // noop — 폴링이 부르면 force=true
+    }
+    const res = await fetchQuote(sym);
+    tradeState.quoteSymbol = sym;
+    if (res.ok === false) {
+      tradeState.quoteErr = res.error || 'quote_fetch_failed';
+      // stale 캐시 fallback이 없고 서버가 503으로 떨어지면 기존 quote는 유지하지 않음
+      if (res.status === 503) tradeState.quote = null;
+    } else {
+      tradeState.quote = res; // {ok, symbol, name, price, ...}
+      tradeState.quoteErr = null;
+      // 종목명 폼 옆 라벨에도 반영
+      if (res.name) tradeState.form.symbolName = res.name;
+    }
+    renderQuotePreview();
+    renderEstimate();
+  }
+
+  async function refreshDailyStats() {
+    const r = await fetchDailyStats();
+    if (r.ok === false) {
+      tradeState.dailyStats = null;
+      tradeState.dailyStatsErr = r.error || 'daily_stats_unavailable';
+    } else {
+      tradeState.dailyStats = r;
+      tradeState.dailyStatsErr = null;
+    }
+    renderLimitBars();
+    renderEstimate();
+  }
+
   /* ── 데이터 로드 ── */
   async function loadStockTrade() {
     const el = document.getElementById('stock-trade-content');
@@ -403,11 +528,12 @@
       el.innerHTML = '<div class="text-slate-500 text-sm py-6 text-center">로딩 중...</div>';
     }
 
-    const [accRes, hldRes, posRes, ordRes] = await Promise.allSettled([
+    const [accRes, hldRes, posRes, ordRes, dsRes] = await Promise.allSettled([
       apiFetch('/api/stock/account/balance'),
       apiFetch('/api/stock/account/holdings'),
       apiFetch('/api/stock/paper/positions'),
       apiFetch('/api/stock/paper/orders?limit=20'),
+      apiFetch('/api/stock/paper/daily-stats'),
     ]);
 
     function unpack(res) {
@@ -433,8 +559,33 @@
     tradeState.orders = ord.body;
     tradeState.ordersErr = ord.err;
 
+    const ds = unpack(dsRes);
+    if (ds.err) {
+      tradeState.dailyStats = null;
+      tradeState.dailyStatsErr = ds.err.detail || 'daily_stats_unavailable';
+    } else {
+      tradeState.dailyStats = ds.body;
+      tradeState.dailyStatsErr = null;
+    }
+
     renderStockTrade();
     startTradePolling();
+    // 첫 진입 시 현재 symbol 있으면 시세 즉시 로드
+    if (tradeState.form.symbol) refreshQuote(true);
+    // 최근 거래 종목 로드 (비동기, 블로킹 아님)
+    fetchRecentSymbols().then(() => {
+      const bar = document.getElementById('stk-recent-symbols');
+      if (bar) bar.innerHTML = renderRecentSymbolsBar();
+      // 칩 클릭 바인딩 (비동기 로드 후)
+      document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+        chip.onclick = () => {
+          tradeState.form.symbol = chip.dataset.symbol || '';
+          if (chip.dataset.name) tradeState.form.symbolName = chip.dataset.name;
+          renderStockTrade();
+          if (/^\d{5,6}$/.test(chip.dataset.symbol)) refreshQuote(true);
+        };
+      });
+    });
   }
   window.loadStockTrade = loadStockTrade;
 
@@ -448,6 +599,17 @@
       if (modal && !modal.classList.contains('hidden')) return;
       refreshAccountAndPositions();
     }, TRADE_POLL_MS);
+
+    // 시세 10초 폴링 (패널 보일 때 + symbol 유효 + 모달 닫혀있을 때만)
+    if (tradeState.quotePollingTimer) clearInterval(tradeState.quotePollingTimer);
+    tradeState.quotePollingTimer = setInterval(() => {
+      const pane = document.getElementById('stock-ops-pane-trade');
+      if (!pane || !pane.classList.contains('active')) return;
+      const modal = document.getElementById('stk-order-modal');
+      if (modal && !modal.classList.contains('hidden')) return;
+      if (!/^\d{5,6}$/.test(tradeState.form.symbol)) return;
+      refreshQuote(true);
+    }, QUOTE_POLL_MS);
   }
 
   async function refreshAccountAndPositions() {
@@ -493,6 +655,8 @@
         <div>${renderLiveSection()}</div>
         <div>${renderPaperSection()}</div>
       </div>
+      <div id="stk-recent-symbols" class="mb-1">${renderRecentSymbolsBar()}</div>
+      <div id="stk-quote-preview" class="mb-3">${renderQuotePreviewHtml()}</div>
       <div class="mb-6">${renderOrderPanel()}</div>
       <div>${renderOrderHistory()}</div>
     `;
@@ -691,6 +855,219 @@
     return head + cardsHtml + table;
   }
 
+  /* ── 4-2.4. 최근 거래 종목 태그 바 ── */
+  function renderRecentSymbolsBar() {
+    const items = tradeState.recentSymbols;
+    if (items === null) return ''; // 아직 로드 안 됨
+    if (!items.length) {
+      return `<div class="text-[10px] text-slate-600 mb-2">최근 거래 없음</div>`;
+    }
+    const chips = items.map(it => {
+      const name = it.symbolName || it.symbol;
+      // side에 따라 미세한 색상 구분 (매우 약하게)
+      const bgCls = it.side === 'buy'
+        ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-300/80'
+        : it.side === 'sell'
+        ? 'bg-rose-500/8 border-rose-500/20 text-rose-300/80'
+        : 'bg-slate-700/40 border-slate-700 text-slate-400';
+      return `<button type="button" class="stk-recent-chip inline-flex items-center px-2 py-0.5 rounded border ${bgCls} text-[10px] whitespace-nowrap hover:brightness-125 transition-all"
+        data-symbol="${esc(it.symbol)}" data-side="${esc(it.side || '')}" data-name="${esc(it.symbolName || '')}">
+        ${esc(name)}${it.symbolName ? ` <span class="ml-1 text-slate-500 font-mono">${esc(it.symbol)}</span>` : ''}
+      </button>`;
+    }).join('');
+    return `<div class="flex gap-1.5 mb-2 overflow-x-auto scrollbar-none">${chips}</div>`;
+  }
+
+  /* ── 4-2.5. 시세 미리보기 카드 ── */
+  function renderQuotePreviewHtml() {
+    const sym = tradeState.form.symbol;
+    if (!/^\d{5,6}$/.test(sym)) {
+      return ''; // symbol 확정 전에는 미표시 (UI 조용)
+    }
+    const q = tradeState.quote;
+    const err = tradeState.quoteErr;
+
+    // 실패 + 캐시도 없을 때
+    if (!q && err) {
+      return `<div class="rounded-lg border border-dashed border-slate-700/60 bg-slate-800/20 px-3 py-2 text-xs text-slate-500 flex items-center gap-2">
+        <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 text-slate-500 text-[10px]">시세</span>
+        <span>시세 조회 실패 · ${esc(mapErr(err))}</span>
+        <span class="text-slate-700">${esc(sym)}</span>
+      </div>`;
+    }
+    if (!q) {
+      return `<div class="rounded-lg border border-dashed border-slate-700/60 bg-slate-800/20 px-3 py-2 text-xs text-slate-500 flex items-center gap-2">
+        <span class="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 text-slate-500 text-[10px]">시세</span>
+        <span class="text-slate-600">—</span>
+        <span class="text-slate-700">${esc(sym)}</span>
+      </div>`;
+    }
+    const chg = Number(q.changeAmount) || 0;
+    const chgPct = (q.changePct != null) ? Number(q.changePct) : null;
+    const chgCls = chg > 0 ? 'text-emerald-400' : chg < 0 ? 'text-rose-400' : 'text-slate-400';
+    const ph = (v, fmt) => (v == null || isNaN(v)) ? '<span class="text-slate-600">—</span>' : (fmt ? fmt(v) : esc(String(v)));
+    const badges = [];
+    if (q.marketHours) {
+      badges.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded border border-emerald-500/30 bg-emerald-500/8 text-emerald-300 text-[10px]">장중</span>`);
+    } else {
+      badges.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 text-slate-500 text-[10px]">장외</span>`);
+    }
+    if (q.cached) {
+      badges.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded border border-slate-700 text-slate-500 text-[10px]">캐시</span>`);
+    }
+    if (q.stale) {
+      badges.push(`<span class="inline-flex items-center px-1.5 py-0.5 rounded border border-amber-500/30 bg-amber-500/8 text-amber-300 text-[10px]">지연</span>`);
+    }
+
+    // 동등 가중 미니 필드 6개: 현재/전일대비/시/고/저/전일종가 + 거래량 (절제)
+    return `<div class="rounded-lg border border-slate-700/50 bg-slate-800/30 px-3 py-2">
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <div class="flex items-center gap-2">
+          <span class="font-mono text-slate-300">${esc(q.symbol || sym)}</span>
+          <span class="text-slate-400">${esc(q.name || '')}</span>
+          ${badges.join(' ')}
+        </div>
+        <div class="flex items-center gap-3">
+          <span><span class="text-slate-500">현재</span> <span class="text-slate-200">${ph(q.price, fmtKRW)}</span></span>
+          <span class="${chgCls}">${chg >= 0 ? '+' : ''}${ph(chg, fmtKRW)}${chgPct != null ? ` (${chg >= 0 ? '+' : ''}${chgPct.toFixed(2)}%)` : ''}</span>
+        </div>
+        <div class="flex items-center gap-3 text-slate-500">
+          <span>시 <span class="text-slate-300">${ph(q.open, fmtKRW)}</span></span>
+          <span>고 <span class="text-slate-300">${ph(q.high, fmtKRW)}</span></span>
+          <span>저 <span class="text-slate-300">${ph(q.low, fmtKRW)}</span></span>
+          <span>전일 <span class="text-slate-300">${ph(q.prevClose, fmtKRW)}</span></span>
+          <span>거래 <span class="text-slate-300">${ph(q.volume, (v) => Number(v).toLocaleString())}</span></span>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function renderQuotePreview() {
+    const el = document.getElementById('stk-quote-preview');
+    if (el) el.innerHTML = renderQuotePreviewHtml();
+  }
+
+  /* ── 예상 체결금액 계산 + 한도 게이지 렌더 ── */
+  function computeEstimate() {
+    const f = tradeState.form;
+    const qty = Number(f.qty);
+    if (!Number.isInteger(qty) || qty < 1) return null;
+    let price = 0;
+    if (f.priceType === 'limit') {
+      price = Number(f.limitPrice) || 0;
+    } else {
+      price = (tradeState.quote && Number(tradeState.quote.price)) || 0;
+    }
+    if (!(price > 0)) return null;
+    return { amount: qty * price, price };
+  }
+
+  function renderEstimate() {
+    const el = document.getElementById('stk-estimate');
+    if (!el) return;
+    const est = computeEstimate();
+    const singleCap = (tradeState.dailyStats && tradeState.dailyStats.singleOrder && tradeState.dailyStats.singleOrder.maxAmountKRW) || 100000000;
+    if (!est) {
+      el.innerHTML = `<span class="text-slate-600">예상 금액 —</span>`;
+      return;
+    }
+    const over = est.amount > singleCap;
+    el.innerHTML = `
+      <span class="text-slate-500">예상 금액</span>
+      <span class="${over ? 'text-rose-400' : 'text-slate-300'} font-mono">${esc(fmtKRW(est.amount))}</span>
+      ${over ? '<span class="text-[10px] text-rose-400">단건 한도 초과</span>' : ''}
+    `;
+  }
+
+  function renderLimitBars() {
+    const el = document.getElementById('stk-limit-bars');
+    if (!el) return;
+    if (tradeState.dailyStatsErr || !tradeState.dailyStats) {
+      el.innerHTML = `<div class="text-[10px] text-slate-500">일일 한도: ${esc(mapErr(tradeState.dailyStatsErr || 'daily_stats_unavailable'))}</div>`;
+      return;
+    }
+    const ds = tradeState.dailyStats;
+    const usedCount = Number(ds.count) || 0;
+    const capCount = (ds.caps && Number(ds.caps.count)) || 50;
+    const usedAmt = Number(ds.amountKRW) || 0;
+    const capAmt = (ds.caps && Number(ds.caps.amountKRW)) || 1_000_000_000;
+
+    // 이번 주문 예측 부분
+    const est = computeEstimate();
+    const predCount = usedCount + (est ? 1 : 0);
+    const predAmt = usedAmt + (est ? est.amount : 0);
+
+    const cntBase = Math.min(100, (usedCount / capCount) * 100);
+    const cntPred = Math.min(100, (predCount / capCount) * 100) - cntBase;
+    const amtBase = Math.min(100, (usedAmt / capAmt) * 100);
+    const amtPred = Math.min(100, (predAmt / capAmt) * 100) - amtBase;
+
+    const cntOver = predCount > capCount;
+    const amtOver = predAmt > capAmt;
+
+    const bar = (baseW, predW, over, usedText, capText, label) => `
+      <div class="flex items-center gap-2">
+        <span class="text-[10px] text-slate-500 w-8">${esc(label)}</span>
+        <div class="relative flex-1 h-1.5 rounded bg-slate-800 overflow-hidden">
+          <div class="absolute inset-y-0 left-0 bg-slate-500/60" style="width:${baseW.toFixed(1)}%"></div>
+          ${predW > 0 ? `<div class="absolute inset-y-0 bg-${over ? 'rose' : 'amber'}-500/60" style="left:${baseW.toFixed(1)}%;width:${Math.max(0, predW).toFixed(1)}%"></div>` : ''}
+        </div>
+        <span class="text-[10px] text-slate-500 whitespace-nowrap">${esc(usedText)} / ${esc(capText)}</span>
+      </div>`;
+
+    el.innerHTML = `
+      <div class="flex flex-col gap-1">
+        ${bar(cntBase, cntPred, cntOver, String(usedCount) + '건', String(capCount) + '건', '건수')}
+        ${bar(amtBase, amtPred, amtOver, fmtKRW(usedAmt), fmtKRW(capAmt), '금액')}
+      </div>`;
+  }
+
+  /* ── autocomplete 드롭다운 렌더 ── */
+  function renderSearchDropdown() {
+    const host = document.getElementById('stk-search-dropdown');
+    if (!host) return;
+    const s = tradeState.search;
+    if (!s.open || !s.items.length) {
+      host.classList.add('hidden');
+      host.innerHTML = '';
+      return;
+    }
+    host.classList.remove('hidden');
+    host.innerHTML = s.items.map((it, idx) => {
+      const active = idx === s.activeIdx;
+      return `<div class="stk-search-row px-2 py-1.5 cursor-pointer text-xs flex items-center gap-2 ${active ? 'bg-violet-500/15' : 'hover:bg-slate-800/60'}"
+        data-code="${esc(it.code)}" data-name="${esc(it.name)}" data-idx="${idx}">
+        <span class="text-slate-200 flex-1 truncate">${esc(it.name || '')}</span>
+        <span class="font-mono text-slate-500">${esc(it.code || '')}</span>
+        <span class="text-[10px] text-slate-600">${esc(it.market || '')}</span>
+      </div>`;
+    }).join('');
+    // row 클릭
+    host.querySelectorAll('.stk-search-row').forEach(r => {
+      r.onmousedown = (e) => {
+        // mousedown으로 blur 전에 동작 (input blur → close 순서 회피)
+        e.preventDefault();
+        const code = r.dataset.code;
+        const name = r.dataset.name;
+        selectSearchItem(code, name);
+      };
+    });
+  }
+
+  function selectSearchItem(code, name) {
+    tradeState.form.symbol = code || '';
+    tradeState.form.symbolName = name || '';
+    tradeState.search.open = false;
+    tradeState.search.activeIdx = -1;
+    // input 값 반영 (재렌더 피해 성능 이점)
+    const input = document.getElementById('stk-form-symbol');
+    if (input) input.value = code || '';
+    const nameLabel = document.getElementById('stk-form-symbol-name');
+    if (nameLabel) nameLabel.textContent = name || '';
+    renderSearchDropdown();
+    refreshQuote(true);
+  }
+
   /* ── 4-3. 매매 패널 ── */
   function renderOrderPanel() {
     const f = tradeState.form;
@@ -711,11 +1088,15 @@
     return `${sectionHeader('매매 패널 (Paper)', 'paper')}
     <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4">
       <div class="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
-        <div class="md:col-span-1">
-          <div class="text-[11px] uppercase tracking-wider text-slate-500 mb-1">종목코드</div>
-          <input id="stk-form-symbol" type="text" inputmode="numeric" maxlength="6" placeholder="005930"
+        <div class="md:col-span-1 relative">
+          <div class="text-[11px] uppercase tracking-wider text-slate-500 mb-1 flex items-center gap-2">
+            <span>종목</span>
+            <span id="stk-form-symbol-name" class="text-[10px] normal-case tracking-normal text-slate-400 truncate max-w-[120px]">${esc(f.symbolName || '')}</span>
+          </div>
+          <input id="stk-form-symbol" type="text" autocomplete="off" maxlength="16" placeholder="005930 또는 종목명"
             value="${esc(f.symbol)}"
             class="w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900/60 text-slate-200 text-sm font-mono focus:outline-none focus:border-violet-500/60" />
+          <div id="stk-search-dropdown" class="hidden absolute z-20 left-0 right-0 mt-1 rounded-lg border border-slate-700 bg-slate-900/95 backdrop-blur shadow-lg max-h-64 overflow-auto"></div>
         </div>
         <div class="md:col-span-1">
           <div class="text-[11px] uppercase tracking-wider text-slate-500 mb-1">방향</div>
@@ -751,6 +1132,14 @@
           value="${esc(f.clientNote)}"
           class="w-full px-3 py-1.5 rounded-lg border border-slate-700 bg-slate-900/60 text-slate-200 text-sm focus:outline-none focus:border-violet-500/60" />
       </div>
+      <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
+          <div id="stk-limit-bars" class="text-[10px] text-slate-500">${esc(tradeState.dailyStatsErr ? ('일일 한도: ' + mapErr(tradeState.dailyStatsErr)) : '')}</div>
+        </div>
+        <div class="md:text-right">
+          <div id="stk-estimate" class="text-xs flex items-center gap-2 md:justify-end"></div>
+        </div>
+      </div>
       <div class="mt-3 flex items-center justify-between gap-3">
         <div id="stk-form-error" class="text-xs text-rose-400 min-h-[1rem]"></div>
         <div class="flex gap-2">
@@ -780,6 +1169,7 @@
           <tr>
             <th class="text-left py-2 px-3">시각</th>
             <th class="text-left py-2 px-3">종목</th>
+            <th class="text-left py-2 px-3">종목명</th>
             <th class="text-left py-2 px-3">방향</th>
             <th class="text-right py-2 px-3">수량</th>
             <th class="text-right py-2 px-3">체결가</th>
@@ -791,9 +1181,11 @@
         <tbody>
           ${items.map(o => {
             const sideCls = o.side === 'buy' ? 'text-emerald-400' : o.side === 'sell' ? 'text-rose-400' : 'text-slate-400';
+            const nm = o.symbolName || '';
             return `<tr class="border-t border-slate-800/60">
               <td class="py-1.5 px-3 text-slate-500">${esc(fmtRel(o.createdAt || o.occurredAt))}</td>
               <td class="py-1.5 px-3 font-mono text-slate-300">${esc(o.symbol || '—')}</td>
+              <td class="py-1.5 px-3 text-slate-400">${nm ? esc(nm) : '<span class="text-slate-600">—</span>'}</td>
               <td class="py-1.5 px-3 ${sideCls} font-semibold">${o.side === 'buy' ? '매수' : o.side === 'sell' ? '매도' : '—'}</td>
               <td class="py-1.5 px-3 text-right text-slate-300">${o.qty != null ? esc(String(o.qty)) : '—'}</td>
               <td class="py-1.5 px-3 text-right text-slate-300">${o.fillPrice != null ? esc(fmtKRW(o.fillPrice)) : '—'}</td>
@@ -810,6 +1202,19 @@
   /* ── 폼 핸들러 ── */
   function bindFormHandlers() {
     const f = tradeState.form;
+
+    // 최근 거래 종목 칩 클릭
+    document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+      chip.onclick = () => {
+        const symbol = chip.dataset.symbol || '';
+        const name = chip.dataset.name || '';
+        f.symbol = symbol;
+        if (name) f.symbolName = name;
+        renderStockTrade();
+        if (/^\d{5,6}$/.test(symbol)) refreshQuote(true);
+      };
+    });
+
     document.querySelectorAll('.stk-side-btn').forEach(b => {
       b.onclick = () => { f.side = b.dataset.side; renderStockTrade(); };
     });
@@ -820,33 +1225,128 @@
     const qty = document.getElementById('stk-form-qty');
     const lim = document.getElementById('stk-form-limit');
     const note = document.getElementById('stk-form-note');
-    if (sym) sym.oninput = (e) => { f.symbol = e.target.value.replace(/\D/g, '').slice(0, 6); e.target.value = f.symbol; };
-    if (qty) qty.oninput = (e) => { f.qty = e.target.value; };
-    if (lim) lim.oninput = (e) => { f.limitPrice = e.target.value; };
+
+    // 종목코드/종목명 autocomplete
+    if (sym) {
+      sym.oninput = (e) => {
+        const raw = e.target.value;
+        // 숫자 6자리면 코드로 확정 (기존 동작 유지) — 다만 이름 검색도 허용해야 하므로 strip 안 함
+        tradeState.form.symbol = raw;
+        // 코드 확정되면 name 초기화 (autocomplete 선택 전)
+        if (!/^\d{5,6}$/.test(raw)) {
+          // 검색 모드
+          const q = raw.trim();
+          tradeState.search.q = q;
+          if (tradeState.search.debounceTimer) clearTimeout(tradeState.search.debounceTimer);
+          if (!q) {
+            tradeState.search.items = [];
+            tradeState.search.open = false;
+            renderSearchDropdown();
+            return;
+          }
+          tradeState.search.debounceTimer = setTimeout(async () => {
+            const res = await fetchSymbolSearch(q);
+            // 사용자 쿼리가 바뀌었으면 무시 (race)
+            if (tradeState.search.q !== q) return;
+            tradeState.search.items = (res && res.items) || [];
+            tradeState.search.activeIdx = -1;
+            tradeState.search.open = tradeState.search.items.length > 0;
+            renderSearchDropdown();
+          }, SEARCH_DEBOUNCE_MS);
+        } else {
+          // 6자리 숫자 직접 입력 — 드롭다운 닫고 이름 라벨은 확정 시점에 채움
+          tradeState.search.open = false;
+          renderSearchDropdown();
+        }
+      };
+      sym.onkeydown = (e) => {
+        const s = tradeState.search;
+        if (e.key === 'Escape') {
+          s.open = false; renderSearchDropdown(); return;
+        }
+        if (s.open && s.items.length) {
+          if (e.key === 'ArrowDown') { e.preventDefault(); s.activeIdx = (s.activeIdx + 1) % s.items.length; renderSearchDropdown(); return; }
+          if (e.key === 'ArrowUp') { e.preventDefault(); s.activeIdx = (s.activeIdx - 1 + s.items.length) % s.items.length; renderSearchDropdown(); return; }
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            const idx = s.activeIdx >= 0 ? s.activeIdx : 0;
+            const it = s.items[idx];
+            if (it) selectSearchItem(it.code, it.name);
+            return;
+          }
+        } else if (e.key === 'Enter') {
+          // 직접 입력 후 Enter → symbol 확정, 시세 조회
+          const raw = sym.value.trim();
+          if (/^\d{5,6}$/.test(raw)) {
+            tradeState.form.symbol = raw;
+            refreshQuote(true);
+          }
+        }
+      };
+      sym.onblur = () => {
+        // 외부 클릭 처리 — mousedown preventDefault로 row 클릭은 이미 처리됨
+        setTimeout(() => {
+          tradeState.search.open = false;
+          renderSearchDropdown();
+          // blur 시 symbol 확정되어 있으면 시세 조회
+          const raw = (tradeState.form.symbol || '').trim();
+          if (/^\d{5,6}$/.test(raw)) {
+            refreshQuote(true);
+          }
+        }, 120);
+      };
+      sym.onfocus = () => {
+        if (tradeState.search.items.length && tradeState.search.q) {
+          tradeState.search.open = true;
+          renderSearchDropdown();
+        }
+      };
+    }
+    if (qty) qty.oninput = (e) => { f.qty = e.target.value; renderEstimate(); renderLimitBars(); };
+    if (lim) lim.oninput = (e) => { f.limitPrice = e.target.value; renderEstimate(); renderLimitBars(); };
     if (note) note.oninput = (e) => { f.clientNote = e.target.value; };
 
     const clearBtn = document.getElementById('stk-form-clear');
     if (clearBtn) clearBtn.onclick = () => {
-      tradeState.form = { symbol: '', side: 'buy', qty: '', priceType: 'market', limitPrice: '', clientNote: '' };
+      tradeState.form = { symbol: '', side: 'buy', qty: '', priceType: 'market', limitPrice: '', clientNote: '', symbolName: '' };
+      tradeState.quote = null; tradeState.quoteErr = null; tradeState.quoteSymbol = '';
+      tradeState.search.items = []; tradeState.search.open = false; tradeState.search.q = '';
       renderStockTrade();
     };
     const prepBtn = document.getElementById('stk-form-prepare');
     if (prepBtn) prepBtn.onclick = onPrepareClick;
     const refreshBtn = document.getElementById('stk-orders-refresh');
     if (refreshBtn) refreshBtn.onclick = refreshPaperAll;
+
+    // 최초/재렌더 직후 현재 상태 한번 반영
+    renderEstimate();
+    renderLimitBars();
+    renderSearchDropdown();
   }
 
   // 외부에서 종목 행 클릭 시 폼 자동 채움
   window.fillStockOrderForm = function (symbol, side, qty) {
-    tradeState.form.symbol = String(symbol || '');
+    const sym = String(symbol || '');
+    tradeState.form.symbol = sym;
     tradeState.form.side = (side === 'sell' || side === 'buy') ? side : 'buy';
     if (qty && Number(qty) > 0) tradeState.form.qty = String(qty);
     tradeState.form.priceType = 'market';
     tradeState.form.limitPrice = '';
+    // 기존 holdings/positions 에서 name 찾아서 미리 채우기
+    const findName = () => {
+      const h = ((tradeState.holdings && tradeState.holdings.holdings) || []).find(x => x.symbol === sym);
+      if (h && h.name) return h.name;
+      const p = ((tradeState.positions && tradeState.positions.positions) || []).find(x => x.symbol === sym);
+      if (p && p.name) return p.name;
+      return '';
+    };
+    tradeState.form.symbolName = findName();
     renderStockTrade();
     // 폼 영역으로 스크롤
     const panel = document.getElementById('stk-form-symbol');
     if (panel) panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // 시세 즉시 조회
+    if (/^\d{5,6}$/.test(sym)) refreshQuote(true);
   };
 
   /* ── prepare → 모달 ── */
@@ -856,7 +1356,7 @@
   }
   function validateForm() {
     const f = tradeState.form;
-    if (!/^\d{5,6}$/.test(f.symbol)) return '종목코드는 5~6자리 숫자여야 합니다.';
+    if (!/^\d{5,6}$/.test(f.symbol)) return '종목코드는 5~6자리 숫자여야 합니다. (검색 결과를 선택해주세요)';
     if (!['buy', 'sell'].includes(f.side)) return '방향을 선택해주세요.';
     const q = Number(f.qty);
     if (!Number.isInteger(q) || q < 1) return '수량은 1 이상의 정수.';
@@ -865,6 +1365,18 @@
     if (f.priceType === 'limit') {
       const lp = Number(f.limitPrice);
       if (!(lp > 0)) return '지정가는 양수여야 합니다.';
+    }
+    // 한도 가드 (프론트 차단은 soft — 백엔드가 최종)
+    const est = computeEstimate();
+    const singleCap = (tradeState.dailyStats && tradeState.dailyStats.singleOrder && tradeState.dailyStats.singleOrder.maxAmountKRW) || 100000000;
+    if (est && est.amount > singleCap) return '단건 주문 한도(1억원)를 초과했습니다.';
+    if (est && tradeState.dailyStats && tradeState.dailyStats.caps) {
+      const capCount = Number(tradeState.dailyStats.caps.count) || 50;
+      const capAmt = Number(tradeState.dailyStats.caps.amountKRW) || 1_000_000_000;
+      const usedCount = Number(tradeState.dailyStats.count) || 0;
+      const usedAmt = Number(tradeState.dailyStats.amountKRW) || 0;
+      if (usedCount + 1 > capCount) return '오늘 paper 주문 건수 한도(50건)를 초과합니다.';
+      if (usedAmt + est.amount > capAmt) return '오늘 paper 주문 금액 한도(10억원)를 초과합니다.';
     }
     return null;
   }
@@ -979,6 +1491,21 @@
     await refreshPaperAll();
     // 실잔고도 갱신
     refreshAccountAndPositions();
+    // 일일 한도 갱신
+    refreshDailyStats();
+    // 최근 거래 종목 갱신
+    fetchRecentSymbols().then(() => {
+      const bar = document.getElementById('stk-recent-symbols');
+      if (bar) bar.innerHTML = renderRecentSymbolsBar();
+      document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+        chip.onclick = () => {
+          tradeState.form.symbol = chip.dataset.symbol || '';
+          if (chip.dataset.name) tradeState.form.symbolName = chip.dataset.name;
+          renderStockTrade();
+          if (/^\d{5,6}$/.test(chip.dataset.symbol)) refreshQuote(true);
+        };
+      });
+    });
   }
 
 })();

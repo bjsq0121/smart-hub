@@ -3432,6 +3432,49 @@ async def api_stock_paper_orders(
             return {"ok": False, "items": [], "error": "paper_trades 조회 실패"}
 
 
+# ── 최근 거래 종목 ────────────────────────────────────────────────
+@app.get("/api/stock/paper/recent-symbols")
+async def api_stock_paper_recent_symbols(
+    limit: int = Query(default=10, ge=1, le=30),
+    user: dict = Depends(verify_firebase_token),
+):
+    """최근 paper 거래 종목 (중복 제거, 최근 거래 순). 프론트 종목 빠른 선택용."""
+    _ensure_admin(user)
+    user_email = (user.get("email") or "").lower()
+    try:
+        db = _get_firestore()
+        # 기존 인덱스 paper_trades(userEmail ASC, created_at DESC) 재사용
+        # limit*3 fetch 후 메모리 dedup (단순 구현)
+        fetch_limit = limit * 3
+        q = (db.collection("paper_trades")
+               .where("userEmail", "==", user_email)
+               .order_by("created_at", direction=_firestore.Query.DESCENDING)
+               .limit(fetch_limit))
+        seen: set = set()
+        items: list = []
+        for doc in q.stream():
+            d = _doc_to_dict(doc)
+            if (d.get("assetClass") or "") != "stock":
+                continue
+            sym = d.get("symbol") or ""
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            stored_name = d.get("symbolName") or d.get("name") or ""
+            sym_name = stored_name or _lookup_symbol_name(sym) or None
+            items.append({
+                "symbol":       sym,
+                "symbolName":   sym_name,
+                "lastTradedAt": d.get("created_at"),
+                "side":         d.get("side"),
+            })
+            if len(items) >= limit:
+                break
+        return {"ok": True, "items": items}
+    except Exception:
+        return {"ok": True, "items": []}
+
+
 # ── 주식 검색/시세/일일한도 (schema_stock_search §4) ────────────
 @app.get("/api/stock/search")
 async def api_stock_search(

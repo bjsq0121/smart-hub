@@ -213,11 +213,15 @@
     el.innerHTML = stageHtml + dirHtml + `
       <div class="ops-table-wrap">
         <table class="ops-table">
-          <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>목표가</th><th>방향</th><th>상태</th><th>생성</th></tr></thead>
+          <thead><tr><th>종목</th><th>단계</th><th>점수</th><th>사유</th><th>진입가</th><th>손절</th><th>목표가</th><th>방향</th><th>상태</th><th>생성</th><th></th></tr></thead>
           <tbody>${items.map((s, idx) => {
             const scoreCls = s.score >= 8 ? 'color:#34d399' : s.score >= 6 ? 'color:#fbbf24' : 'color:#f87171';
             const sid = String(s.signalId || s.id || idx).replace(/[^a-zA-Z0-9_-]/g, '_');
             const isNew = newSignalIds.has(s.signalId || s.id);
+            const isTradeable = s.direction && s.direction !== 'no_trade';
+            const tradeBtnHtml = isTradeable
+              ? `<button type="button" class="stk-signal-trade-btn px-2 py-0.5 rounded border border-slate-700 text-slate-400 text-[10px] hover:border-violet-500/40 hover:text-violet-300 transition-colors" data-symbol="${esc(s.symbol)}" data-direction="${esc(s.direction)}" onclick="event.stopPropagation();">매매</button>`
+              : (s.direction === 'no_trade' ? `<span style="font-size:0.65rem;color:#475569;" title="${esc(s.noTradeReason || '비매매')}">—</span>` : '');
             return `<tr class="${isNew ? 'stk-new-row' : ''}" style="cursor:pointer;" onclick="toggleStockFactors('${sid}')">
               <td style="font-weight:700;color:#e2e8f0;">${isNew ? '<span style="color:#34d399;font-size:0.65rem;margin-right:4px;">NEW</span>' : ''}${esc(s.symbol)} <span style="font-size:0.65rem;color:#475569;">&#9662;</span></td>
               <td>${stageBadge(s.stage || 'candidate')}</td>
@@ -229,14 +233,33 @@
               <td>${directionBadge(s.direction)}</td>
               <td>${itemStatusBadge(s.status)}</td>
               <td style="font-size:0.72rem;color:#475569;">${fmtRel(s.created_at)}</td>
+              <td style="text-align:center;">${tradeBtnHtml}</td>
             </tr>
             <tr class="ops-factors-row" id="stk-factors-${sid}" style="display:none;">
-              <td colspan="10" style="padding:10px 16px;">${renderFactors(s.factors)}</td>
+              <td colspan="11" style="padding:10px 16px;">${renderFactors(s.factors)}</td>
             </tr>`;
           }).join('')}
           </tbody>
         </table>
       </div>`;
+
+    // 시그널 "매매" 버튼 클릭 바인딩
+    el.querySelectorAll('.stk-signal-trade-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const symbol = btn.dataset.symbol;
+        const direction = btn.dataset.direction;
+        const side = direction === 'long' ? 'buy' : direction === 'short' ? 'sell' : 'buy';
+        // 1) 매매 서브탭으로 전환
+        if (typeof setStockOpsPane === 'function') setStockOpsPane('trade');
+        // 2) 매매 패널에 symbol + side 자동 채움 + 시세 호출
+        // setStockOpsPane('trade')가 loadStockTrade를 트리거하므로 약간의 지연 후 채움
+        setTimeout(() => {
+          if (typeof fillStockOrderForm === 'function') {
+            window.fillStockOrderForm(symbol, side, 0);
+          }
+        }, 100);
+      });
+    });
   }
 
   /* ══════════════════════════════════
@@ -370,6 +393,7 @@
     quoteSymbol: '',        // 마지막으로 조회한 symbol (중복 호출 방지)
     dailyStats: null,       // {count,amountKRW,caps,remaining,singleOrder}
     dailyStatsErr: null,
+    recentSymbols: null,    // [{symbol,symbolName,lastTradedAt,side}] — /api/stock/paper/recent-symbols
   };
   const TRADE_POLL_MS = 30_000;
   const QUOTE_POLL_MS = 10_000;
@@ -441,6 +465,17 @@
       return { ok: false, status: r.status, error: (r.body && r.body.detail) || 'daily_stats_unavailable' };
     }
     return r.body || { ok: false };
+  }
+
+  /* ── 최근 거래 종목 로드 ── */
+  async function fetchRecentSymbols() {
+    const r = await apiFetch('/api/stock/paper/recent-symbols?limit=10');
+    if (!r.ok) {
+      console.warn('[stock-trade] recent-symbols fetch failed', r.status);
+      tradeState.recentSymbols = [];
+      return;
+    }
+    tradeState.recentSymbols = (r.body && r.body.items) || [];
   }
 
   /* ── 시세 미리보기 로드/갱신 ── */
@@ -537,6 +572,20 @@
     startTradePolling();
     // 첫 진입 시 현재 symbol 있으면 시세 즉시 로드
     if (tradeState.form.symbol) refreshQuote(true);
+    // 최근 거래 종목 로드 (비동기, 블로킹 아님)
+    fetchRecentSymbols().then(() => {
+      const bar = document.getElementById('stk-recent-symbols');
+      if (bar) bar.innerHTML = renderRecentSymbolsBar();
+      // 칩 클릭 바인딩 (비동기 로드 후)
+      document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+        chip.onclick = () => {
+          tradeState.form.symbol = chip.dataset.symbol || '';
+          if (chip.dataset.name) tradeState.form.symbolName = chip.dataset.name;
+          renderStockTrade();
+          if (/^\d{5,6}$/.test(chip.dataset.symbol)) refreshQuote(true);
+        };
+      });
+    });
   }
   window.loadStockTrade = loadStockTrade;
 
@@ -606,6 +655,7 @@
         <div>${renderLiveSection()}</div>
         <div>${renderPaperSection()}</div>
       </div>
+      <div id="stk-recent-symbols" class="mb-1">${renderRecentSymbolsBar()}</div>
       <div id="stk-quote-preview" class="mb-3">${renderQuotePreviewHtml()}</div>
       <div class="mb-6">${renderOrderPanel()}</div>
       <div>${renderOrderHistory()}</div>
@@ -803,6 +853,29 @@
     }
 
     return head + cardsHtml + table;
+  }
+
+  /* ── 4-2.4. 최근 거래 종목 태그 바 ── */
+  function renderRecentSymbolsBar() {
+    const items = tradeState.recentSymbols;
+    if (items === null) return ''; // 아직 로드 안 됨
+    if (!items.length) {
+      return `<div class="text-[10px] text-slate-600 mb-2">최근 거래 없음</div>`;
+    }
+    const chips = items.map(it => {
+      const name = it.symbolName || it.symbol;
+      // side에 따라 미세한 색상 구분 (매우 약하게)
+      const bgCls = it.side === 'buy'
+        ? 'bg-emerald-500/8 border-emerald-500/20 text-emerald-300/80'
+        : it.side === 'sell'
+        ? 'bg-rose-500/8 border-rose-500/20 text-rose-300/80'
+        : 'bg-slate-700/40 border-slate-700 text-slate-400';
+      return `<button type="button" class="stk-recent-chip inline-flex items-center px-2 py-0.5 rounded border ${bgCls} text-[10px] whitespace-nowrap hover:brightness-125 transition-all"
+        data-symbol="${esc(it.symbol)}" data-side="${esc(it.side || '')}" data-name="${esc(it.symbolName || '')}">
+        ${esc(name)}${it.symbolName ? ` <span class="ml-1 text-slate-500 font-mono">${esc(it.symbol)}</span>` : ''}
+      </button>`;
+    }).join('');
+    return `<div class="flex gap-1.5 mb-2 overflow-x-auto scrollbar-none">${chips}</div>`;
   }
 
   /* ── 4-2.5. 시세 미리보기 카드 ── */
@@ -1129,6 +1202,19 @@
   /* ── 폼 핸들러 ── */
   function bindFormHandlers() {
     const f = tradeState.form;
+
+    // 최근 거래 종목 칩 클릭
+    document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+      chip.onclick = () => {
+        const symbol = chip.dataset.symbol || '';
+        const name = chip.dataset.name || '';
+        f.symbol = symbol;
+        if (name) f.symbolName = name;
+        renderStockTrade();
+        if (/^\d{5,6}$/.test(symbol)) refreshQuote(true);
+      };
+    });
+
     document.querySelectorAll('.stk-side-btn').forEach(b => {
       b.onclick = () => { f.side = b.dataset.side; renderStockTrade(); };
     });
@@ -1407,6 +1493,19 @@
     refreshAccountAndPositions();
     // 일일 한도 갱신
     refreshDailyStats();
+    // 최근 거래 종목 갱신
+    fetchRecentSymbols().then(() => {
+      const bar = document.getElementById('stk-recent-symbols');
+      if (bar) bar.innerHTML = renderRecentSymbolsBar();
+      document.querySelectorAll('.stk-recent-chip').forEach(chip => {
+        chip.onclick = () => {
+          tradeState.form.symbol = chip.dataset.symbol || '';
+          if (chip.dataset.name) tradeState.form.symbolName = chip.dataset.name;
+          renderStockTrade();
+          if (/^\d{5,6}$/.test(chip.dataset.symbol)) refreshQuote(true);
+        };
+      });
+    });
   }
 
 })();
