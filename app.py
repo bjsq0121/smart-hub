@@ -788,6 +788,274 @@ def _fetch_kis_account_snapshot(force: bool = False) -> dict:
     return snapshot
 
 
+# ── 자동매매 엔진 ──────────────────────────────────────────────
+import logging as _logging
+_autotrade_log = _logging.getLogger("autotrade")
+
+_autotrade_config: dict = {
+    "enabled":          False,
+    "maxTotalKRW":      200_000,
+    "maxPerSymbolKRW":  100_000,
+    "minScore":         7.0,
+    "allowedStages":    ["trade_ready"],
+}
+
+
+def _resolve_symbol_code(symbol_raw: str) -> str | None:
+    """symbol이 종목코드(6자리 숫자)이면 그대로, 종목명이면 네이버 검색으로 코드 변환.
+
+    반환: 6자리 종목코드 또는 None(해결 실패).
+    """
+    s = (symbol_raw or "").strip()
+    if not s:
+        return None
+    # 6자리 숫자면 이미 종목코드
+    if re.fullmatch(r"\d{6}", s):
+        return s
+    # _symbol_name_cache 역검색 (code→name 캐시를 name→code로)
+    for code, name in _symbol_name_cache.items():
+        if name == s:
+            return code
+    # 네이버 자동완성으로 검색
+    results = _fetch_naver_stock_search(s, 3)
+    for r in results:
+        if r.get("name") == s or s in (r.get("name") or ""):
+            code = r.get("code", "")
+            if re.fullmatch(r"\d{6}", code):
+                _remember_symbol_name(code, r.get("name", s))
+                return code
+    # 첫 번째 결과 fallback
+    if results:
+        code = results[0].get("code", "")
+        if re.fullmatch(r"\d{6}", code):
+            _remember_symbol_name(code, results[0].get("name", s))
+            return code
+    return None
+
+
+def _is_market_open_now() -> bool:
+    """KST 기준 장중(평일 09:00~15:20) 여부. 공휴일은 체크하지 않음(weekday만)."""
+    kst = datetime.now(timezone(timedelta(hours=9)))
+    if kst.weekday() >= 5:  # 토(5), 일(6)
+        return False
+    t = kst.hour * 100 + kst.minute
+    return 900 <= t <= 1520
+
+
+def _kis_place_order(symbol_code: str, side: str, qty: int, order_type: str = "market") -> dict:
+    """KIS 실주문 전송.
+
+    side: "buy" | "sell"
+    order_type: "market" (시장가)
+    반환: {"success": bool, "ordNo": str, "msg": str, ...}
+    """
+    if side == "buy":
+        tr_id = "TTTC0802U"
+    elif side == "sell":
+        tr_id = "TTTC0801U"
+    else:
+        raise ValueError(f"Invalid side: {side}")
+
+    # 시장가: ORD_DVSN="01", ORD_UNPR="0"
+    ord_dvsn = "01" if order_type == "market" else "00"  # 00=지정가
+    ord_unpr = "0" if order_type == "market" else "0"
+
+    headers = _kis_headers(tr_id)
+    headers["custtype"] = "P"
+
+    body = {
+        "CANO":        KIS_ACCOUNT_NO,
+        "ACNT_PRDT_CD": KIS_ACCOUNT_PROD,
+        "PDNO":        symbol_code,
+        "ORD_DVSN":    ord_dvsn,
+        "ORD_QTY":     str(qty),
+        "ORD_UNPR":    ord_unpr,
+    }
+
+    _autotrade_log.info(f"KIS 주문 전송: {side} {symbol_code} x{qty} ({order_type}) tr_id={tr_id}")
+
+    resp = requests.post(
+        f"{KIS_BASE_URL}/uapi/domestic-stock/v1/trading/order-cash",
+        headers=headers,
+        json=body,
+        timeout=10,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    rt_cd = data.get("rt_cd", "")
+    msg1 = data.get("msg1", "")
+    output = data.get("output") or {}
+    ord_no = output.get("ODNO") or output.get("odno", "")
+
+    _autotrade_log.info(f"KIS 주문 응답: rt_cd={rt_cd} msg={msg1} ordNo={ord_no}")
+
+    return {
+        "success": rt_cd == "0",
+        "rtCd":    rt_cd,
+        "msg":     msg1,
+        "ordNo":   ord_no,
+        "raw":     data,
+    }
+
+
+async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
+    """stock_signal 수신 후 자동매매 조건 체크 → 매수 주문.
+
+    이 함수는 webhook 응답 후 백그라운드에서 실행된다.
+    """
+    cfg = _autotrade_config
+    db = _get_firestore()
+    symbol_raw = norm.get("symbol", "")
+    score = norm.get("score", 0)
+    direction = norm.get("direction", "")
+    stage = norm.get("stage", "")
+    stop_loss = norm.get("stopLoss", 0)
+    target_price = norm.get("targetPrice", 0)
+
+    def _log_event(kind: str, detail: dict):
+        try:
+            db.collection("events").document().set({
+                "kind": kind,
+                **detail,           # 루트에 플래튼 (프론트가 log.symbol 등으로 접근)
+                "payload": detail,  # 하위 호환
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+        except Exception as e:
+            _autotrade_log.error(f"event 기록 실패: {e}")
+
+    # 1) enabled 체크
+    if not cfg.get("enabled"):
+        return
+
+    # 2) 조건 체크
+    if stage not in cfg.get("allowedStages", []):
+        _autotrade_log.info(f"autotrade skip: stage={stage} not in {cfg['allowedStages']}")
+        return
+    if score < cfg.get("minScore", 7.0):
+        _autotrade_log.info(f"autotrade skip: score={score} < minScore={cfg['minScore']}")
+        return
+    if direction != "long":
+        _autotrade_log.info(f"autotrade skip: direction={direction} (only long)")
+        return
+
+    # 3) 장중 확인
+    if not _is_market_open_now():
+        _autotrade_log.info("autotrade skip: 장외 시간")
+        _log_event("autotrade_skip", {
+            "reason": "market_closed", "symbol": symbol_raw, "signalId": signal_doc_id,
+        })
+        return
+
+    # 4) symbol 해결 (종목명→종목코드)
+    symbol_code = _resolve_symbol_code(symbol_raw)
+    if not symbol_code:
+        _autotrade_log.warning(f"autotrade skip: symbol 해결 실패: {symbol_raw}")
+        _log_event("autotrade_error", {
+            "reason": "symbol_resolve_failed", "symbol": symbol_raw, "signalId": signal_doc_id,
+        })
+        return
+
+    # 5) 현재 보유 + 잔액 확인
+    try:
+        snapshot = _fetch_kis_account_snapshot(force=True)
+    except Exception as e:
+        _autotrade_log.error(f"autotrade error: 계좌 조회 실패: {e}")
+        _log_event("autotrade_error", {
+            "reason": "account_fetch_failed", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id, "error": str(e),
+        })
+        return
+
+    holdings = snapshot.get("holdings", [])
+    # 중복 매수 방지
+    for h in holdings:
+        if h.get("symbol") == symbol_code:
+            _autotrade_log.info(f"autotrade skip: 이미 보유 중: {symbol_code}")
+            _log_event("autotrade_skip", {
+                "reason": "already_holding", "symbol": symbol_raw,
+                "symbolCode": symbol_code, "signalId": signal_doc_id,
+            })
+            return
+
+    # 현재 투자 총액 (보유 종목 평가금액 합)
+    current_invested = sum(h.get("evalAmount", 0) for h in holdings)
+    max_total = cfg.get("maxTotalKRW", 200_000)
+    max_per_symbol = cfg.get("maxPerSymbolKRW", 100_000)
+    remaining = max_total - current_invested
+
+    if remaining <= 0:
+        _autotrade_log.info(f"autotrade skip: 한도 초과 (invested={current_invested}, max={max_total})")
+        _log_event("autotrade_skip", {
+            "reason": "budget_exceeded", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id,
+            "currentInvested": current_invested, "maxTotalKRW": max_total,
+        })
+        return
+
+    # 6) 현재가 조회
+    try:
+        detail = _fetch_stock_detail(symbol_code)
+        if not detail:
+            raise ValueError("시세 조회 결과 없음")
+        current_price = float(detail.get("stck_prpr") or 0)
+        if current_price <= 0:
+            raise ValueError(f"현재가 이상: {current_price}")
+    except Exception as e:
+        _autotrade_log.error(f"autotrade error: 현재가 조회 실패: {symbol_code}: {e}")
+        _log_event("autotrade_error", {
+            "reason": "price_fetch_failed", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id, "error": str(e),
+        })
+        return
+
+    # 7) 수량 계산
+    budget = min(max_per_symbol, remaining)
+    qty = int(budget / current_price)
+    if qty <= 0:
+        _autotrade_log.info(f"autotrade skip: 수량 0 (budget={budget}, price={current_price})")
+        _log_event("autotrade_skip", {
+            "reason": "qty_zero", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id,
+            "budget": budget, "currentPrice": current_price,
+        })
+        return
+
+    # 8) 주문 전 로깅
+    order_detail = {
+        "symbol": symbol_raw, "symbolCode": symbol_code, "side": "buy",
+        "qty": qty, "currentPrice": current_price, "budget": budget,
+        "score": score, "stage": stage, "direction": direction,
+        "stopLoss": stop_loss, "targetPrice": target_price,
+        "signalId": signal_doc_id,
+    }
+    _autotrade_log.info(f"autotrade 매수 주문 시도: {order_detail}")
+    _log_event("autotrade_attempt", order_detail)
+
+    # 9) KIS 실매수 주문
+    try:
+        result = _kis_place_order(symbol_code, "buy", qty, "market")
+    except Exception as e:
+        _autotrade_log.error(f"autotrade error: 주문 전송 실패: {e}")
+        _log_event("autotrade_error", {
+            **order_detail, "reason": "order_request_failed", "error": str(e),
+        })
+        return
+
+    if result["success"]:
+        _autotrade_log.info(f"autotrade 주문 성공: ordNo={result['ordNo']}")
+        _log_event("autotrade_order", {
+            **order_detail, "ordNo": result["ordNo"], "msg": result["msg"],
+        })
+    else:
+        _autotrade_log.warning(f"autotrade 주문 실패: {result['msg']}")
+        _log_event("autotrade_error", {
+            **order_detail, "reason": "order_rejected",
+            "ordNo": result.get("ordNo", ""), "msg": result["msg"],
+            "rtCd": result["rtCd"],
+        })
+
+
 # ── 업종별 시세 / 투자자별 매매동향 ──────────────────────────
 _sector_cache: dict = {}   # {"data": [...], "ts": float}
 _investor_cache: dict = {} # {"data": {...}, "ts": float}
@@ -1869,6 +2137,9 @@ async def webhook_ingest(env: IngestEnvelope):
                     return {"ok": False, "eventId": event_doc.id, "error": "stock signal에 symbol이 비어있습니다."}
                 ref = db.collection("stock_signals").document(norm["signalId"] or None)
                 ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
+                # 자동매매 훅 (백그라운드)
+                if _autotrade_config.get("enabled"):
+                    asyncio.ensure_future(_autotrade_on_signal(norm, ref.id))
             else:
                 norm = _normalize_signal(env.payload)
                 if not norm["symbol"]:
@@ -1929,6 +2200,9 @@ async def webhook_ingest(env: IngestEnvelope):
                 return {"ok": False, "eventId": event_doc.id, "error": "stock_signal에 symbol이 비어있습니다."}
             ref = db.collection("stock_signals").document(norm["signalId"] or None)
             ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
+            # 자동매매 훅 (백그라운드)
+            if _autotrade_config.get("enabled"):
+                asyncio.ensure_future(_autotrade_on_signal(norm, ref.id))
         elif env.kind == "stock_alert":
             doc = {
                 "alertType": env.payload.get("alertType") or env.payload.get("alert_type", "info"),
@@ -2154,6 +2428,116 @@ async def api_stock_alerts(
         return {"items": items}
     except Exception:
         return {"items": [], "error": "stock_alerts 조회 실패"}
+
+
+# ── 자동매매 설정 API ──────────────────────────────────────────
+
+@app.get("/api/autotrade/config")
+async def api_autotrade_config_get(user: dict = Depends(verify_firebase_token)):
+    """자동매매 설정 조회 (admin only). 동적 필드(투자잔액/주문건수/장상태) 포함."""
+    _ensure_admin(user)
+    extra: dict = {}
+    # 현재 투자 잔액
+    try:
+        snapshot = _fetch_kis_account_snapshot(force=False)
+        holdings = snapshot.get("holdings", [])
+        extra["currentInvestedKRW"] = sum(float(h.get("evalAmount", 0)) for h in holdings)
+    except Exception:
+        extra["currentInvestedKRW"] = 0
+    # 오늘 자동 주문 건수
+    try:
+        db = _get_firestore()
+        kst = timezone(timedelta(hours=9))
+        kst_today = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0)
+        orders = list(db.collection("events")
+                      .where("kind", "==", "autotrade_order")
+                      .where("created_at", ">=", kst_today)
+                      .limit(100).stream())
+        extra["todayOrderCount"] = len(orders)
+    except Exception:
+        extra["todayOrderCount"] = 0
+    extra["marketOpen"] = _is_market_open_now()
+    return {**_autotrade_config, **extra}
+
+
+@app.post("/api/autotrade/config")
+async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_firebase_token)):
+    """자동매매 설정 변경 (admin only).
+
+    가능 필드: enabled, maxTotalKRW, maxPerSymbolKRW, minScore, allowedStages
+    """
+    _ensure_admin(user)
+    body = await req.json()
+
+    # 입력값 검증 (실돈 안전장치)
+    if "enabled" in body:
+        if not isinstance(body["enabled"], bool):
+            raise HTTPException(400, "enabled must be bool")
+    if "maxTotalKRW" in body:
+        v = body["maxTotalKRW"]
+        if not isinstance(v, (int, float)) or v < 10000 or v > 1_000_000:
+            raise HTTPException(400, "maxTotalKRW must be 10,000~1,000,000")
+    if "maxPerSymbolKRW" in body:
+        v = body["maxPerSymbolKRW"]
+        if not isinstance(v, (int, float)) or v < 10000 or v > 500_000:
+            raise HTTPException(400, "maxPerSymbolKRW must be 10,000~500,000")
+    if "minScore" in body:
+        v = body["minScore"]
+        if not isinstance(v, (int, float)) or v < 1.0 or v > 10.0:
+            raise HTTPException(400, "minScore must be 1.0~10.0")
+    if "allowedStages" in body:
+        v = body["allowedStages"]
+        valid_stages = {"candidate", "trade_ready"}
+        if not isinstance(v, list) or not all(s in valid_stages for s in v):
+            raise HTTPException(400, f"allowedStages must be subset of {valid_stages}")
+
+    allowed_keys = {"enabled", "maxTotalKRW", "maxPerSymbolKRW", "minScore", "allowedStages"}
+    changed = {}
+    for k in allowed_keys:
+        if k in body:
+            old = _autotrade_config.get(k)
+            _autotrade_config[k] = body[k]
+            changed[k] = {"old": old, "new": body[k]}
+
+    # 변경 로그
+    if changed:
+        try:
+            db = _get_firestore()
+            db.collection("events").document().set({
+                "kind": "autotrade_config_change",
+                "payload": {"changes": changed, "by": user.get("email", "")},
+                "created_at": _firestore.SERVER_TIMESTAMP,
+            })
+        except Exception:
+            pass
+
+    return {"ok": True, "config": {**_autotrade_config}, "changed": changed}
+
+
+@app.post("/api/autotrade/kill")
+async def api_autotrade_kill(user: dict = Depends(verify_firebase_token)):
+    """비상 정지: 자동매매 즉시 비활성화 (admin only)."""
+    _ensure_admin(user)
+    was_enabled = _autotrade_config.get("enabled", False)
+    _autotrade_config["enabled"] = False
+
+    # 비상 정지 로그
+    try:
+        db = _get_firestore()
+        db.collection("events").document().set({
+            "kind": "autotrade_kill",
+            "payload": {
+                "wasEnabled": was_enabled,
+                "by": user.get("email", ""),
+                "timestamp": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+            },
+            "created_at": _firestore.SERVER_TIMESTAMP,
+        })
+    except Exception:
+        pass
+
+    _autotrade_log.warning(f"AUTOTRADE KILL by {user.get('email', 'unknown')} (was_enabled={was_enabled})")
+    return {"ok": True, "enabled": False, "wasEnabled": was_enabled}
 
 
 # ── 주식 데이터 정리 (코인 signals → stock_signals 이동) ──

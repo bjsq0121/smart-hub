@@ -20,6 +20,21 @@
   let stockCountdown = 0;
   const STOCK_REFRESH_MS = 15_000; // 15초
 
+  /* ── 자동매매 상태 ── */
+  const autotradeState = {
+    config: null,         // GET /api/autotrade/config 응답
+    configErr: null,      // {status, detail}
+    logs: null,           // 최근 5건 autotrade 이벤트
+    logsErr: null,
+    pollingTimer: null,
+    settingsOpen: false,  // 설정 편집 폼 열림 여부
+    saving: false,
+    killing: false,
+    killModalOpen: false,
+    killConfirmChecked: false,
+  };
+  const AUTOTRADE_POLL_MS = 30_000;
+
   // 새 데이터 감지용 — 이전 로드의 ID 세트
   let prevSignalIds = new Set();
   let prevAlertIds = new Set();
@@ -570,6 +585,9 @@
 
     renderStockTrade();
     startTradePolling();
+    // 자동매매 설정 로드 + 폴링 시작 (비동기, 블로킹 아님)
+    loadAutotradeConfig();
+    startAutotradePolling();
     // 첫 진입 시 현재 symbol 있으면 시세 즉시 로드
     if (tradeState.form.symbol) refreshQuote(true);
     // 최근 거래 종목 로드 (비동기, 블로킹 아님)
@@ -646,11 +664,410 @@
     renderStockTrade();
   }
 
+  /* ══════════════════════════════════════════════════════════════
+     자동매매 — UI / 데이터 로드 / 렌더
+  ══════════════════════════════════════════════════════════════ */
+
+  async function loadAutotradeConfig() {
+    try {
+      const r = await apiFetch('/api/autotrade/config');
+      if (!r.ok) {
+        autotradeState.config = null;
+        autotradeState.configErr = { status: r.status, detail: (r.body && (r.body.detail || r.body.error)) || ('HTTP ' + r.status) };
+      } else {
+        autotradeState.config = r.body;
+        autotradeState.configErr = null;
+      }
+    } catch (e) {
+      autotradeState.config = null;
+      autotradeState.configErr = { status: 0, detail: '네트워크 오류' };
+    }
+    // 로그도 함께 로드
+    await loadAutotradeLogs();
+    renderAutotradeSection();
+  }
+
+  async function loadAutotradeLogs() {
+    try {
+      const r = await apiFetch('/api/events?kind=autotrade_order&limit=5');
+      if (!r.ok) {
+        autotradeState.logs = null;
+        autotradeState.logsErr = '로그 조회 실패';
+      } else {
+        // autotrade_error도 가져와서 합침
+        let items = (r.body && r.body.items) || [];
+        try {
+          const r2 = await apiFetch('/api/events?kind=autotrade_error&limit=5');
+          if (r2.ok && r2.body && r2.body.items) {
+            items = items.concat(r2.body.items);
+          }
+        } catch (_) { /* ignore */ }
+        // 시간순 정렬 후 5건
+        items.sort((a, b) => {
+          const ta = a.created_at || a.createdAt || '';
+          const tb = b.created_at || b.createdAt || '';
+          return tb < ta ? -1 : tb > ta ? 1 : 0;
+        });
+        autotradeState.logs = items.slice(0, 5);
+        autotradeState.logsErr = null;
+      }
+    } catch (e) {
+      autotradeState.logs = null;
+      autotradeState.logsErr = '네트워크 오류';
+    }
+  }
+
+  function startAutotradePolling() {
+    if (autotradeState.pollingTimer) clearInterval(autotradeState.pollingTimer);
+    autotradeState.pollingTimer = setInterval(() => {
+      const pane = document.getElementById('stock-ops-pane-trade');
+      if (!pane || !pane.classList.contains('active')) return;
+      loadAutotradeConfig();
+    }, AUTOTRADE_POLL_MS);
+  }
+
+  async function toggleAutotrade(enabled) {
+    // 즉시 UI 반영
+    if (autotradeState.config) autotradeState.config.enabled = enabled;
+    renderAutotradeSection();
+    try {
+      const r = await apiFetch('/api/autotrade/config', {
+        method: 'POST',
+        body: { enabled },
+      });
+      if (r.ok && r.body && r.body.config) {
+        autotradeState.config = r.body.config;
+        autotradeState.configErr = null;
+      } else {
+        // 서버 보정
+        await loadAutotradeConfig();
+      }
+    } catch (e) {
+      await loadAutotradeConfig();
+    }
+    renderAutotradeSection();
+  }
+
+  async function killAutotrade() {
+    autotradeState.killing = true;
+    renderAutotradeSection();
+    try {
+      const r = await apiFetch('/api/autotrade/kill', { method: 'POST' });
+      if (r.ok) {
+        if (autotradeState.config) autotradeState.config.enabled = false;
+        showToast('자동매매가 즉시 중단되었습니다.');
+      } else {
+        showToast('비상 정지 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
+      }
+    } catch (e) {
+      showToast('비상 정지 실패: 네트워크 오류');
+    }
+    autotradeState.killing = false;
+    autotradeState.killModalOpen = false;
+    autotradeState.killConfirmChecked = false;
+    await loadAutotradeConfig();
+  }
+
+  async function saveAutotradeConfig(form) {
+    autotradeState.saving = true;
+    renderAutotradeSection();
+    try {
+      const payload = {};
+      if (form.maxTotalKRW !== undefined) payload.maxTotalKRW = Number(form.maxTotalKRW);
+      if (form.maxPerSymbolKRW !== undefined) payload.maxPerSymbolKRW = Number(form.maxPerSymbolKRW);
+      if (form.minScore !== undefined) payload.minScore = Number(form.minScore);
+      const r = await apiFetch('/api/autotrade/config', {
+        method: 'POST',
+        body: payload,
+      });
+      if (r.ok && r.body && r.body.config) {
+        autotradeState.config = r.body.config;
+        autotradeState.configErr = null;
+        autotradeState.settingsOpen = false;
+        showToast('자동매매 설정이 저장되었습니다.');
+      } else {
+        showToast('설정 저장 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
+      }
+    } catch (e) {
+      showToast('설정 저장 실패: 네트워크 오류');
+    }
+    autotradeState.saving = false;
+    renderAutotradeSection();
+  }
+
+  function renderAutotradeSection() {
+    const el = document.getElementById('stk-autotrade-section');
+    if (!el) return;
+    el.innerHTML = renderAutotradeCard();
+    bindAutotradeHandlers();
+  }
+
+  function renderAutotradeCard() {
+    const cfg = autotradeState.config;
+    const err = autotradeState.configErr;
+
+    // 503 → 서비스 준비 중
+    if (err && err.status === 503) {
+      return `
+        <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium text-slate-400">자동매매</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
+          </div>
+          <div class="text-xs text-slate-500">서비스 준비 중</div>
+        </div>`;
+    }
+
+    // 기타 에러
+    if (err || !cfg) {
+      return `
+        <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-medium text-slate-400">자동매매</span>
+            <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
+          </div>
+          <div class="text-xs text-slate-500">${esc((err && err.detail) || '설정 조회 실패')}</div>
+        </div>`;
+    }
+
+    const enabled = !!cfg.enabled;
+    const statusChip = enabled
+      ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">자동매매 ON</span>'
+      : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400 border border-slate-600/30">OFF</span>';
+
+    // 토글 switch
+    const toggleHtml = `
+      <button id="stk-autotrade-toggle" class="relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-emerald-500/80' : 'bg-slate-600'}" title="${enabled ? '자동매매 끄기' : '자동매매 켜기'}">
+        <span class="inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}"></span>
+      </button>`;
+
+    // 비상 정지 버튼
+    const killBtn = `<button id="stk-autotrade-kill" class="px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${enabled ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 hover:bg-rose-500/25' : 'bg-slate-800/30 text-slate-500 border-slate-700/40 cursor-not-allowed'}" ${enabled ? '' : 'disabled'}>비상 정지</button>`;
+
+    // 설정값 표시
+    const maxTotal = cfg.maxTotalKRW != null ? cfg.maxTotalKRW : 0;
+    const maxPer = cfg.maxPerSymbolKRW != null ? cfg.maxPerSymbolKRW : 0;
+    const minScore = cfg.minScore != null ? cfg.minScore : 0;
+    const currentInvested = cfg.currentInvestedKRW != null ? cfg.currentInvestedKRW : 0;
+    const todayOrders = cfg.todayOrderCount != null ? cfg.todayOrderCount : 0;
+    const marketOpen = !!cfg.marketOpen;
+
+    // 진행 바: currentInvested / maxTotal
+    const pct = maxTotal > 0 ? Math.min(100, (currentInvested / maxTotal) * 100) : 0;
+    const barColor = pct > 80 ? 'bg-rose-400' : pct > 50 ? 'bg-amber-400' : 'bg-emerald-400';
+
+    const fmt = (v) => typeof fmtKRW === 'function' ? fmtKRW(v) : v.toLocaleString() + '원';
+
+    const progressBar = `
+      <div class="mt-3">
+        <div class="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+          <span>투자 잔액</span>
+          <span>${esc(fmt(currentInvested))} / ${esc(fmt(maxTotal))}</span>
+        </div>
+        <div class="w-full h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
+          <div class="${barColor} h-full rounded-full transition-all" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+      </div>`;
+
+    // 설정 요약
+    const statsRow = `
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-slate-500">
+        <span>종목당 ${esc(fmt(maxPer))}</span>
+        <span>최소 점수 ${minScore.toFixed(1)}</span>
+        <span>오늘 주문 ${todayOrders}건</span>
+        <span>${marketOpen
+          ? '<span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>장중</span>'
+          : '<span class="text-slate-600">장외</span>'}</span>
+      </div>`;
+
+    // 설정 편집 폼
+    let settingsForm = '';
+    if (autotradeState.settingsOpen) {
+      settingsForm = `
+        <div class="mt-3 pt-3 border-t border-slate-700/40">
+          <div class="grid grid-cols-3 gap-2 mb-2">
+            <div>
+              <label class="text-[10px] text-slate-500 block mb-0.5">총 한도 (원)</label>
+              <input id="stk-at-maxTotal" type="number" value="${maxTotal}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 block mb-0.5">종목당 한도 (원)</label>
+              <input id="stk-at-maxPer" type="number" value="${maxPer}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+            </div>
+            <div>
+              <label class="text-[10px] text-slate-500 block mb-0.5">최소 점수 (0-10)</label>
+              <input id="stk-at-minScore" type="number" step="0.1" min="0" max="10" value="${minScore}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <button id="stk-at-save" class="px-3 py-1 rounded text-[10px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30 transition-colors" ${autotradeState.saving ? 'disabled' : ''}>${autotradeState.saving ? '저장 중...' : '저장'}</button>
+            <button id="stk-at-cancel" class="px-3 py-1 rounded text-[10px] text-slate-500 hover:text-slate-300 transition-colors">취소</button>
+          </div>
+        </div>`;
+    } else {
+      settingsForm = `
+        <div class="mt-2">
+          <button id="stk-at-open-settings" class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors underline underline-offset-2">설정 변경</button>
+        </div>`;
+    }
+
+    // 로그 섹션
+    let logsHtml = '';
+    if (autotradeState.logs && autotradeState.logs.length > 0) {
+      const logRows = autotradeState.logs.map(log => {
+        const kind = log.kind || '';
+        const isError = kind.includes('error');
+        const ts = log.created_at || log.createdAt || '';
+        const tsStr = ts ? (typeof fmtRel === 'function' ? fmtRel(ts) : new Date(ts).toLocaleString()) : '—';
+        const symbol = log.symbol || log.data?.symbol || '';
+        const msg = isError
+          ? (log.error || log.data?.error || '오류')
+          : (log.symbol_name || log.data?.symbol_name || symbol || '주문');
+        const qty = log.qty || log.data?.qty || '';
+        const chipCls = isError
+          ? 'text-rose-400'
+          : 'text-emerald-400';
+        return `<div class="flex items-center gap-2 text-[10px] py-0.5">
+          <span class="${chipCls} font-semibold w-8 shrink-0">${isError ? 'ERR' : 'BUY'}</span>
+          <span class="text-slate-300 truncate flex-1">${esc(msg)}${qty ? ' x' + esc(String(qty)) : ''}</span>
+          <span class="text-slate-600 shrink-0">${esc(tsStr)}</span>
+        </div>`;
+      }).join('');
+      logsHtml = `
+        <div class="mt-3 pt-3 border-t border-slate-700/40">
+          <div class="text-[10px] text-slate-500 mb-1">최근 자동매매</div>
+          ${logRows}
+        </div>`;
+    } else if (autotradeState.logsErr) {
+      logsHtml = `
+        <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
+          로그는 이벤트 탭에서 확인
+        </div>`;
+    } else {
+      logsHtml = `
+        <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
+          자동매매 기록 없음
+        </div>`;
+    }
+
+    // 비상 정지 모달
+    let killModal = '';
+    if (autotradeState.killModalOpen) {
+      killModal = `
+        <div id="stk-kill-modal" class="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60">
+          <div class="rounded-xl border border-slate-700/50 bg-slate-900 p-5 w-80 shadow-2xl">
+            <div class="text-sm font-medium text-slate-200 mb-3">자동매매를 즉시 중단합니다.</div>
+            <div class="text-xs text-slate-400 mb-4">진행하시겠습니까?</div>
+            <label class="flex items-center gap-2 text-xs text-slate-400 mb-4 cursor-pointer select-none">
+              <input type="checkbox" id="stk-kill-check" class="rounded border-slate-600" ${autotradeState.killConfirmChecked ? 'checked' : ''} />
+              <span>비상 정지를 확인합니다</span>
+            </label>
+            <div class="flex items-center gap-2">
+              <button id="stk-kill-confirm" class="px-3 py-1.5 rounded text-xs font-semibold transition-colors ${autotradeState.killConfirmChecked ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30' : 'bg-slate-800 text-slate-600 border border-slate-700/40 cursor-not-allowed'}" ${autotradeState.killConfirmChecked && !autotradeState.killing ? '' : 'disabled'}>${autotradeState.killing ? '중단 중...' : '비상 정지 실행'}</button>
+              <button id="stk-kill-cancel" class="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors">취소</button>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+        <div class="flex items-center justify-between mb-1">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-medium text-slate-400">자동매매</span>
+            ${statusChip}
+          </div>
+          <div class="flex items-center gap-2">
+            ${killBtn}
+            ${toggleHtml}
+          </div>
+        </div>
+        ${progressBar}
+        ${statsRow}
+        ${settingsForm}
+        ${logsHtml}
+      </div>${killModal}`;
+  }
+
+  function bindAutotradeHandlers() {
+    // 토글
+    const toggleBtn = document.getElementById('stk-autotrade-toggle');
+    if (toggleBtn) {
+      toggleBtn.onclick = () => {
+        const current = autotradeState.config ? !!autotradeState.config.enabled : false;
+        toggleAutotrade(!current);
+      };
+    }
+
+    // 비상 정지 버튼 → 모달 열기
+    const killBtn = document.getElementById('stk-autotrade-kill');
+    if (killBtn && !killBtn.disabled) {
+      killBtn.onclick = () => {
+        autotradeState.killModalOpen = true;
+        autotradeState.killConfirmChecked = false;
+        renderAutotradeSection();
+      };
+    }
+
+    // 비상 정지 모달 핸들러
+    const killCheck = document.getElementById('stk-kill-check');
+    if (killCheck) {
+      killCheck.onchange = () => {
+        autotradeState.killConfirmChecked = killCheck.checked;
+        renderAutotradeSection();
+      };
+    }
+    const killConfirm = document.getElementById('stk-kill-confirm');
+    if (killConfirm && !killConfirm.disabled) {
+      killConfirm.onclick = () => killAutotrade();
+    }
+    const killCancel = document.getElementById('stk-kill-cancel');
+    if (killCancel) {
+      killCancel.onclick = () => {
+        autotradeState.killModalOpen = false;
+        autotradeState.killConfirmChecked = false;
+        renderAutotradeSection();
+      };
+    }
+
+    // 설정 열기/닫기
+    const openSettings = document.getElementById('stk-at-open-settings');
+    if (openSettings) {
+      openSettings.onclick = () => {
+        autotradeState.settingsOpen = true;
+        renderAutotradeSection();
+      };
+    }
+    const cancelSettings = document.getElementById('stk-at-cancel');
+    if (cancelSettings) {
+      cancelSettings.onclick = () => {
+        autotradeState.settingsOpen = false;
+        renderAutotradeSection();
+      };
+    }
+
+    // 설정 저장
+    const saveBtn = document.getElementById('stk-at-save');
+    if (saveBtn) {
+      saveBtn.onclick = () => {
+        const maxTotal = document.getElementById('stk-at-maxTotal');
+        const maxPer = document.getElementById('stk-at-maxPer');
+        const minScoreEl = document.getElementById('stk-at-minScore');
+        const form = {};
+        if (maxTotal) form.maxTotalKRW = maxTotal.value;
+        if (maxPer) form.maxPerSymbolKRW = maxPer.value;
+        if (minScoreEl) form.minScore = minScoreEl.value;
+        saveAutotradeConfig(form);
+      };
+    }
+  }
+
   /* ── 렌더 ── */
   function renderStockTrade() {
     const el = document.getElementById('stock-trade-content');
     if (!el) return;
     el.innerHTML = `
+      <div id="stk-autotrade-section">${renderAutotradeCard()}</div>
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
         <div>${renderLiveSection()}</div>
         <div>${renderPaperSection()}</div>
@@ -661,6 +1078,7 @@
       <div>${renderOrderHistory()}</div>
     `;
     bindFormHandlers();
+    bindAutotradeHandlers();
   }
 
   function sectionHeader(label, kind) {
