@@ -802,6 +802,7 @@ _AUTOTRADE_DEFAULTS: dict = {
     "maxConcurrentHoldings":  5,      # 동시 보유 종목 수 상한
     "maxLossPerSymbolPct":    -5.0,   # 종목당 손실 한도 (%) — 강제 청산 트리거
     "maxSectorConcentration": 2,      # 동일 섹터 최대 종목 수
+    "maxHoldDays":            5,      # 보유 기간 상한 (영업일). 초과 시 시장가 청산
 }
 _autotrade_config: dict = {**_AUTOTRADE_DEFAULTS}
 _autotrade_config_ts: float = 0.0  # 마지막 Firestore 로드 시각
@@ -1278,9 +1279,10 @@ _monitor_task: asyncio.Task | None = None
 
 
 async def _autotrade_monitor_loop():
-    """장중 1분 간격 폴링 — 손절/익절/장마감 청산 + maxLossPerSymbolPct 강제 청산.
+    """장중 1분 간격 폴링 — 손절/익절/보유기간 초과 청산 + maxLossPerSymbolPct 강제 청산.
 
-    - enabled=false여도 기존 포지션의 손절/익절/장마감 청산은 계속 동작
+    스윙 모드: 장마감 강제 청산 없음. stopLoss/targetPrice/maxHoldDays로만 청산.
+    - enabled=false여도 기존 포지션의 손절/익절 청산은 계속 동작
     - enabled=false는 "신규 진입만 중단"으로 해석
     """
     _autotrade_log.info("autotrade monitor loop started")
@@ -1306,8 +1308,8 @@ async def _autotrade_monitor_loop():
             cfg = _load_autotrade_config()
             max_loss_pct = cfg.get("maxLossPerSymbolPct", -5.0)
 
-            # 장마감 청산 시각: 15:15 KST (동시호가 전)
-            is_market_close_time = t >= 1515
+            # 보유 기간 상한 (스윙 모드: 장마감 청산 대신 N영업일 초과 시 청산)
+            max_hold_days = cfg.get("maxHoldDays", 5)
 
             for order in active_orders:
                 doc_id = order.get("_doc_id", "")
@@ -1335,15 +1337,28 @@ async def _autotrade_monitor_loop():
                 exit_reason = None
                 pnl_pct = (current_price - entry_price) / entry_price * 100
 
-                # 조건 체크 (우선순위: 손절 > 익절 > 강제손실한도 > 장마감)
+                # 보유 기간 계산 (영업일)
+                entered_at = order.get("enteredAt")
+                hold_days = 0
+                if entered_at and hasattr(entered_at, "date"):
+                    from datetime import date as _date_type
+                    entry_date = entered_at.date() if hasattr(entered_at, "date") else entered_at
+                    today_date = datetime.now(timezone(timedelta(hours=9))).date()
+                    d = entry_date
+                    while d < today_date:
+                        d += timedelta(days=1)
+                        if d.weekday() < 5 and not _is_kr_holiday(d):
+                            hold_days += 1
+
+                # 조건 체크 (우선순위: 손절 > 익절 > 강제손실한도 > 보유기간 초과)
                 if sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
                 elif tp > 0 and current_price >= tp:
                     exit_reason = "take_profit"
                 elif max_loss_pct < 0 and pnl_pct <= max_loss_pct:
                     exit_reason = "max_loss"
-                elif is_market_close_time:
-                    exit_reason = "market_close"
+                elif max_hold_days > 0 and hold_days >= max_hold_days:
+                    exit_reason = "hold_expired"
 
                 if not exit_reason:
                     # status를 monitoring으로 갱신 (entered → monitoring)
@@ -2941,10 +2956,15 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
         v = body["maxSectorConcentration"]
         if not isinstance(v, int) or v < 1 or v > 10:
             raise HTTPException(400, "maxSectorConcentration must be int 1~10")
+    if "maxHoldDays" in body:
+        v = body["maxHoldDays"]
+        if not isinstance(v, int) or v < 1 or v > 30:
+            raise HTTPException(400, "maxHoldDays must be int 1~30")
 
     allowed_keys = {
         "enabled", "maxTotalKRW", "maxPerSymbolKRW", "minScore", "allowedStages",
         "maxConcurrentHoldings", "maxLossPerSymbolPct", "maxSectorConcentration",
+        "maxHoldDays",
     }
     updates = {}
     changed = {}
