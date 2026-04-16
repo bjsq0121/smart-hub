@@ -792,13 +792,55 @@ def _fetch_kis_account_snapshot(force: bool = False) -> dict:
 import logging as _logging
 _autotrade_log = _logging.getLogger("autotrade")
 
-_autotrade_config: dict = {
+_AUTOTRADE_DEFAULTS: dict = {
     "enabled":          False,
     "maxTotalKRW":      200_000,
     "maxPerSymbolKRW":  100_000,
     "minScore":         7.0,
     "allowedStages":    ["trade_ready"],
 }
+_autotrade_config: dict = {**_AUTOTRADE_DEFAULTS}
+_autotrade_config_ts: float = 0.0  # 마지막 Firestore 로드 시각
+_AUTOTRADE_CACHE_TTL: float = 30.0  # 30초 캐시
+
+
+def _load_autotrade_config(force: bool = False) -> dict:
+    """Firestore settings/autotrade에서 설정 로드. 30초 캐시."""
+    global _autotrade_config, _autotrade_config_ts
+    import time as _time
+    now = _time.time()
+    if not force and (now - _autotrade_config_ts) < _AUTOTRADE_CACHE_TTL:
+        return _autotrade_config
+    try:
+        db = _get_firestore()
+        doc = db.collection("settings").document("autotrade").get()
+        if doc.exists:
+            saved = doc.to_dict() or {}
+            # 저장된 값 + 기본값 병합 (새 필드 추가 시 호환)
+            merged = {**_AUTOTRADE_DEFAULTS, **{k: v for k, v in saved.items() if k in _AUTOTRADE_DEFAULTS}}
+            _autotrade_config.update(merged)
+        else:
+            # 문서 없으면 기본값으로 생성
+            db.collection("settings").document("autotrade").set(_AUTOTRADE_DEFAULTS)
+            _autotrade_config.update(_AUTOTRADE_DEFAULTS)
+        _autotrade_config_ts = now
+    except Exception as e:
+        _autotrade_log.warning(f"autotrade config 로드 실패 (메모리 캐시 유지): {e}")
+    return _autotrade_config
+
+
+def _save_autotrade_config(updates: dict):
+    """Firestore settings/autotrade 업데이트 + 메모리 캐시 갱신."""
+    global _autotrade_config_ts
+    import time as _time
+    try:
+        db = _get_firestore()
+        db.collection("settings").document("autotrade").set(updates, merge=True)
+    except Exception as e:
+        _autotrade_log.error(f"autotrade config 저장 실패: {e}")
+        raise
+    _autotrade_config.update(updates)
+    _autotrade_config_ts = _time.time()
 
 
 def _resolve_symbol_code(symbol_raw: str) -> str | None:
@@ -904,8 +946,8 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
 
     이 함수는 webhook 응답 후 백그라운드에서 실행된다.
     """
-    cfg = _autotrade_config
     db = _get_firestore()
+    cfg = _load_autotrade_config()  # Firestore에서 최신 설정 로드
     symbol_raw = norm.get("symbol", "")
     score = norm.get("score", 0)
     direction = norm.get("direction", "")
@@ -923,6 +965,33 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             })
         except Exception as e:
             _autotrade_log.error(f"event 기록 실패: {e}")
+
+    # 0) signalId 중복 방지 (Firestore 트랜잭션)
+    if signal_doc_id:
+        proc_ref = db.collection("autotrade_processed").document(signal_doc_id)
+        try:
+            @_firestore.transactional
+            def _check_and_mark(txn):
+                snap = proc_ref.get(transaction=txn)
+                if snap.exists:
+                    return False  # 이미 처리됨
+                txn.set(proc_ref, {
+                    "signalId": signal_doc_id,
+                    "symbol": symbol_raw,
+                    "processedAt": _firestore.SERVER_TIMESTAMP,
+                })
+                return True
+            txn = db.transaction()
+            is_new = _check_and_mark(txn)
+            if not is_new:
+                _autotrade_log.info(f"autotrade skip: 이미 처리된 시그널: {signal_doc_id}")
+                _log_event("autotrade_skip", {
+                    "reason": "duplicate_signal", "symbol": symbol_raw,
+                    "signalId": signal_doc_id,
+                })
+                return
+        except Exception as e:
+            _autotrade_log.error(f"autotrade: 중복 체크 실패 (진행): {e}")
 
     # 1) enabled 체크
     if not cfg.get("enabled"):
@@ -1008,6 +1077,23 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             "symbolCode": symbol_code, "signalId": signal_doc_id, "error": str(e),
         })
         return
+
+    # 6-b) 가격 보호장치: entryPrice 대비 현재가 괴리율 체크
+    entry_price = float(norm.get("entryPrice") or 0)
+    if entry_price > 0:
+        deviation = abs(current_price - entry_price) / entry_price
+        if deviation > 0.05:  # 5% 초과 괴리
+            _autotrade_log.warning(
+                f"autotrade skip: 가격 괴리 {deviation:.1%} "
+                f"(entry={entry_price}, current={current_price})"
+            )
+            _log_event("autotrade_skip", {
+                "reason": "price_deviation", "symbol": symbol_raw,
+                "symbolCode": symbol_code, "signalId": signal_doc_id,
+                "entryPrice": entry_price, "currentPrice": current_price,
+                "deviation": round(deviation, 4),
+            })
+            return
 
     # 7) 수량 계산
     budget = min(max_per_symbol, remaining)
@@ -2436,6 +2522,7 @@ async def api_stock_alerts(
 async def api_autotrade_config_get(user: dict = Depends(verify_firebase_token)):
     """자동매매 설정 조회 (admin only). 동적 필드(투자잔액/주문건수/장상태) 포함."""
     _ensure_admin(user)
+    cfg = _load_autotrade_config(force=True)  # 항상 최신
     extra: dict = {}
     # 현재 투자 잔액
     try:
@@ -2457,7 +2544,7 @@ async def api_autotrade_config_get(user: dict = Depends(verify_firebase_token)):
     except Exception:
         extra["todayOrderCount"] = 0
     extra["marketOpen"] = _is_market_open_now()
-    return {**_autotrade_config, **extra}
+    return {**cfg, **extra}
 
 
 @app.post("/api/autotrade/config")
@@ -2492,12 +2579,18 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
             raise HTTPException(400, f"allowedStages must be subset of {valid_stages}")
 
     allowed_keys = {"enabled", "maxTotalKRW", "maxPerSymbolKRW", "minScore", "allowedStages"}
+    updates = {}
     changed = {}
+    current_cfg = _load_autotrade_config(force=True)
     for k in allowed_keys:
         if k in body:
-            old = _autotrade_config.get(k)
-            _autotrade_config[k] = body[k]
+            old = current_cfg.get(k)
+            updates[k] = body[k]
             changed[k] = {"old": old, "new": body[k]}
+
+    # Firestore 저장 + 메모리 캐시 갱신
+    if updates:
+        _save_autotrade_config(updates)
 
     # 변경 로그
     if changed:
@@ -2505,6 +2598,7 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
             db = _get_firestore()
             db.collection("events").document().set({
                 "kind": "autotrade_config_change",
+                **{"changes": changed, "by": user.get("email", "")},
                 "payload": {"changes": changed, "by": user.get("email", "")},
                 "created_at": _firestore.SERVER_TIMESTAMP,
             })
@@ -2518,14 +2612,16 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
 async def api_autotrade_kill(user: dict = Depends(verify_firebase_token)):
     """비상 정지: 자동매매 즉시 비활성화 (admin only)."""
     _ensure_admin(user)
-    was_enabled = _autotrade_config.get("enabled", False)
-    _autotrade_config["enabled"] = False
+    was_enabled = _load_autotrade_config(force=True).get("enabled", False)
+    _save_autotrade_config({"enabled": False})  # Firestore + 메모리 즉시 반영
 
     # 비상 정지 로그
     try:
         db = _get_firestore()
         db.collection("events").document().set({
             "kind": "autotrade_kill",
+            "wasEnabled": was_enabled,
+            "by": user.get("email", ""),
             "payload": {
                 "wasEnabled": was_enabled,
                 "by": user.get("email", ""),

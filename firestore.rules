@@ -52,6 +52,13 @@ service cloud.firestore {
     match /paper_positions/{symbol} {
       allow read, write: if false;
     }
+    // 자동매매 중복 방지 + 설정 — 서버 SDK만 접근
+    match /autotrade_processed/{signalId} {
+      allow read, write: if false;
+    }
+    match /settings/{docId} {
+      allow read, write: if false;
+    }
     // 그 외 모든 컬렉션 차단
     match /{document=**} {
       allow read, write: if false;
