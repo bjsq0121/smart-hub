@@ -984,9 +984,12 @@ def _kis_place_order(symbol_code: str, side: str, qty: int, order_type: str = "m
 
 
 def _get_active_autotrade_orders(db) -> list[dict]:
-    """autotrade_orders에서 활성(entered/monitoring) 문서 목록 조회."""
+    """autotrade_orders에서 활성 + 재시도 대상 문서 목록 조회.
+
+    C3: failed/exit_triggered도 포함하여 재시도 기회를 준다.
+    """
     active = []
-    for status_val in ("entered", "monitoring"):
+    for status_val in ("entered", "monitoring", "exit_triggered", "failed"):
         docs = db.collection("autotrade_orders").where("status", "==", status_val).stream()
         for d in docs:
             rec = d.to_dict() or {}
@@ -1020,24 +1023,11 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         except Exception as e:
             _autotrade_log.error(f"event 기록 실패: {e}")
 
-    # 0) signalId 중복 방지 (Firestore 트랜잭션)
+    # 0) signalId 중복 체크 (읽기만 — 마킹은 주문 성공 후)
     if signal_doc_id:
-        proc_ref = db.collection("autotrade_processed").document(signal_doc_id)
         try:
-            @_firestore.transactional
-            def _check_and_mark(txn):
-                snap = proc_ref.get(transaction=txn)
-                if snap.exists:
-                    return False  # 이미 처리됨
-                txn.set(proc_ref, {
-                    "signalId": signal_doc_id,
-                    "symbol": symbol_raw,
-                    "processedAt": _firestore.SERVER_TIMESTAMP,
-                })
-                return True
-            txn = db.transaction()
-            is_new = _check_and_mark(txn)
-            if not is_new:
+            proc_ref = db.collection("autotrade_processed").document(signal_doc_id)
+            if proc_ref.get().exists:
                 _autotrade_log.info(f"autotrade skip: 이미 처리된 시그널: {signal_doc_id}")
                 _log_event("autotrade_skip", {
                     "reason": "duplicate_signal", "symbol": symbol_raw,
@@ -1045,7 +1035,13 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
                 })
                 return
         except Exception as e:
-            _autotrade_log.error(f"autotrade: 중복 체크 실패 (진행): {e}")
+            # fail-closed: 중복 체크 실패 시 주문 안 함 (실돈 안전)
+            _autotrade_log.error(f"autotrade: 중복 체크 실패 → skip: {e}")
+            _log_event("autotrade_error", {
+                "reason": "duplicate_check_failed", "symbol": symbol_raw,
+                "signalId": signal_doc_id, "error": str(e),
+            })
+            return
 
     # 1) enabled 체크
     if not cfg.get("enabled"):
@@ -1238,7 +1234,21 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         _log_event("autotrade_order", {
             **order_detail, "ordNo": result["ordNo"], "msg": result["msg"],
         })
-        # 10) autotrade_orders 문서 생성 (v2 — 모니터링 대상)
+
+        # 10-a) processed 마크 (주문 성공 후에만 — C1 수정)
+        if signal_doc_id:
+            try:
+                db.collection("autotrade_processed").document(signal_doc_id).set({
+                    "signalId": signal_doc_id,
+                    "symbol": symbol_raw,
+                    "symbolCode": symbol_code,
+                    "ordNo": result["ordNo"],
+                    "processedAt": _firestore.SERVER_TIMESTAMP,
+                })
+            except Exception as e:
+                _autotrade_log.error(f"processed 마크 실패 (주문은 이미 나감): {e}")
+
+        # 10-b) autotrade_orders 문서 생성 (v2 — 모니터링 대상)
         try:
             order_doc = {
                 "signalId":    signal_doc_id,
@@ -1246,12 +1256,12 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
                 "symbolName":  symbol_raw,
                 "side":        "buy",
                 "qty":         qty,
-                "entryPrice":  current_price,  # 시장가 주문이므로 현재가를 추정 체결가로 사용
+                "entryPrice":  current_price,
                 "stopLoss":    stop_loss,
                 "targetPrice": target_price,
                 "ordNo":       result["ordNo"],
                 "status":      "entered",
-                "enteredAt":   datetime.now(timezone(timedelta(hours=9))).isoformat(),
+                "enteredAt":   datetime.now(timezone(timedelta(hours=9))),
                 "exitedAt":    None,
                 "exitOrdNo":   None,
                 "exitPrice":   None,
@@ -1264,7 +1274,18 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             db.collection("autotrade_orders").document(signal_doc_id).set(order_doc)
             _autotrade_log.info(f"autotrade_orders 문서 생성: {signal_doc_id}")
         except Exception as e:
-            _autotrade_log.error(f"autotrade_orders 문서 생성 실패: {e}")
+            # W7: 주문은 나갔는데 문서 실패 → 비상 정지 + critical 이벤트
+            _autotrade_log.critical(f"CRITICAL: 주문 성공({result['ordNo']}) but autotrade_orders 생성 실패: {e}")
+            _log_event("autotrade_critical", {
+                **order_detail, "ordNo": result["ordNo"],
+                "reason": "order_doc_creation_failed", "error": str(e),
+            })
+            # 안전장치: 자동매매 즉시 비활성화
+            try:
+                _save_autotrade_config({"enabled": False})
+                _autotrade_log.critical("자동매매 비활성화됨 (문서 생성 실패 안전장치)")
+            except Exception:
+                pass
     else:
         _autotrade_log.warning(f"autotrade 주문 실패: {result['msg']}")
         _log_event("autotrade_error", {
@@ -1276,6 +1297,29 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
 
 # ── 자동매매 모니터링 루프 (v2) ─────────────────────────────────
 _monitor_task: asyncio.Task | None = None
+_autotrade_lock = asyncio.Lock()  # C5: 동시 시그널 직렬화
+
+
+async def _safe_autotrade_on_signal(norm: dict, signal_doc_id: str):
+    """C4: ensure_future 예외 래퍼 + C5: 동시성 보호."""
+    async with _autotrade_lock:
+        try:
+            await _autotrade_on_signal(norm, signal_doc_id)
+        except Exception as e:
+            _autotrade_log.error(f"autotrade 미처리 예외: {e}", exc_info=True)
+            try:
+                db = _get_firestore()
+                db.collection("events").document().set({
+                    "kind": "autotrade_unhandled_error",
+                    "signalId": signal_doc_id,
+                    "symbol": norm.get("symbol", ""),
+                    "error": str(e),
+                    "errorType": type(e).__name__,
+                    "payload": {"signalId": signal_doc_id, "error": str(e)},
+                    "created_at": _firestore.SERVER_TIMESTAMP,
+                })
+            except Exception:
+                pass
 
 
 async def _autotrade_monitor_loop():
@@ -1337,18 +1381,27 @@ async def _autotrade_monitor_loop():
                 exit_reason = None
                 pnl_pct = (current_price - entry_price) / entry_price * 100
 
-                # 보유 기간 계산 (영업일)
+                # 보유 기간 계산 (영업일) — R7: 문자열/datetime 양쪽 파싱
                 entered_at = order.get("enteredAt")
                 hold_days = 0
-                if entered_at and hasattr(entered_at, "date"):
-                    from datetime import date as _date_type
-                    entry_date = entered_at.date() if hasattr(entered_at, "date") else entered_at
-                    today_date = datetime.now(timezone(timedelta(hours=9))).date()
-                    d = entry_date
-                    while d < today_date:
-                        d += timedelta(days=1)
-                        if d.weekday() < 5 and not _is_kr_holiday(d):
-                            hold_days += 1
+                if entered_at:
+                    try:
+                        if isinstance(entered_at, str):
+                            entry_dt = datetime.fromisoformat(entered_at)
+                        elif hasattr(entered_at, "date"):
+                            entry_dt = entered_at
+                        else:
+                            entry_dt = None
+                        if entry_dt:
+                            entry_date = entry_dt.date() if hasattr(entry_dt, "date") else entry_dt
+                            today_date = datetime.now(timezone(timedelta(hours=9))).date()
+                            d = entry_date
+                            while d < today_date:
+                                d += timedelta(days=1)
+                                if d.weekday() < 5 and not _is_kr_holiday(d):
+                                    hold_days += 1
+                    except (ValueError, TypeError):
+                        hold_days = 0
 
                 # 조건 체크 (우선순위: 손절 > 익절 > 강제손실한도 > 보유기간 초과)
                 if sl > 0 and current_price <= sl:
@@ -1472,13 +1525,36 @@ async def _autotrade_monitor_loop():
         await asyncio.sleep(60)
 
 
+async def _autotrade_monitor_watchdog():
+    """C2: 모니터링 루프 watchdog — 루프가 죽으면 재시작."""
+    global _monitor_task
+    while True:
+        await asyncio.sleep(120)  # 2분마다 체크
+        if _monitor_task is None or _monitor_task.done():
+            exc = _monitor_task.exception() if _monitor_task and _monitor_task.done() else None
+            _autotrade_log.critical(f"monitor loop DEAD, restarting. exc={exc}")
+            try:
+                db = _get_firestore()
+                db.collection("events").document().set({
+                    "kind": "autotrade_monitor_restart",
+                    "error": str(exc) if exc else "task done unexpectedly",
+                    "payload": {"error": str(exc)},
+                    "created_at": _firestore.SERVER_TIMESTAMP,
+                })
+            except Exception:
+                pass
+            _monitor_task = asyncio.create_task(_autotrade_monitor_loop())
+
+
 @app.on_event("startup")
 async def _start_autotrade_monitor():
-    """서버 시작 시 모니터링 루프 1개 생성 (중복 방지)."""
+    """서버 시작 시 모니터링 루프 + watchdog 생성."""
     global _monitor_task
     if _monitor_task is None or _monitor_task.done():
         _monitor_task = asyncio.create_task(_autotrade_monitor_loop())
         _autotrade_log.info("autotrade monitor task created on startup")
+    asyncio.create_task(_autotrade_monitor_watchdog())
+    _autotrade_log.info("autotrade monitor watchdog created")
 
 
 # ── 자동매매 주문 조회 엔드포인트 (v2) ──────────────────────────
@@ -2585,7 +2661,7 @@ async def webhook_ingest(env: IngestEnvelope):
                 ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
                 # 자동매매 훅 (백그라운드)
                 if _autotrade_config.get("enabled"):
-                    asyncio.ensure_future(_autotrade_on_signal(norm, ref.id))
+                    asyncio.ensure_future(_safe_autotrade_on_signal(norm, ref.id))
             else:
                 norm = _normalize_signal(env.payload)
                 if not norm["symbol"]:
@@ -2648,7 +2724,7 @@ async def webhook_ingest(env: IngestEnvelope):
             ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
             # 자동매매 훅 (백그라운드)
             if _autotrade_config.get("enabled"):
-                asyncio.ensure_future(_autotrade_on_signal(norm, ref.id))
+                asyncio.ensure_future(_safe_autotrade_on_signal(norm, ref.id))
         elif env.kind == "stock_alert":
             doc = {
                 "alertType": env.payload.get("alertType") or env.payload.get("alert_type", "info"),
