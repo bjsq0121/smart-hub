@@ -3198,9 +3198,10 @@ async def api_trade_results(
     source: str | None = Query(default=None),
     after: str | None = Query(default=None),
     before: str | None = Query(default=None),
+    strategy_version: str | None = Query(default=None, alias="strategyVersion"),
     user: dict = Depends(verify_firebase_token),
 ):
-    """종료 결과 목록 (최근순). source: n8n|backtest, after/before: ISO8601."""
+    """종료 결과 목록 (최근순). source: n8n|backtest, strategyVersion: v1|v2_atr 등."""
     try:
         db = _get_firestore()
         q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
@@ -3215,6 +3216,9 @@ async def api_trade_results(
             items = [i for i in items if (i.get("occurredAt") or i.get("created_at", "")) >= after]
         if before:
             items = [i for i in items if (i.get("occurredAt") or i.get("created_at", "")) <= before]
+        # 백테스트 버전 필터 (strategy_version 태그가 있는 결과만)
+        if strategy_version:
+            items = [i for i in items if i.get("strategyVersion") == strategy_version]
         return {"items": items}
     except Exception:
         return {"items": [], "error": "trade_results 조회 실패"}
@@ -3585,9 +3589,10 @@ async def api_performance(
     after: str | None = Query(default=None),
     before: str | None = Query(default=None),
     excludeSymbols: str | None = Query(default=None),   # "SOL,DOGE" 쉼표 구분
+    strategy_version: str | None = Query(default=None, alias="strategyVersion"),
     user: dict = Depends(verify_firebase_token),
 ):
-    """성과 요약 — trade_results 기반 서버 계산. source/symbol/direction/기간/제외 필터."""
+    """성과 요약 — trade_results 기반 서버 계산. source/symbol/direction/기간/제외/버전 필터."""
     try:
         db = _get_firestore()
         q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
@@ -3612,6 +3617,9 @@ async def api_performance(
         if excludeSymbols:
             ex_set = {s.strip().upper() for s in excludeSymbols.split(",") if s.strip()}
             results = [r for r in results if r.get("symbol", "").upper().replace("/KRW", "").replace("KRW-", "") not in ex_set]
+        # 백테스트 버전 필터
+        if strategy_version:
+            results = [r for r in results if r.get("strategyVersion") == strategy_version]
 
         overall = _compute_perf_stats(results)
 

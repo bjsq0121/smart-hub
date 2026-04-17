@@ -147,16 +147,28 @@ let opsResultSource = '';       // 결과 source 필터: '' | 'n8n' | 'backtest'
 let opsBtPeriod = '';           // 백테스트 기간: '' | '1m' | '3m' | '6m'
 let opsStrategy = '';           // 전략 필터 (코인+방향): '' | 'XRP_SHORT' | 'BTC_LONG' 등
 let opsPnlSymbol = '';          // PnL 차트 종목 필터: '' | 'BTC' | 'ETH' 등
+let opsStrategyVersion = '';    // 백테스트 버전 필터: '' | 'v1' | 'v2_atr' 등
+window.setStrategyVersion = (v) => { opsStrategyVersion = v; loadOps(); };
 let _pnlChartInstance = null;   // Chart.js 인스턴스 (메모리 릭 방지)
 let _engineConfigNewRows = 0;   // 엔진 설정 신규 행 카운터
 
 // ── 전략 분류 (코인+방향 → 상태) ──
 const STRATEGY_STATUS = {
-  'XRP_SHORT':  'live',      // 실전 후보
-  'BTC_LONG':   'research',  // 연구용
-  'ETH_LONG':   'research',  // 연구용
-  'SOL_LONG':   'excluded',  // 제외
-  'SOL_SHORT':  'excluded',
+  'BTC_LONG':   'live',      // 백테스트 승률 75%, 월 +11%
+  'ETH_LONG':   'live',      // 백테스트 승률 58%, 월 +5%
+  'XRP_SHORT':  'research',  // 현 전략 안 맞음 (19%), 격하
+  'SOL_LONG':   'research',
+  'ADA_LONG':   'research',
+  'DOT_LONG':   'research',
+  'DOT_SHORT':  'research',
+  'AVAX_LONG':  'research',
+  'AVAX_SHORT': 'research',
+  'LINK_LONG':  'research',
+  'LINK_SHORT': 'research',
+  'ATOM_LONG':  'research',
+  'ATOM_SHORT': 'research',
+  'TRX_LONG':   'research',  // 신규
+  'TRX_SHORT':  'research',
   'DOGE_LONG':  'excluded',
   'DOGE_SHORT': 'excluded',
 };
@@ -237,6 +249,13 @@ async function loadOps() {
       pnlQ += '&source=' + opsPerfSource;
     }
     if (opsPnlSymbol) pnlQ += '&symbol=' + opsPnlSymbol;
+    // 백테스트 버전 필터 연동
+    if (opsStrategyVersion) {
+      perfQ += '&strategyVersion=' + opsStrategyVersion;
+      resQ += '&strategyVersion=' + opsStrategyVersion;
+      bySymQ += (bySymQ.includes('?') ? '&' : '?') + 'strategyVersion=' + opsStrategyVersion;
+      pnlQ += '&strategyVersion=' + opsStrategyVersion;
+    }
 
     const [sig, tr, res, perf, sys, hb, bySym, pnlSeries] = await Promise.all([
       safe(fetch('/api/signals?limit=50',                    { headers: hdrs })),
@@ -932,7 +951,11 @@ function renderPerf() {
         chip(opsBtPeriod === '', "setBtPeriod('')", null, '전체 기간') +
         chip(opsBtPeriod === '1m', "setBtPeriod('1m')", null, '1개월') +
         chip(opsBtPeriod === '3m', "setBtPeriod('3m')", null, '3개월') +
-        chip(opsBtPeriod === '6m', "setBtPeriod('6m')", null, '6개월')
+        chip(opsBtPeriod === '6m', "setBtPeriod('6m')", null, '6개월') +
+        sep +
+        chip(!opsStrategyVersion, "setStrategyVersion('')", null, '전체 버전') +
+        chip(opsStrategyVersion === 'v1', "setStrategyVersion('v1')", 'slate', 'v1 (구)') +
+        chip(opsStrategyVersion === 'v2_atr', "setStrategyVersion('v2_atr')", 'violet', 'v2 ATR')
        : ''}
     </div>`;
 
