@@ -207,6 +207,24 @@ const OPS_REFRESH_MS = 30 * 1000;   // 30초
 //   syncBadge, itemStatusBadge, pnlColor, resultBadge, sysStatusBadge,
 //   directionBadge, stageBadge, emptyState, diagnose)
 
+// exitReason 한국어 라벨 + 색상
+const EXIT_REASON_MAP = {
+  'stop_loss':       { label: '손절', color: 'rose' },
+  'take_profit':     { label: '익절', color: 'emerald' },
+  'time_decay_6h':   { label: '시간감쇠 6h', color: 'amber' },
+  'time_decay_12h':  { label: '시간감쇠 12h', color: 'amber' },
+  'max_loss':        { label: '강제청산', color: 'rose' },
+  'hold_expired':    { label: '보유만료', color: 'slate' },
+  'market_close':    { label: '장마감', color: 'slate' },
+  'manual':          { label: '수동', color: 'sky' },
+};
+function fmtExitReason(reason) {
+  if (!reason) return '<span class="text-slate-500">-</span>';
+  const m = EXIT_REASON_MAP[reason];
+  if (m) return `<span class="px-1.5 py-0.5 rounded text-[10px] bg-${m.color}-500/20 text-${m.color}-400">${m.label}</span>`;
+  return `<span class="text-slate-400">${reason}</span>`;
+}
+
 // ── ── loadOps: 5개 API 병렬 호출 + 갱신 시각 + stale 경고 + 자동 새로고침 ──
 async function loadOps() {
   const hdrs = await authHeaders();
@@ -597,7 +615,7 @@ function renderResults() {
               <td class="${TD_CLS} text-emerald-400 text-xs">${r.maxFavorable ? fmtPct(r.maxFavorable) : '-'}</td>
               <td class="${TD_CLS} text-rose-400 text-xs">${r.maxAdverse ? fmtPct(r.maxAdverse) : '-'}</td>
               <td class="${TD_CLS} text-xs text-slate-400">${r.holdTimeMin ? fmtHold(r.holdTimeMin) : '-'}</td>
-              <td class="${TD_CLS} text-xs text-slate-400">${esc(r.exitReason)}</td>
+              <td class="${TD_CLS} text-xs">${fmtExitReason(r.exitReason)}</td>
               <td class="${TD_CLS} text-slate-300">${fmtKRW(r.entryPrice)}</td>
               <td class="${TD_CLS} text-slate-300">${fmtKRW(r.exitPrice)}</td>
               <td class="${TD_CLS} text-xs text-slate-500">${fmtRel(r.exitAt || r.created_at)}</td>
