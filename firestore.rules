@@ -60,6 +60,13 @@ service cloud.firestore {
     match /autotrade_orders/{orderId} {
       allow read, write: if false;
     }
+    // 코인 자동매매 — 서버 SDK만 접근
+    match /coin_autotrade_orders/{orderId} {
+      allow read, write: if false;
+    }
+    match /coin_autotrade_processed/{signalId} {
+      allow read, write: if false;
+    }
     match /settings/{docId} {
       allow read, write: if false;
     }

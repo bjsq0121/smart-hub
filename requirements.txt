@@ -9,3 +9,4 @@ google-cloud-aiplatform==1.71.1
 google-cloud-firestore==2.19.0
 google-auth==2.36.0
 firebase-admin==6.6.0
+PyJWT==2.9.0

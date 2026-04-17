@@ -152,6 +152,538 @@ window.setStrategyVersion = (v) => { opsStrategyVersion = v; loadOps(); };
 let _pnlChartInstance = null;   // Chart.js 인스턴스 (메모리 릭 방지)
 let _engineConfigNewRows = 0;   // 엔진 설정 신규 행 카운터
 
+/* ══════════════════════════════════════════════════════════════
+   코인 자동매매 상태 & 함수
+══════════════════════════════════════════════════════════════ */
+const coinAutoState = {
+  config: null,
+  configErr: null,
+  logs: null,
+  logsErr: null,
+  pollingTimer: null,
+  settingsOpen: false,
+  saving: false,
+  killing: false,
+  killModalOpen: false,
+  killConfirmChecked: false,
+  enableModalOpen: false,
+  enableConfirmChecked: false,
+};
+const COIN_AT_POLL_MS = 30_000;
+
+// fetch helper (coin-ops 전용, 주식운영 apiFetch와 동일 패턴)
+async function coinApiFetch(url, opts) {
+  const hdrs = typeof authHeaders === 'function' ? await authHeaders() : {};
+  const init = Object.assign({}, opts || {});
+  init.headers = Object.assign({}, hdrs, (opts && opts.headers) || {});
+  if (init.body && typeof init.body !== 'string') {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(init.body);
+  }
+  const r = await fetch(url, init);
+  let body = null;
+  try { body = await r.json(); } catch (_) { body = null; }
+  return { ok: r.ok, status: r.status, body: body || {} };
+}
+
+// toast (coin-ops 전용)
+function coinToast(msg) {
+  let toast = document.getElementById('coin-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'coin-toast';
+    toast.className = 'stk-toast hide';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.remove('hide');
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => toast.classList.add('hide'), 4000);
+}
+
+async function loadCoinAutoConfig() {
+  try {
+    const r = await coinApiFetch('/api/coin/autotrade/config');
+    if (!r.ok) {
+      coinAutoState.config = null;
+      coinAutoState.configErr = { status: r.status, detail: (r.body && (r.body.detail || r.body.error)) || ('HTTP ' + r.status) };
+    } else {
+      coinAutoState.config = r.body;
+      coinAutoState.configErr = null;
+    }
+  } catch (e) {
+    coinAutoState.config = null;
+    coinAutoState.configErr = { status: 0, detail: '네트워크 오류' };
+  }
+  await loadCoinAutoLogs();
+  renderCoinAutoSection();
+}
+
+async function loadCoinAutoLogs() {
+  try {
+    const r = await coinApiFetch('/api/events?kind=coin_autotrade_order&limit=5');
+    if (!r.ok) {
+      coinAutoState.logs = null;
+      coinAutoState.logsErr = '로그 조회 실패';
+    } else {
+      let items = (r.body && r.body.items) || [];
+      // error + skip 도 가져와서 합침
+      try {
+        const [r2, r3] = await Promise.all([
+          coinApiFetch('/api/events?kind=coin_autotrade_error&limit=5'),
+          coinApiFetch('/api/events?kind=coin_autotrade_skip&limit=5'),
+        ]);
+        if (r2.ok && r2.body && r2.body.items) items = items.concat(r2.body.items);
+        if (r3.ok && r3.body && r3.body.items) items = items.concat(r3.body.items);
+      } catch (_) { /* ignore */ }
+      items.sort((a, b) => {
+        const ta = a.created_at || a.createdAt || '';
+        const tb = b.created_at || b.createdAt || '';
+        return tb < ta ? -1 : tb > ta ? 1 : 0;
+      });
+      coinAutoState.logs = items.slice(0, 5);
+      coinAutoState.logsErr = null;
+    }
+  } catch (e) {
+    coinAutoState.logs = null;
+    coinAutoState.logsErr = '네트워크 오류';
+  }
+}
+
+function startCoinAutoPolling() {
+  if (coinAutoState.pollingTimer) clearInterval(coinAutoState.pollingTimer);
+  coinAutoState.pollingTimer = setInterval(() => {
+    const pane = document.getElementById('ops-pane-signals');
+    if (!pane || !pane.classList.contains('active')) return;
+    loadCoinAutoConfig();
+  }, COIN_AT_POLL_MS);
+}
+
+async function toggleCoinAuto(enabled) {
+  if (enabled) {
+    // ON → 확인 모달 열기
+    coinAutoState.enableModalOpen = true;
+    coinAutoState.enableConfirmChecked = false;
+    renderCoinAutoSection();
+    return;
+  }
+  // OFF → 즉시 반영
+  if (coinAutoState.config) coinAutoState.config.enabled = false;
+  renderCoinAutoSection();
+  try {
+    const r = await coinApiFetch('/api/coin/autotrade/config', { method: 'POST', body: { enabled: false } });
+    if (r.ok && r.body && r.body.config) {
+      coinAutoState.config = r.body.config;
+      coinAutoState.configErr = null;
+    } else {
+      await loadCoinAutoConfig();
+    }
+  } catch (e) {
+    await loadCoinAutoConfig();
+  }
+  renderCoinAutoSection();
+}
+
+async function confirmEnableCoinAuto() {
+  coinAutoState.enableModalOpen = false;
+  coinAutoState.enableConfirmChecked = false;
+  if (coinAutoState.config) coinAutoState.config.enabled = true;
+  renderCoinAutoSection();
+  try {
+    const r = await coinApiFetch('/api/coin/autotrade/config', { method: 'POST', body: { enabled: true } });
+    if (r.ok && r.body && r.body.config) {
+      coinAutoState.config = r.body.config;
+      coinAutoState.configErr = null;
+    } else {
+      await loadCoinAutoConfig();
+    }
+  } catch (e) {
+    await loadCoinAutoConfig();
+  }
+  renderCoinAutoSection();
+}
+
+async function killCoinAuto() {
+  coinAutoState.killing = true;
+  renderCoinAutoSection();
+  try {
+    const r = await coinApiFetch('/api/coin/autotrade/kill', { method: 'POST' });
+    if (r.ok) {
+      if (coinAutoState.config) coinAutoState.config.enabled = false;
+      coinToast('코인 자동매매가 즉시 중단되었습니다.');
+    } else {
+      coinToast('비상 정지 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
+    }
+  } catch (e) {
+    coinToast('비상 정지 실패: 네트워크 오류');
+  }
+  coinAutoState.killing = false;
+  coinAutoState.killModalOpen = false;
+  coinAutoState.killConfirmChecked = false;
+  await loadCoinAutoConfig();
+}
+
+async function saveCoinAutoConfig(form) {
+  coinAutoState.saving = true;
+  renderCoinAutoSection();
+  try {
+    const payload = {};
+    if (form.maxTotalKRW !== undefined) payload.maxTotalKRW = Number(form.maxTotalKRW);
+    if (form.maxPerSymbolKRW !== undefined) payload.maxPerSymbolKRW = Number(form.maxPerSymbolKRW);
+    if (form.minScore !== undefined) payload.minScore = Number(form.minScore);
+    if (form.maxConcurrentPositions !== undefined) payload.maxConcurrentPositions = Number(form.maxConcurrentPositions);
+    if (form.maxHoldHours !== undefined) payload.maxHoldHours = Number(form.maxHoldHours);
+    if (form.maxDailyLossPct !== undefined) payload.maxDailyLossPct = Number(form.maxDailyLossPct);
+    const r = await coinApiFetch('/api/coin/autotrade/config', { method: 'POST', body: payload });
+    if (r.ok && r.body && r.body.config) {
+      coinAutoState.config = r.body.config;
+      coinAutoState.configErr = null;
+      coinAutoState.settingsOpen = false;
+      coinToast('코인 자동매매 설정이 저장되었습니다.');
+    } else {
+      coinToast('설정 저장 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
+    }
+  } catch (e) {
+    coinToast('설정 저장 실패: 네트워크 오류');
+  }
+  coinAutoState.saving = false;
+  renderCoinAutoSection();
+}
+
+function renderCoinAutoSection() {
+  const el = document.getElementById('coin-autotrade-section');
+  if (!el) return;
+  el.innerHTML = renderCoinAutoCard();
+  bindCoinAutoHandlers();
+}
+
+function renderCoinAutoCard() {
+  const cfg = coinAutoState.config;
+  const err = coinAutoState.configErr;
+
+  // 503 → 업비트 연동 미설정
+  if (err && err.status === 503) {
+    return `
+      <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
+        </div>
+        <div class="text-xs text-slate-500">업비트 연동 미설정 — API 키 설정이 필요합니다.</div>
+      </div>`;
+  }
+
+  // 기타 에러
+  if (err || !cfg) {
+    return `
+      <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
+        </div>
+        <div class="text-xs text-slate-500">${esc((err && err.detail) || '설정 조회 실패')}</div>
+      </div>`;
+  }
+
+  const enabled = !!cfg.enabled;
+  const statusChip = enabled
+    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">자동매매 ON</span>'
+    : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400 border border-slate-600/30">OFF</span>';
+
+  const toggleHtml = `
+    <button id="coin-at-toggle" class="relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-emerald-500/80' : 'bg-slate-600'}" title="${enabled ? '자동매매 끄기' : '자동매매 켜기'}">
+      <span class="inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}"></span>
+    </button>`;
+
+  const killBtn = `<button id="coin-at-kill" class="px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${enabled ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 hover:bg-rose-500/25' : 'bg-slate-800/30 text-slate-500 border-slate-700/40 cursor-not-allowed'}" ${enabled ? '' : 'disabled'}>비상 정지</button>`;
+
+  // 설정값
+  const maxTotal = cfg.maxTotalKRW != null ? cfg.maxTotalKRW : 0;
+  const maxPer = cfg.maxPerSymbolKRW != null ? cfg.maxPerSymbolKRW : 0;
+  const minScore = cfg.minScore != null ? cfg.minScore : 0;
+  const maxPos = cfg.maxConcurrentPositions != null ? cfg.maxConcurrentPositions : 0;
+  const maxHold = cfg.maxHoldHours != null ? cfg.maxHoldHours : 0;
+  const maxDailyLoss = cfg.maxDailyLossPct != null ? cfg.maxDailyLossPct : 0;
+  const currentInvested = cfg.currentInvestedKRW != null ? cfg.currentInvestedKRW : 0;
+  const activePos = cfg.activePositionCount != null ? cfg.activePositionCount : 0;
+  const todayPnl = cfg.todayPnlPct != null ? cfg.todayPnlPct : 0;
+  const todayPnlKRW = cfg.todayPnlKRW != null ? cfg.todayPnlKRW : 0;
+  const upbitOk = !!cfg.upbitConfigured;
+
+  // 진행 바
+  const pct = maxTotal > 0 ? Math.min(100, (currentInvested / maxTotal) * 100) : 0;
+  const barColor = pct > 80 ? 'bg-rose-400' : pct > 50 ? 'bg-amber-400' : 'bg-emerald-400';
+  const fmt = (v) => typeof fmtKRW === 'function' ? fmtKRW(v) : v.toLocaleString() + '원';
+
+  const progressBar = `
+    <div class="mt-3">
+      <div class="flex items-center justify-between text-[10px] text-slate-500 mb-1">
+        <span>투자 잔액</span>
+        <span>${esc(fmt(currentInvested))} / ${esc(fmt(maxTotal))}</span>
+      </div>
+      <div class="w-full h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
+        <div class="${barColor} h-full rounded-full transition-all" style="width:${pct.toFixed(1)}%"></div>
+      </div>
+    </div>`;
+
+  // PnL 색상
+  const pnlColor = todayPnl > 0 ? 'emerald' : todayPnl < 0 ? 'rose' : 'slate';
+  const pnlSign = todayPnl >= 0 ? '+' : '';
+
+  // 설정 요약
+  const statsRow = `
+    <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-slate-500">
+      <span>종목당 ${esc(fmt(maxPer))}</span>
+      <span>최소 점수 ${minScore}</span>
+      <span>동시 ${maxPos}개</span>
+      <span>보유 ${maxHold}h</span>
+      <span>활성 포지션 ${activePos}개</span>
+      <span class="text-${pnlColor}-400">오늘 ${pnlSign}${todayPnl.toFixed(2)}% (${pnlSign}${fmt(todayPnlKRW)})</span>
+      <span>${upbitOk
+        ? '<span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>업비트 연동</span>'
+        : '<span class="text-amber-400">업비트 미연동</span>'}</span>
+      <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-sky-400 inline-block"></span>24시간</span>
+    </div>`;
+
+  // 설정 편집 폼
+  let settingsForm = '';
+  if (coinAutoState.settingsOpen) {
+    settingsForm = `
+      <div class="mt-3 pt-3 border-t border-slate-700/40">
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">총 한도 (원)</label>
+            <input id="coin-at-maxTotal" type="number" value="${maxTotal}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">종목당 한도 (원)</label>
+            <input id="coin-at-maxPer" type="number" value="${maxPer}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">최소 점수</label>
+            <input id="coin-at-minScore" type="number" step="1" min="0" max="100" value="${minScore}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+        </div>
+        <div class="grid grid-cols-3 gap-2 mb-2">
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">동시 포지션 수</label>
+            <input id="coin-at-maxPos" type="number" min="1" max="20" value="${maxPos}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">보유 시간 (h)</label>
+            <input id="coin-at-maxHold" type="number" min="1" max="168" value="${maxHold}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+          <div>
+            <label class="text-[10px] text-slate-500 block mb-0.5">일일 손실 한도 (%)</label>
+            <input id="coin-at-maxLoss" type="number" step="0.1" min="-100" max="0" value="${maxDailyLoss}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="coin-at-save" class="px-3 py-1 rounded text-[10px] font-semibold bg-sky-500/20 text-sky-300 border border-sky-500/30 hover:bg-sky-500/30 transition-colors" ${coinAutoState.saving ? 'disabled' : ''}>${coinAutoState.saving ? '저장 중...' : '저장'}</button>
+          <button id="coin-at-cancel" class="px-3 py-1 rounded text-[10px] text-slate-500 hover:text-slate-300 transition-colors">취소</button>
+        </div>
+      </div>`;
+  } else {
+    settingsForm = `
+      <div class="mt-2">
+        <button id="coin-at-open-settings" class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors underline underline-offset-2">설정 변경</button>
+      </div>`;
+  }
+
+  // 로그 섹션
+  let logsHtml = '';
+  if (coinAutoState.logs && coinAutoState.logs.length > 0) {
+    const logRows = coinAutoState.logs.map(log => {
+      const kind = log.kind || '';
+      const isError = kind.includes('error');
+      const isSkip = kind.includes('skip');
+      const ts = log.created_at || log.createdAt || '';
+      const tsStr = ts ? (typeof fmtRel === 'function' ? fmtRel(ts) : new Date(ts).toLocaleString()) : '—';
+      const symbol = log.symbol || (log.data && log.data.symbol) || '';
+      const msg = isError
+        ? (log.error || (log.data && log.data.error) || '오류')
+        : isSkip
+          ? (log.reason || (log.data && log.data.reason) || '건너뜀')
+          : (log.symbol_name || (log.data && log.data.symbol_name) || symbol || '주문');
+      const chipCls = isError ? 'text-rose-400' : isSkip ? 'text-slate-400' : 'text-emerald-400';
+      const chipLabel = isError ? 'ERR' : isSkip ? 'SKIP' : 'BUY';
+      return `<div class="flex items-center gap-2 text-[10px] py-0.5">
+        <span class="${chipCls} font-semibold w-8 shrink-0">${chipLabel}</span>
+        <span class="text-slate-300 truncate flex-1">${esc(msg)}</span>
+        <span class="text-slate-600 shrink-0">${esc(tsStr)}</span>
+      </div>`;
+    }).join('');
+    logsHtml = `
+      <div class="mt-3 pt-3 border-t border-slate-700/40">
+        <div class="text-[10px] text-slate-500 mb-1">최근 자동매매</div>
+        ${logRows}
+      </div>`;
+  } else if (coinAutoState.logsErr) {
+    logsHtml = `
+      <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
+        로그는 이벤트 탭에서 확인
+      </div>`;
+  } else {
+    logsHtml = `
+      <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
+        자동매매 기록 없음
+      </div>`;
+  }
+
+  // 비상 정지 모달
+  let killModal = '';
+  if (coinAutoState.killModalOpen) {
+    killModal = `
+      <div id="coin-kill-modal" class="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60">
+        <div class="rounded-xl border border-slate-700/50 bg-slate-900 p-5 w-80 shadow-2xl">
+          <div class="text-sm font-medium text-slate-200 mb-3">코인 자동매매를 즉시 중단합니다.</div>
+          <div class="text-xs text-slate-400 mb-4">진행하시겠습니까?</div>
+          <label class="flex items-center gap-2 text-xs text-slate-400 mb-4 cursor-pointer select-none">
+            <input type="checkbox" id="coin-kill-check" class="rounded border-slate-600" ${coinAutoState.killConfirmChecked ? 'checked' : ''} />
+            <span>비상 정지를 확인합니다</span>
+          </label>
+          <div class="flex items-center gap-2">
+            <button id="coin-kill-confirm" class="px-3 py-1.5 rounded text-xs font-semibold transition-colors ${coinAutoState.killConfirmChecked ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 hover:bg-rose-500/30' : 'bg-slate-800 text-slate-600 border border-slate-700/40 cursor-not-allowed'}" ${coinAutoState.killConfirmChecked && !coinAutoState.killing ? '' : 'disabled'}>${coinAutoState.killing ? '중단 중...' : '비상 정지 실행'}</button>
+            <button id="coin-kill-cancel" class="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors">취소</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // ON 활성화 확인 모달
+  let enableModal = '';
+  if (coinAutoState.enableModalOpen) {
+    enableModal = `
+      <div id="coin-enable-modal" class="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60">
+        <div class="rounded-xl border border-slate-700/50 bg-slate-900 p-5 w-80 shadow-2xl">
+          <div class="text-sm font-medium text-slate-200 mb-3">코인 자동매매를 켭니다.</div>
+          <div class="text-xs text-slate-400 mb-4">24시간 자동 거래됩니다. 활성화하시겠습니까?</div>
+          <label class="flex items-center gap-2 text-xs text-slate-400 mb-4 cursor-pointer select-none">
+            <input type="checkbox" id="coin-enable-check" class="rounded border-slate-600" ${coinAutoState.enableConfirmChecked ? 'checked' : ''} />
+            <span>24시간 자동 거래에 동의합니다</span>
+          </label>
+          <div class="flex items-center gap-2">
+            <button id="coin-enable-confirm" class="px-3 py-1.5 rounded text-xs font-semibold transition-colors ${coinAutoState.enableConfirmChecked ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' : 'bg-slate-800 text-slate-600 border border-slate-700/40 cursor-not-allowed'}" ${coinAutoState.enableConfirmChecked ? '' : 'disabled'}>자동매매 활성화</button>
+            <button id="coin-enable-cancel" class="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors">취소</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  return `
+    <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
+      <div class="flex items-center justify-between mb-1">
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          ${statusChip}
+        </div>
+        <div class="flex items-center gap-2">
+          ${killBtn}
+          ${toggleHtml}
+        </div>
+      </div>
+      ${progressBar}
+      ${statsRow}
+      ${settingsForm}
+      ${logsHtml}
+    </div>${killModal}${enableModal}`;
+}
+
+function bindCoinAutoHandlers() {
+  // 토글
+  const toggleBtn = document.getElementById('coin-at-toggle');
+  if (toggleBtn) {
+    toggleBtn.onclick = () => {
+      const current = coinAutoState.config ? !!coinAutoState.config.enabled : false;
+      toggleCoinAuto(!current);
+    };
+  }
+
+  // 비상 정지 → 모달
+  const killBtn = document.getElementById('coin-at-kill');
+  if (killBtn && !killBtn.disabled) {
+    killBtn.onclick = () => {
+      coinAutoState.killModalOpen = true;
+      coinAutoState.killConfirmChecked = false;
+      renderCoinAutoSection();
+    };
+  }
+
+  // 비상 정지 모달 핸들러
+  const killCheck = document.getElementById('coin-kill-check');
+  if (killCheck) {
+    killCheck.onchange = () => {
+      coinAutoState.killConfirmChecked = killCheck.checked;
+      renderCoinAutoSection();
+    };
+  }
+  const killConfirm = document.getElementById('coin-kill-confirm');
+  if (killConfirm && !killConfirm.disabled) {
+    killConfirm.onclick = () => killCoinAuto();
+  }
+  const killCancel = document.getElementById('coin-kill-cancel');
+  if (killCancel) {
+    killCancel.onclick = () => {
+      coinAutoState.killModalOpen = false;
+      coinAutoState.killConfirmChecked = false;
+      renderCoinAutoSection();
+    };
+  }
+
+  // ON 확인 모달 핸들러
+  const enableCheck = document.getElementById('coin-enable-check');
+  if (enableCheck) {
+    enableCheck.onchange = () => {
+      coinAutoState.enableConfirmChecked = enableCheck.checked;
+      renderCoinAutoSection();
+    };
+  }
+  const enableConfirm = document.getElementById('coin-enable-confirm');
+  if (enableConfirm && !enableConfirm.disabled) {
+    enableConfirm.onclick = () => confirmEnableCoinAuto();
+  }
+  const enableCancel = document.getElementById('coin-enable-cancel');
+  if (enableCancel) {
+    enableCancel.onclick = () => {
+      coinAutoState.enableModalOpen = false;
+      coinAutoState.enableConfirmChecked = false;
+      renderCoinAutoSection();
+    };
+  }
+
+  // 설정 열기/닫기
+  const openSettings = document.getElementById('coin-at-open-settings');
+  if (openSettings) {
+    openSettings.onclick = () => {
+      coinAutoState.settingsOpen = true;
+      renderCoinAutoSection();
+    };
+  }
+  const cancelSettings = document.getElementById('coin-at-cancel');
+  if (cancelSettings) {
+    cancelSettings.onclick = () => {
+      coinAutoState.settingsOpen = false;
+      renderCoinAutoSection();
+    };
+  }
+
+  // 설정 저장
+  const saveBtn = document.getElementById('coin-at-save');
+  if (saveBtn) {
+    saveBtn.onclick = () => {
+      const form = {};
+      const el = (id) => document.getElementById(id);
+      if (el('coin-at-maxTotal')) form.maxTotalKRW = el('coin-at-maxTotal').value;
+      if (el('coin-at-maxPer')) form.maxPerSymbolKRW = el('coin-at-maxPer').value;
+      if (el('coin-at-minScore')) form.minScore = el('coin-at-minScore').value;
+      if (el('coin-at-maxPos')) form.maxConcurrentPositions = el('coin-at-maxPos').value;
+      if (el('coin-at-maxHold')) form.maxHoldHours = el('coin-at-maxHold').value;
+      if (el('coin-at-maxLoss')) form.maxDailyLossPct = el('coin-at-maxLoss').value;
+      saveCoinAutoConfig(form);
+    };
+  }
+}
+
 // ── 전략 분류 (코인+방향 → 상태) ──
 const STRATEGY_STATUS = {
   'BTC_LONG':   'live',      // 백테스트 승률 75%, 월 +11%
@@ -300,6 +832,8 @@ async function loadOps() {
   renderPerf();
   renderEngineConfig();
   renderSystem();
+  loadCoinAutoConfig();
+  startCoinAutoPolling();
   startOpsAutoRefresh();
 }
 
