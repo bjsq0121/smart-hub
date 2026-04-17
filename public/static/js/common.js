@@ -70,6 +70,7 @@ const NAV_GROUPS = {
       { id: 'trades',  label: '📊 검증 중', page: 'page-ops', opsPane: 'trades' },
       { id: 'results', label: '📋 결과',    page: 'page-ops', opsPane: 'results' },
       { id: 'perf',    label: '📈 성과',    page: 'page-ops', opsPane: 'perf' },
+      { id: 'config',  label: '🔧 전략 설정', page: 'page-ops', opsPane: 'config' },
       { id: 'system',  label: '⚙️ 시스템', page: 'page-ops', opsPane: 'system' },
     ],
     onEnter: () => { if (typeof loadOps === 'function') loadOps(); },
@@ -125,6 +126,7 @@ function setOpsPane(opsPane) {
   document.querySelectorAll('#page-ops .ops-pane').forEach(p => {
     p.classList.toggle('active', p.id === 'ops-pane-' + opsPane);
   });
+  if (opsPane === 'config' && typeof _loadEngineConfig === 'function') _loadEngineConfig();
 }
 
 function setStockOpsPane(pane) {

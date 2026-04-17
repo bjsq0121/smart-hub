@@ -10,6 +10,10 @@ window.setResultSource = (v) => { opsResultSource = v; renderResults(); };
 window.setStrategy = (v) => { opsStrategy = v; renderSignals(); renderTrades(); renderResults(); renderPerf(); };
 window.setPerfSource = (v) => { opsPerfSource = v; loadOps(); };
 window.setBtPeriod = (v) => { opsBtPeriod = v; loadOps(); };
+window.setPnlSymbolFilter = (v) => { opsPnlSymbol = v; renderPnlChart(); };
+window.saveEngineConfig = saveEngineConfig;
+window.addEngineConfigRow = addEngineConfigRow;
+window.removeEngineConfigNewRow = removeEngineConfigNewRow;
 window.runBacktest = async () => {
   const btn = document.getElementById('bt-run-btn');
   const msg = document.getElementById('bt-run-msg');
@@ -36,6 +40,46 @@ window.runBacktest = async () => {
     if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
   }
   setTimeout(() => { if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.textContent = '실행'; } }, 10000);
+};
+window.runSweep = async () => {
+  const btn = document.getElementById('bt-sweep-btn');
+  const msg = document.getElementById('bt-sweep-msg');
+  if (!btn || btn.disabled) return;
+  const market = document.getElementById('bt-market')?.value || 'KRW-BTC';
+  const startDate = document.getElementById('bt-start')?.value || '';
+  const endDate = document.getElementById('bt-end')?.value || '';
+  const cutoffStr = (document.getElementById('bt-sweep-cutoffs')?.value || '').trim();
+  if (!startDate || !endDate) { if (msg) { msg.style.color = '#f87171'; msg.textContent = '시작일/종료일을 선택하세요'; } return; }
+  const scoreCutoffs = cutoffStr.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n) && n >= 0 && n <= 100);
+  if (!scoreCutoffs.length || scoreCutoffs.length > 10) { if (msg) { msg.style.color = '#f87171'; msg.textContent = '콤마로 구분한 cutoff를 1~10개 입력하세요'; } return; }
+  btn.disabled = true; btn.style.opacity = '0.5'; btn.textContent = 'Sweep 실행 중...';
+  if (msg) { msg.style.color = '#94a3b8'; msg.textContent = `${scoreCutoffs.length}개 cutoff 실행 중...`; }
+  try {
+    const hdrs = await authHeaders();
+    hdrs['Content-Type'] = 'application/json';
+    const r = await fetch('/api/backtest/sweep', { method: 'POST', headers: hdrs, body: JSON.stringify({ market, startDate, endDate, scoreCutoffs }) });
+    const d = await r.json();
+    if (d.ok) {
+      const ok = (d.results || []).filter(r => r.ok).length;
+      const fail = (d.results || []).filter(r => !r.ok).length;
+      if (msg) { msg.style.color = '#34d399'; msg.textContent = `완료 — 성공 ${ok}, 실패 ${fail}. 결과 로딩 중...`; }
+      setTimeout(() => { loadOps(); }, 3000);
+    } else {
+      if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || '실패'; }
+    }
+  } catch (e) {
+    if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
+  }
+  setTimeout(() => { if (btn) { btn.disabled = false; btn.style.opacity = '1'; btn.textContent = 'Sweep 실행'; } }, 15000);
+};
+window.toggleSweepMode = () => {
+  const single = document.getElementById('bt-single-mode');
+  const sweep = document.getElementById('bt-sweep-mode');
+  const toggle = document.getElementById('bt-sweep-toggle');
+  if (!single || !sweep || !toggle) return;
+  const isSweep = toggle.checked;
+  single.style.display = isSweep ? 'none' : 'flex';
+  sweep.style.display = isSweep ? 'flex' : 'none';
 };
 window.toggleFactors = (id) => {
   const r = document.getElementById('factors-' + id);
@@ -102,6 +146,9 @@ let opsPerfSource = '';         // 성과 source 필터: '' | 'n8n' | 'backtest'
 let opsResultSource = '';       // 결과 source 필터: '' | 'n8n' | 'backtest'
 let opsBtPeriod = '';           // 백테스트 기간: '' | '1m' | '3m' | '6m'
 let opsStrategy = '';           // 전략 필터 (코인+방향): '' | 'XRP_SHORT' | 'BTC_LONG' 등
+let opsPnlSymbol = '';          // PnL 차트 종목 필터: '' | 'BTC' | 'ETH' 등
+let _pnlChartInstance = null;   // Chart.js 인스턴스 (메모리 릭 방지)
+let _engineConfigNewRows = 0;   // 엔진 설정 신규 행 카운터
 
 // ── 전략 분류 (코인+방향 → 상태) ──
 const STRATEGY_STATUS = {
@@ -182,15 +229,26 @@ async function loadOps() {
       if (months) { const d = new Date(now); d.setMonth(d.getMonth() - months); perfQ += '&after=' + d.toISOString(); resQ += '&after=' + d.toISOString(); }
     }
 
-    const [sig, tr, res, perf, sys, hb] = await Promise.all([
+    // 종목 비교 + PnL 시계열 API source 파라미터
+    let bySymQ = '/api/performance/by-symbol';
+    let pnlQ = '/api/trade-results/pnl-series?limit=500';
+    if (opsPerfSource) {
+      bySymQ += '?source=' + opsPerfSource;
+      pnlQ += '&source=' + opsPerfSource;
+    }
+    if (opsPnlSymbol) pnlQ += '&symbol=' + opsPnlSymbol;
+
+    const [sig, tr, res, perf, sys, hb, bySym, pnlSeries] = await Promise.all([
       safe(fetch('/api/signals?limit=50',                    { headers: hdrs })),
       safe(fetch('/api/paper-trades?status=open',            { headers: hdrs })),
       safe(fetch(resQ,                                       { headers: hdrs })),
       safe(fetch(perfQ,                                      { headers: hdrs })),
       safe(fetch('/api/system-status',                       { headers: hdrs })),
       safe(fetch('/api/system/heartbeat',                    { headers: hdrs })),
+      safe(fetch(bySymQ,                                     { headers: hdrs })),
+      safe(fetch(pnlQ,                                       { headers: hdrs })),
     ]);
-    opsData = { signals: sig, trades: tr, results: res, perf, system: sys, heartbeat: hb };
+    opsData = { signals: sig, trades: tr, results: res, perf, system: sys, heartbeat: hb, bySymbol: bySym, pnlSeries };
   } catch (e) {
     opsData = {};
   }
@@ -200,7 +258,10 @@ async function loadOps() {
   renderSignals();
   renderTrades();
   renderResults();
+  renderSymbolCompare();
+  renderPnlChart();
   renderPerf();
+  renderEngineConfig();
   renderSystem();
   startOpsAutoRefresh();
 }
@@ -528,6 +589,331 @@ function renderResults() {
     </div>`;
 }
 
+// ── 4a. 종목 비교 테이블 ──
+function renderSymbolCompare() {
+  const el = document.getElementById('ops-symbol-compare'); if (!el) return;
+  const d = opsData.bySymbol || {};
+  if (d.error) {
+    console.warn('[by-symbol] fetch error:', d.error);
+    el.innerHTML = ''; return;
+  }
+  const items = d.items || [];
+  if (!items.length) {
+    el.innerHTML = `<div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4 text-sm text-slate-500">종목별 비교 데이터가 없습니다.</div>`;
+    return;
+  }
+  const verdictChip = (v) => {
+    const map = { '검토 가능': 'emerald', '경계': 'amber', '보류': 'rose' };
+    const color = map[v] || 'slate';
+    return `<span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold bg-${color}-500/10 text-${color}-400 border border-${color}-500/30">${esc(v || '—')}</span>`;
+  };
+  el.innerHTML = `
+    <div class="rounded-xl border border-slate-800/60 bg-slate-900/30 overflow-x-auto">
+      <table class="${TABLE_CLS}">
+        <thead class="${THEAD_CLS}"><tr>
+          <th class="${TH_CLS}">종목</th><th class="${TH_CLS}">방향</th><th class="${TH_CLS}">승률</th>
+          <th class="${TH_CLS}">기대값</th><th class="${TH_CLS}">최대낙폭</th><th class="${TH_CLS}">건수</th>
+          <th class="${TH_CLS}">판정</th>
+        </tr></thead>
+        <tbody class="${TBODY_CLS}">
+          ${items.map(r => {
+            const isEmpty = !r.total || r.total === 0;
+            const rowCls = isEmpty ? 'opacity-50' : TR_CLS;
+            const wrColor = (r.winRate || 0) >= 0.4 ? 'text-emerald-400' : 'text-rose-400';
+            const expColor = (r.expectation || 0) > 0 ? 'text-emerald-400' : (r.expectation || 0) < 0 ? 'text-rose-400' : 'text-slate-400';
+            return `<tr class="${rowCls}">
+              <td class="${TD_CLS} font-bold text-slate-100">${esc(r.symbol || '—')}</td>
+              <td class="${TD_CLS}">${r.direction ? directionBadge(r.direction) : '<span class="text-slate-600">—</span>'}</td>
+              <td class="${TD_CLS} ${wrColor}">${isEmpty ? '—' : ((r.winRate || 0) * 100).toFixed(0) + '%'}</td>
+              <td class="${TD_CLS} ${expColor}">${isEmpty ? '—' : ((r.expectation || 0) >= 0 ? '+' : '') + (r.expectation || 0).toFixed(2) + '%'}</td>
+              <td class="${TD_CLS} text-rose-400">${isEmpty ? '—' : (r.maxDrawdownPct || 0).toFixed(1) + '%'}</td>
+              <td class="${TD_CLS} text-slate-300">${isEmpty ? '<span class="text-slate-600">(new)</span>' : r.total}</td>
+              <td class="${TD_CLS}">${isEmpty ? '<span class="text-slate-600">—</span>' : verdictChip(r.verdict)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ── 4b. 누적 PnL 차트 ──
+function renderPnlChart() {
+  const wrap = document.getElementById('ops-pnl-chart-wrap'); if (!wrap) return;
+  // destroy previous chart instance
+  if (_pnlChartInstance) { _pnlChartInstance.destroy(); _pnlChartInstance = null; }
+
+  const d = opsData.pnlSeries || {};
+  if (d.error) {
+    console.warn('[pnl-series] fetch error:', d.error);
+    wrap.innerHTML = ''; return;
+  }
+  const series = d.series || [];
+
+  // symbol filter chips
+  const symbols = [...new Set(series.map(s => s.symbol).filter(Boolean))].sort();
+  const filterHtml = symbols.length > 1 ? `
+    <div class="flex flex-wrap gap-2 mb-3">
+      ${chip(!opsPnlSymbol, "setPnlSymbolFilter('')", null, '전체')}
+      ${symbols.map(sym => chip(opsPnlSymbol === sym, `setPnlSymbolFilter('${sym}')`, null, esc(sym))).join('')}
+    </div>` : '';
+
+  if (!series.length) {
+    wrap.innerHTML = filterHtml + `<div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4 text-sm text-slate-500">거래 내역이 없습니다.</div>`;
+    return;
+  }
+
+  wrap.innerHTML = filterHtml + `
+    <div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4">
+      <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">누적 PnL</div>
+      <div style="position:relative;height:220px;"><canvas id="ops-pnl-canvas"></canvas></div>
+    </div>`;
+
+  const canvas = document.getElementById('ops-pnl-canvas');
+  if (!canvas || typeof Chart === 'undefined') { console.warn('[pnl-chart] Chart.js 미로드'); return; }
+
+  const labels = series.map(s => s.date || '');
+  const data = series.map(s => s.cumulativePnlPct);
+
+  // gradient fill: green above zero, red below
+  const ctx = canvas.getContext('2d');
+
+  _pnlChartInstance = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data,
+        borderColor: '#94a3b8',
+        borderWidth: 1.5,
+        pointRadius: 2,
+        pointHoverRadius: 5,
+        pointBackgroundColor: series.map(s => s.result === 'win' ? '#34d399' : '#f87171'),
+        fill: {
+          target: 'origin',
+          above: 'rgba(52,211,153,0.08)',
+          below: 'rgba(248,113,113,0.08)',
+        },
+        tension: 0.3,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => {
+              const i = items[0]?.dataIndex;
+              if (i == null) return '';
+              const s = series[i];
+              return s.date || '';
+            },
+            label: (item) => {
+              const s = series[item.dataIndex];
+              if (!s) return '';
+              return `${s.symbol || ''} ${s.result === 'win' ? 'W' : 'L'} ${(s.pnlPct || 0) >= 0 ? '+' : ''}${(s.pnlPct || 0).toFixed(2)}% (누적 ${(s.cumulativePnlPct || 0).toFixed(2)}%)`;
+            },
+          },
+          backgroundColor: '#1e293b',
+          titleColor: '#e2e8f0',
+          bodyColor: '#cbd5e1',
+          borderColor: '#334155',
+          borderWidth: 1,
+        },
+      },
+      scales: {
+        x: {
+          ticks: { color: '#475569', font: { size: 10 }, maxTicksLimit: 12 },
+          grid: { color: 'rgba(51,65,85,0.3)' },
+        },
+        y: {
+          ticks: { color: '#475569', font: { size: 10 }, callback: (v) => v.toFixed(1) + '%' },
+          grid: { color: 'rgba(51,65,85,0.3)' },
+        },
+      },
+    },
+  });
+}
+
+// ── 4c. 전략 설정 (engine-config) ──
+function renderEngineConfig() {
+  const el = document.getElementById('ops-engine-config'); if (!el) return;
+  // lazy load — only fetch when config tab is visible
+  const pane = document.getElementById('ops-pane-config');
+  if (!pane || !pane.classList.contains('active')) return;
+  _loadEngineConfig();
+}
+
+async function _loadEngineConfig() {
+  const el = document.getElementById('ops-engine-config'); if (!el) return;
+  try {
+    const hdrs = await authHeaders();
+    const r = await fetch('/api/coin/engine-config', { headers: hdrs });
+    if (r.status === 403) { el.innerHTML = '<div class="text-sm text-rose-400">권한이 없습니다 (admin only).</div>'; return; }
+    const d = await r.json();
+    if (!d.ok) { el.innerHTML = `<div class="text-sm text-rose-400">${esc(d.error || 'engine-config 로드 실패')}</div>`; return; }
+    _renderEngineConfigUI(d.config || {});
+  } catch (e) {
+    console.warn('[engine-config] fetch error:', e);
+    el.innerHTML = '<div class="text-sm text-slate-500">전략 설정 로드 실패</div>';
+  }
+}
+
+function _renderEngineConfigUI(config) {
+  const el = document.getElementById('ops-engine-config'); if (!el) return;
+  const symbols = config.symbols || {};
+  const entries = Object.entries(symbols);
+  _engineConfigNewRows = 0;
+
+  const statusOpts = (cur) => ['live', 'research', 'excluded'].map(s =>
+    `<option value="${s}" ${s === cur ? 'selected' : ''}>${s}</option>`
+  ).join('');
+
+  const statusColor = (s) => ({ live: 'emerald', research: 'amber', excluded: 'slate' })[s] || 'slate';
+
+  const row = (sym, cfg, idx) => `
+    <tr class="${TR_CLS}" data-cfg-sym="${esc(sym)}">
+      <td class="${TD_CLS} font-bold text-slate-100">${esc(sym)}</td>
+      <td class="${TD_CLS}">
+        <select id="cfg-status-${idx}" data-cfg-field="status" class="rounded-md border border-slate-700 bg-slate-900 text-xs px-2 py-1 text-${statusColor(cfg.status)}-400">
+          ${statusOpts(cfg.status)}
+        </select>
+      </td>
+      <td class="${TD_CLS}"><input id="cfg-cutoff-${idx}" data-cfg-field="cutoff" type="number" min="0" max="100" value="${cfg.cutoff ?? ''}" class="w-14 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-target-${idx}" data-cfg-field="targetPct" type="number" min="0.1" max="10" step="0.1" value="${cfg.targetPct ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-minrr-${idx}" data-cfg-field="minRR" type="number" min="0.5" max="5" step="0.1" value="${cfg.minRR ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    </tr>`;
+
+  el.innerHTML = `
+    <div class="rounded-xl border border-slate-700/50 bg-slate-800/40 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <div class="text-[11px] font-semibold uppercase tracking-wider text-slate-400">종목별 전략 설정</div>
+        ${config.updated_at ? `<span class="text-[10px] text-slate-600">갱신 ${esc(new Date(config.updated_at).toLocaleString('ko-KR'))}</span>` : ''}
+      </div>
+      <div class="overflow-x-auto rounded-xl border border-slate-800/60 bg-slate-900/30">
+        <table class="${TABLE_CLS}">
+          <thead class="${THEAD_CLS}"><tr>
+            <th class="${TH_CLS}">종목</th><th class="${TH_CLS}">상태</th><th class="${TH_CLS}">Cutoff</th>
+            <th class="${TH_CLS}">Target%</th><th class="${TH_CLS}">MinRR</th>
+          </tr></thead>
+          <tbody id="cfg-tbody" class="${TBODY_CLS}">
+            ${entries.map(([sym, cfg], i) => row(sym, cfg, i)).join('')}
+          </tbody>
+        </table>
+      </div>
+      <div class="flex items-center gap-3 mt-3">
+        <button onclick="addEngineConfigRow()" class="px-3 py-1.5 rounded-lg border border-slate-600 text-slate-400 text-xs hover:bg-slate-800 transition">+ 종목 추가</button>
+        <button onclick="saveEngineConfig()" id="cfg-save-btn" class="px-4 py-1.5 rounded-lg border border-violet-500/40 bg-violet-500/15 text-violet-300 text-xs font-semibold hover:bg-violet-500/25 transition">저장</button>
+        <span id="cfg-save-msg" class="text-xs"></span>
+      </div>
+    </div>`;
+}
+
+function addEngineConfigRow() {
+  const tbody = document.getElementById('cfg-tbody'); if (!tbody) return;
+  _engineConfigNewRows++;
+  const idx = 'new' + _engineConfigNewRows;
+  const tr = document.createElement('tr');
+  tr.className = TR_CLS;
+  tr.dataset.cfgSym = '';
+  tr.dataset.cfgNew = '1';
+  tr.id = 'cfg-new-row-' + _engineConfigNewRows;
+  tr.innerHTML = `
+    <td class="${TD_CLS}"><input id="cfg-sym-${idx}" data-cfg-field="symbol" type="text" placeholder="BTC" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center uppercase"></td>
+    <td class="${TD_CLS}">
+      <select id="cfg-status-${idx}" data-cfg-field="status" class="rounded-md border border-slate-700 bg-slate-900 text-xs px-2 py-1 text-amber-400">
+        <option value="research" selected>research</option><option value="live">live</option><option value="excluded">excluded</option>
+      </select>
+    </td>
+    <td class="${TD_CLS}"><input id="cfg-cutoff-${idx}" data-cfg-field="cutoff" type="number" min="0" max="100" value="60" class="w-14 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-target-${idx}" data-cfg-field="targetPct" type="number" min="0.1" max="10" step="0.1" value="1.5" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}">
+      <div class="flex items-center gap-1">
+        <input id="cfg-minrr-${idx}" data-cfg-field="minRR" type="number" min="0.5" max="5" step="0.1" value="1.5" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center">
+        <button onclick="removeEngineConfigNewRow(${_engineConfigNewRows})" class="text-rose-400 hover:text-rose-300 text-xs px-1">✕</button>
+      </div>
+    </td>`;
+  tbody.appendChild(tr);
+}
+
+function removeEngineConfigNewRow(n) {
+  const row = document.getElementById('cfg-new-row-' + n);
+  if (row) row.remove();
+}
+
+async function saveEngineConfig() {
+  const btn = document.getElementById('cfg-save-btn');
+  const msg = document.getElementById('cfg-save-msg');
+  if (!btn) return;
+  btn.disabled = true; btn.style.opacity = '0.5';
+  if (msg) { msg.style.color = '#94a3b8'; msg.textContent = '저장 중...'; }
+
+  const tbody = document.getElementById('cfg-tbody');
+  if (!tbody) return;
+  const payload = {};
+  const rows = tbody.querySelectorAll('tr');
+  let valid = true;
+
+  rows.forEach(tr => {
+    const isNew = tr.dataset.cfgNew === '1';
+    const symInput = tr.querySelector('[data-cfg-field="symbol"]');
+    const sym = isNew ? (symInput?.value || '').trim().toUpperCase() : tr.dataset.cfgSym;
+    if (!sym) { if (isNew) valid = false; return; }
+
+    const statusEl = tr.querySelector('[data-cfg-field="status"]');
+    const cutoffEl = tr.querySelector('[data-cfg-field="cutoff"]');
+    const targetEl = tr.querySelector('[data-cfg-field="targetPct"]');
+    const minrrEl = tr.querySelector('[data-cfg-field="minRR"]');
+
+    const entry = {};
+    if (statusEl) entry.status = statusEl.value;
+    if (cutoffEl && cutoffEl.value !== '') {
+      const v = parseInt(cutoffEl.value);
+      if (v < 0 || v > 100) { valid = false; return; }
+      entry.cutoff = v;
+    }
+    if (targetEl && targetEl.value !== '') {
+      const v = parseFloat(targetEl.value);
+      if (v < 0.1 || v > 10) { valid = false; return; }
+      entry.targetPct = v;
+    }
+    if (minrrEl && minrrEl.value !== '') {
+      const v = parseFloat(minrrEl.value);
+      if (v < 0.5 || v > 5) { valid = false; return; }
+      entry.minRR = v;
+    }
+    if (Object.keys(entry).length) payload[sym] = entry;
+  });
+
+  if (!valid) {
+    if (msg) { msg.style.color = '#f87171'; msg.textContent = '입력값 범위를 확인하세요 (cutoff 0~100, target 0.1~10, minRR 0.5~5)'; }
+    btn.disabled = false; btn.style.opacity = '1'; return;
+  }
+
+  if (!Object.keys(payload).length) {
+    if (msg) { msg.style.color = '#fbbf24'; msg.textContent = '변경 사항 없음'; }
+    btn.disabled = false; btn.style.opacity = '1'; return;
+  }
+
+  try {
+    const hdrs = await authHeaders();
+    hdrs['Content-Type'] = 'application/json';
+    const r = await fetch('/api/coin/engine-config', { method: 'POST', headers: hdrs, body: JSON.stringify({ symbols: payload }) });
+    const d = await r.json();
+    if (d.ok) {
+      if (msg) { msg.style.color = '#34d399'; msg.textContent = '저장 완료'; }
+      _renderEngineConfigUI(d.config || {});
+    } else {
+      if (msg) { msg.style.color = '#f87171'; msg.textContent = d.error || '저장 실패'; }
+    }
+  } catch (e) {
+    if (msg) { msg.style.color = '#f87171'; msg.textContent = '네트워크 오류'; }
+  }
+  btn.disabled = false; btn.style.opacity = '1';
+  setTimeout(() => { if (msg) msg.textContent = ''; }, 5000);
+}
+
 // ── 4. 성과 요약 ──
 function renderPerf() {
   const el = document.getElementById('ops-perf-content'); if (!el) return;
@@ -557,8 +943,14 @@ function renderPerf() {
         🟠 백테스트 성과 — 과거 시뮬레이션이며 실전 결과가 아닙니다
       </div>
       <div class="mb-4 rounded-xl border border-slate-700/50 bg-slate-800/40 p-4">
-        <div class="text-xs font-semibold text-slate-400 mb-3">백테스트 실행</div>
-        <div class="flex flex-wrap items-end gap-3">
+        <div class="flex items-center justify-between mb-3">
+          <div class="text-xs font-semibold text-slate-400">백테스트 실행</div>
+          <label class="flex items-center gap-2 text-[11px] text-slate-500 cursor-pointer">
+            <span>Sweep 모드</span>
+            <input id="bt-sweep-toggle" type="checkbox" onchange="toggleSweepMode()" class="rounded border-slate-600 bg-slate-800">
+          </label>
+        </div>
+        <div class="flex flex-wrap items-end gap-3 mb-3">
           <label class="text-[11px] text-slate-500">코인
             <select id="bt-market" class="block mt-1 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1.5">
               <option value="KRW-BTC">BTC</option><option value="KRW-ETH">ETH</option><option value="KRW-XRP">XRP</option>
@@ -571,11 +963,20 @@ function renderPerf() {
           <label class="text-[11px] text-slate-500">종료일
             <input id="bt-end" type="date" class="block mt-1 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1.5">
           </label>
+        </div>
+        <div id="bt-single-mode" class="flex flex-wrap items-end gap-3">
           <label class="text-[11px] text-slate-500">진입 기준
             <input id="bt-cutoff" type="number" value="60" min="0" max="100" class="block mt-1 w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1.5">
           </label>
           <button id="bt-run-btn" onclick="runBacktest()" class="px-4 py-1.5 rounded-lg border border-amber-500/50 bg-amber-500/20 text-amber-300 text-xs font-semibold hover:bg-amber-500/30 transition">실행</button>
           <span id="bt-run-msg" class="text-xs"></span>
+        </div>
+        <div id="bt-sweep-mode" class="flex flex-wrap items-end gap-3" style="display:none;">
+          <label class="text-[11px] text-slate-500">Cutoff 목록 (콤마 구분)
+            <input id="bt-sweep-cutoffs" type="text" placeholder="50,55,60,65" class="block mt-1 w-48 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1.5">
+          </label>
+          <button id="bt-sweep-btn" onclick="runSweep()" class="px-4 py-1.5 rounded-lg border border-violet-500/50 bg-violet-500/20 text-violet-300 text-xs font-semibold hover:bg-violet-500/30 transition">Sweep 실행</button>
+          <span id="bt-sweep-msg" class="text-xs"></span>
         </div>
       </div>`;
   } else if (opsPerfSource === 'n8n') {

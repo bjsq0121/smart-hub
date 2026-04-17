@@ -27,6 +27,7 @@
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 </head>
 <body>
 
@@ -291,7 +292,17 @@
 
     <!-- 📈 성과 요약 -->
     <section class="ops-pane" id="ops-pane-perf">
+      <!-- 종목 비교 테이블 -->
+      <div id="ops-symbol-compare" class="mb-4"></div>
+      <!-- 누적 PnL 차트 -->
+      <div id="ops-pnl-chart-wrap" class="mb-4"></div>
+      <!-- 기존 성과 카드 -->
       <div id="ops-perf-content" class="text-slate-500 text-sm">로딩 중...</div>
+    </section>
+
+    <!-- ⚙️ 전략 설정 -->
+    <section class="ops-pane" id="ops-pane-config">
+      <div id="ops-engine-config" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- ⚙️ 시스템 상태 -->

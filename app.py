@@ -3629,6 +3629,273 @@ async def api_performance(
         return {"total": 0, "error": "performance 계산 실패"}
 
 
+# ── 코인 대시보드 확장 API ────────────────────────────────────
+
+
+@app.get("/api/performance/by-symbol")
+async def api_performance_by_symbol(
+    source: str | None = Query(default=None),
+    limit: int = Query(default=100, le=500),
+    user: dict = Depends(verify_firebase_token),
+):
+    """종목별 성과 비교 테이블. symbol × direction 그룹핑 + verdict 판정."""
+    try:
+        db = _get_firestore()
+        q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.DESCENDING)
+        try:
+            if source and source != "all":
+                q = q.where("source", "==", source)
+            results = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            all_docs = [_doc_to_dict(d) for d in db.collection("trade_results")
+                        .order_by("created_at", direction=_firestore.Query.DESCENDING)
+                        .limit(limit).stream()]
+            results = [r for r in all_docs if r.get("source") == source] if (source and source != "all") else all_docs
+
+        # symbol × direction 그룹핑
+        from collections import defaultdict
+        groups: dict[tuple[str, str], list[dict]] = defaultdict(list)
+        for r in results:
+            sym = (r.get("symbol") or "UNKNOWN").upper().replace("/KRW", "").replace("KRW-", "")
+            dirn = (r.get("direction") or "long").lower()
+            groups[(sym, dirn)].append(r)
+
+        items = []
+        for (sym, dirn), trades in groups.items():
+            total = len(trades)
+            wins_list = [t for t in trades if t.get("result") == "win"]
+            losses_list = [t for t in trades if t.get("result") == "loss"]
+            wins = len(wins_list)
+            losses = len(losses_list)
+            win_rate = wins / total if total > 0 else 0
+
+            pnl_values = [t.get("pnlPercent", 0) for t in trades]
+            avg_pnl = sum(pnl_values) / total if total > 0 else 0
+
+            avg_win = sum(t.get("pnlPercent", 0) for t in wins_list) / wins if wins else 0
+            avg_loss = sum(abs(t.get("pnlPercent", 0)) for t in losses_list) / losses if losses else 0
+            expectation = (win_rate * avg_win) - ((1 - win_rate) * avg_loss)
+
+            # max drawdown
+            cum = 0.0
+            peak = 0.0
+            max_dd = 0.0
+            for t in sorted(trades, key=lambda x: x.get("created_at", "")):
+                cum += t.get("pnlPercent", 0)
+                peak = max(peak, cum)
+                dd = peak - cum
+                max_dd = max(max_dd, dd)
+
+            # verdict 판정
+            if expectation > 0 and win_rate >= 0.40:
+                verdict = "검토 가능"
+            elif win_rate >= 0.35:
+                verdict = "경계"
+            else:
+                verdict = "보류"
+
+            items.append({
+                "symbol": sym,
+                "direction": dirn,
+                "total": total,
+                "wins": wins,
+                "losses": losses,
+                "winRate": round(win_rate, 4),
+                "avgPnlPct": round(avg_pnl, 2),
+                "expectation": round(expectation, 2),
+                "maxDrawdownPct": round(max_dd, 2),
+                "verdict": verdict,
+            })
+
+        items.sort(key=lambda x: x["expectation"], reverse=True)
+        return {"ok": True, "items": items}
+    except Exception:
+        return {"ok": False, "items": [], "error": "by-symbol 성과 계산 실패"}
+
+
+@app.get("/api/trade-results/pnl-series")
+async def api_trade_results_pnl_series(
+    source: str | None = Query(default=None),
+    symbol: str | None = Query(default=None),
+    limit: int = Query(default=500, le=1000),
+    user: dict = Depends(verify_firebase_token),
+):
+    """누적 PnL 시계열 — Chart.js용."""
+    try:
+        db = _get_firestore()
+        q = db.collection("trade_results").order_by("created_at", direction=_firestore.Query.ASCENDING)
+        try:
+            if source and source != "all":
+                q = q.where("source", "==", source)
+            results = [_doc_to_dict(d) for d in q.limit(limit).stream()]
+        except Exception:
+            all_docs = [_doc_to_dict(d) for d in db.collection("trade_results")
+                        .order_by("created_at", direction=_firestore.Query.ASCENDING)
+                        .limit(limit).stream()]
+            results = [r for r in all_docs if r.get("source") == source] if (source and source != "all") else all_docs
+
+        if symbol:
+            sym_upper = symbol.upper().replace("/KRW", "").replace("KRW-", "")
+            results = [r for r in results if
+                       (r.get("symbol", "").upper().replace("/KRW", "").replace("KRW-", "") == sym_upper)]
+
+        cumulative = 0.0
+        series = []
+        for r in results:
+            pnl = r.get("pnlPercent", 0)
+            cumulative += pnl
+            date_str = r.get("occurredAt") or r.get("created_at", "")
+            if date_str and len(date_str) >= 10:
+                date_str = date_str[:10]
+            sym = (r.get("symbol") or "").upper().replace("/KRW", "").replace("KRW-", "")
+            series.append({
+                "date": date_str,
+                "pnlPct": round(pnl, 2),
+                "cumulativePnlPct": round(cumulative, 2),
+                "symbol": sym,
+                "result": r.get("result", ""),
+            })
+
+        return {"ok": True, "series": series}
+    except Exception:
+        return {"ok": False, "series": [], "error": "PnL 시계열 생성 실패"}
+
+
+class BacktestSweepRequest(BaseModel):
+    market: str = "KRW-BTC"
+    startDate: str = ""
+    endDate: str = ""
+    scoreCutoffs: list[int] = [60]
+    maxHoldMin: int = 1440
+
+
+@app.post("/api/backtest/sweep")
+async def run_backtest_sweep(req: BacktestSweepRequest, user: dict = Depends(verify_firebase_token)):
+    """파라미터 sweep 백테스트. scoreCutoffs 배열 각각에 대해 n8n 웹훅 호출."""
+    import requests as _req
+
+    cutoffs = req.scoreCutoffs
+    if not cutoffs or len(cutoffs) > 10:
+        return {"ok": False, "error": "scoreCutoffs는 1~10개"}
+
+    results = []
+    for cutoff in cutoffs:
+        try:
+            resp = _req.post(
+                "https://n8n.banghub.kr/webhook/run-backtest",
+                headers={"X-Webhook-Secret": WEBHOOK_SECRET, "Content-Type": "application/json"},
+                json={
+                    "market": req.market,
+                    "startDate": req.startDate,
+                    "endDate": req.endDate,
+                    "scoreCutoff": cutoff,
+                    "maxHoldMin": req.maxHoldMin,
+                },
+                timeout=60,
+            )
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            results.append({
+                "scoreCutoff": cutoff,
+                "ok": resp.status_code < 400,
+                **body,
+            })
+        except Exception:
+            results.append({"scoreCutoff": cutoff, "ok": False, "error": "호출 실패"})
+
+    return {"ok": True, "results": results}
+
+
+@app.get("/api/coin/engine-config")
+async def api_coin_engine_config_get(user: dict = Depends(verify_firebase_token)):
+    """코인 전략 엔진 설정 조회 (admin only)."""
+    _ensure_admin(user)
+    try:
+        db = _get_firestore()
+        doc = db.collection("settings").document("coin-engine").get()
+        if doc.exists:
+            cfg = doc.to_dict()
+            # Firestore 타임스탬프 직렬화
+            for ts_key in ("updated_at",):
+                if cfg.get(ts_key) and hasattr(cfg[ts_key], "isoformat"):
+                    cfg[ts_key] = cfg[ts_key].isoformat()
+            return {"ok": True, "config": cfg}
+        else:
+            # 기본 설정
+            default_cfg = {"symbols": {}}
+            return {"ok": True, "config": default_cfg}
+    except Exception:
+        return {"ok": False, "error": "engine-config 조회 실패"}
+
+
+@app.post("/api/coin/engine-config")
+async def api_coin_engine_config_post(req: Request, user: dict = Depends(verify_firebase_token)):
+    """코인 전략 엔진 설정 변경 (admin only). symbols 맵 업데이트 + events 기록."""
+    _ensure_admin(user)
+    body = await req.json()
+    symbols = body.get("symbols")
+    if not isinstance(symbols, dict):
+        raise HTTPException(400, "symbols 필드(object)가 필요합니다")
+
+    valid_statuses = {"live", "research", "excluded"}
+    for sym, conf in symbols.items():
+        if not isinstance(conf, dict):
+            raise HTTPException(400, f"{sym}: 설정은 object여야 합니다")
+        if "status" in conf and conf["status"] not in valid_statuses:
+            raise HTTPException(400, f"{sym}: status는 live/research/excluded 중 하나")
+        if "cutoff" in conf:
+            v = conf["cutoff"]
+            if not isinstance(v, (int, float)) or v < 0 or v > 100:
+                raise HTTPException(400, f"{sym}: cutoff는 0~100")
+        if "targetPct" in conf:
+            v = conf["targetPct"]
+            if not isinstance(v, (int, float)) or v < 0.1 or v > 10:
+                raise HTTPException(400, f"{sym}: targetPct는 0.1~10")
+        if "minRR" in conf:
+            v = conf["minRR"]
+            if not isinstance(v, (int, float)) or v < 0.5 or v > 5:
+                raise HTTPException(400, f"{sym}: minRR는 0.5~5")
+
+    try:
+        db = _get_firestore()
+        from google.cloud.firestore import SERVER_TIMESTAMP
+        doc_ref = db.collection("settings").document("coin-engine")
+
+        # 기존 설정 병합
+        existing = doc_ref.get()
+        if existing.exists:
+            old_cfg = existing.to_dict() or {}
+        else:
+            old_cfg = {}
+        old_symbols = old_cfg.get("symbols", {})
+
+        # 전달된 심볼만 업데이트 (merge)
+        merged_symbols = {**old_symbols}
+        for sym, conf in symbols.items():
+            if sym in merged_symbols:
+                merged_symbols[sym] = {**merged_symbols[sym], **conf}
+            else:
+                merged_symbols[sym] = conf
+
+        doc_ref.set({"symbols": merged_symbols, "updated_at": SERVER_TIMESTAMP}, merge=True)
+
+        # events에 변경 기록
+        db.collection("events").add({
+            "kind": "coin_config_change",
+            "user": user.get("email", ""),
+            "changes": symbols,
+            "created_at": SERVER_TIMESTAMP,
+        })
+
+        return {"ok": True, "config": {"symbols": merged_symbols}}
+    except HTTPException:
+        raise
+    except Exception:
+        return {"ok": False, "error": "engine-config 저장 실패"}
+
+
 @app.get("/api/system-status")
 async def api_system_status(user: dict = Depends(verify_firebase_token)):
     """시스템 상태 (current doc) + 최근 잔고 + 워크플로."""
