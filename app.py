@@ -3166,74 +3166,55 @@ def _save_coin_autotrade_config(updates: dict):
     _coin_autotrade_config_ts = _time.time()
 
 
+# 업비트 API — n8n 서버 프록시 경유 (IP 화이트리스트 우회)
+_UPBIT_PROXY_URL = "http://34.47.98.167:9090/"
+_UPBIT_PROXY_SECRET = "smarthub-upbit-proxy-2026"
+
+
 def _upbit_configured() -> bool:
-    return bool(UPBIT_ACCESS_KEY) and bool(UPBIT_SECRET_KEY)
+    """프록시 서버 존재 여부로 판단 (로컬 키 불필요)."""
+    return True  # 프록시가 키를 보유
 
 
-def _upbit_jwt(query_params: dict | None = None) -> str:
-    """업비트 API JWT 토큰 생성."""
-    import jwt
-    payload: dict = {
-        "access_key": UPBIT_ACCESS_KEY,
-        "nonce": str(uuid.uuid4()),
-    }
-    if query_params:
-        query_string = "&".join(f"{k}={v}" for k, v in query_params.items())
-        m = hashlib.sha512()
-        m.update(query_string.encode("utf-8"))
-        payload["query_hash"] = m.hexdigest()
-        payload["query_hash_alg"] = "SHA512"
-    token = jwt.encode(payload, UPBIT_SECRET_KEY, algorithm="HS256")
-    return f"Bearer {token}"
-
-
-def _upbit_get_accounts() -> list[dict]:
-    """GET /v1/accounts — 잔고 조회."""
-    if not _upbit_configured():
-        raise RuntimeError("UPBIT_ACCESS_KEY/SECRET_KEY 미설정")
-    resp = requests.get(
-        "https://api.upbit.com/v1/accounts",
-        headers={"Authorization": _upbit_jwt()},
-        timeout=10,
+def _upbit_proxy(method: str, path: str, query: str = "", data: dict | None = None) -> dict | list:
+    """n8n 서버의 업비트 프록시를 경유하여 API 호출."""
+    body = {"method": method, "path": path}
+    if query:
+        body["query"] = query
+    if data:
+        body["data"] = data
+    resp = requests.post(
+        _UPBIT_PROXY_URL,
+        headers={"Content-Type": "application/json", "X-Proxy-Secret": _UPBIT_PROXY_SECRET},
+        json=body,
+        timeout=15,
     )
     resp.raise_for_status()
     return resp.json()
 
 
+def _upbit_get_accounts() -> list[dict]:
+    """GET /v1/accounts — 잔고 조회 (프록시 경유)."""
+    return _upbit_proxy("GET", "/v1/accounts")
+
+
 def _upbit_get_ticker(market: str) -> dict:
-    """GET /v1/ticker — 현재가 조회. market='KRW-BTC' 형식."""
-    params = {"markets": market}
-    resp = requests.get(
-        "https://api.upbit.com/v1/ticker",
-        params=params,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    data = resp.json()
+    """GET /v1/ticker — 현재가 조회 (프록시 경유)."""
+    data = _upbit_proxy("GET", "/v1/ticker", query=f"markets={market}")
     if data and isinstance(data, list):
         return data[0]
     return {}
 
 
 def _upbit_place_order(market: str, side: str, **kwargs) -> dict:
-    """POST /v1/orders — 주문.
+    """POST /v1/orders — 주문 (프록시 경유).
 
     side: 'bid' (매수) | 'ask' (매도)
     매수(시장가): ord_type='price', price=투입KRW
     매도(시장가): ord_type='market', volume=수량
     """
-    if not _upbit_configured():
-        raise RuntimeError("UPBIT_ACCESS_KEY/SECRET_KEY 미설정")
     body = {"market": market, "side": side, **kwargs}
-    query_params = {k: str(v) for k, v in body.items()}
-    resp = requests.post(
-        "https://api.upbit.com/v1/orders",
-        headers={"Authorization": _upbit_jwt(query_params), "Content-Type": "application/json"},
-        json=body,
-        timeout=10,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    return _upbit_proxy("POST", "/v1/orders", data=body)
 
 
 def _coin_symbol_to_market(symbol: str) -> str:
