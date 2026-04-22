@@ -2663,10 +2663,10 @@ async def webhook_ingest(env: IngestEnvelope):
                     return {"ok": False, "eventId": event_doc.id, "error": "stock signal에 symbol이 비어있습니다."}
                 ref = db.collection("stock_signals").document(norm["signalId"] or None)
                 ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
-                # 주식 자동매매 훅 (백그라운드) — Firestore에서 최신 설정 로드 후 체크
+                # 주식 자동매매 훅 — 응답 전 실행 (Cloud Run CPU throttling 대응)
                 _at_cfg = _load_autotrade_config()
                 if _at_cfg.get("enabled"):
-                    asyncio.ensure_future(_safe_autotrade_on_signal(norm, ref.id))
+                    await _safe_autotrade_on_signal(norm, ref.id)
             else:
                 norm = _normalize_signal(env.payload)
                 if not norm["symbol"]:
@@ -2679,10 +2679,10 @@ async def webhook_ingest(env: IngestEnvelope):
                     "occurredAt": env.occurredAt, "eventId": event_doc.id,
                     "created_at": _firestore.SERVER_TIMESTAMP,
                 })
-                # 코인 자동매매 훅 (백그라운드) — Firestore에서 최신 설정 로드 후 체크
+                # 코인 자동매매 훅 — 응답 전 실행 (Cloud Run CPU throttling 대응)
                 _cat_cfg = _load_coin_autotrade_config()
                 if _cat_cfg.get("enabled"):
-                    asyncio.ensure_future(_safe_coin_autotrade_on_signal(norm, ref.id))
+                    await _safe_coin_autotrade_on_signal(norm, ref.id)
         elif env.kind == "paper_trade":
             norm = _normalize_paper_trade(env.payload)
             if not norm["symbol"]:
@@ -2731,10 +2731,10 @@ async def webhook_ingest(env: IngestEnvelope):
                 return {"ok": False, "eventId": event_doc.id, "error": "stock_signal에 symbol이 비어있습니다."}
             ref = db.collection("stock_signals").document(norm["signalId"] or None)
             ref.set({**norm, "created_at": _firestore.SERVER_TIMESTAMP})
-            # 주식 자동매매 훅 (백그라운드) — Firestore 최신 설정 체크
+            # 주식 자동매매 훅 — 응답 전 실행 (Cloud Run CPU throttling 대응)
             _at_cfg2 = _load_autotrade_config()
             if _at_cfg2.get("enabled"):
-                asyncio.ensure_future(_safe_autotrade_on_signal(norm, ref.id))
+                await _safe_autotrade_on_signal(norm, ref.id)
         elif env.kind == "stock_alert":
             doc = {
                 "alertType": env.payload.get("alertType") or env.payload.get("alert_type", "info"),
