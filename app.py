@@ -3270,6 +3270,10 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
     target_price = norm.get("targetPrice", 0) if norm.get("targetPrice") else 0
     entry_price_signal = float(norm.get("entryPrice") or 0)
 
+    # targetPrice 자동 계산: 시그널에 없으면 entryPrice +3% (백테스트 target_reached 평균 기반)
+    if not target_price and entry_price_signal > 0:
+        target_price = entry_price_signal * 1.03
+
     def _log_event(kind: str, detail: dict):
         try:
             db.collection("events").document().set({
@@ -3629,6 +3633,16 @@ async def _coin_autotrade_monitor_loop():
                 exit_reason = None
                 pnl_pct = (current_price - entry_price) / entry_price * 100
 
+                # trailing stop: 고점 대비 하락 시 익절
+                peak_price = float(order.get("peakPrice") or entry_price)
+                if current_price > peak_price:
+                    peak_price = current_price
+                    try:
+                        db.collection("coin_autotrade_orders").document(doc_id).update({"peakPrice": peak_price})
+                    except Exception:
+                        pass
+                peak_pnl_pct = (peak_price - entry_price) / entry_price * 100
+
                 # 보유 시간 계산 (R7: 안전 파싱)
                 entered_at = order.get("enteredAt")
                 hold_hours = 0.0
@@ -3648,13 +3662,16 @@ async def _coin_autotrade_monitor_loop():
                     except (ValueError, TypeError):
                         hold_hours = 0.0
 
-                # 조건 체크 (우선순위: 일일손실 > 손절 > 익절 > 보유시간)
+                # 조건 체크 (우선순위: 일일손실 > 손절 > 익절 > trailing stop > 보유시간)
                 if daily_loss_triggered:
                     exit_reason = "daily_loss_limit"
                 elif sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
                 elif tp > 0 and current_price >= tp:
                     exit_reason = "take_profit"
+                elif peak_pnl_pct >= 1.0 and pnl_pct <= peak_pnl_pct - 0.5:
+                    # trailing stop: +1% 이상 갔다가 고점 대비 0.5%p 하락하면 익절
+                    exit_reason = "trailing_stop"
                 elif max_hold_hours > 0 and hold_hours >= max_hold_hours:
                     exit_reason = "hold_expired"
 
