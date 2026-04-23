@@ -1091,7 +1091,21 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             })
             return
 
-    # 4-b) 리스크 필터: 동시 보유 수 + 섹터 집중도 (v2)
+    # 4-b) 가격 사전 필터: entryPrice 기준으로 1주도 못 사면 조기 스킵 (API 호출 절약)
+    entry_price_hint = float(norm.get("entryPrice") or 0)
+    max_per_symbol = cfg.get("maxPerSymbolKRW", 100_000)
+    if entry_price_hint > 0 and entry_price_hint > max_per_symbol:
+        _autotrade_log.info(
+            f"autotrade skip: 고가 종목 ({symbol_raw} ≈{entry_price_hint:,.0f}원 > 한도 {max_per_symbol:,.0f}원)"
+        )
+        _log_event("autotrade_skip", {
+            "reason": "price_too_high", "symbol": symbol_raw,
+            "symbolCode": symbol_code, "signalId": signal_doc_id,
+            "entryPrice": entry_price_hint, "maxPerSymbolKRW": max_per_symbol,
+        })
+        return
+
+    # 4-c) 리스크 필터: 동시 보유 수 + 섹터 집중도 (v2)
     active_orders = await asyncio.to_thread(_get_active_autotrade_orders, db)
 
     max_concurrent = cfg.get("maxConcurrentHoldings", 5)
