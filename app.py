@@ -1291,6 +1291,20 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             }
             db.collection("autotrade_orders").document(signal_doc_id).set(order_doc)
             _autotrade_log.info(f"autotrade_orders 문서 생성: {signal_doc_id}")
+
+            # 텔레그램 매수 알림
+            try:
+                _send_telegram(
+                    f"📈 [주식 자동매매] 매수\n"
+                    f"종목: {symbol_raw} ({symbol_code})\n"
+                    f"수량: {qty}주\n"
+                    f"가격: {current_price:,.0f}원\n"
+                    f"투자금: {qty * current_price:,.0f}원\n"
+                    f"시그널: score={score}, stage={stage}"
+                )
+            except Exception as tg_err:
+                _autotrade_log.warning(f"텔레그램 매수 알림 실패 (무시): {tg_err}")
+
         except Exception as e:
             # W7: 주문은 나갔는데 문서 실패 → 비상 정지 + critical 이벤트
             _autotrade_log.critical(f"CRITICAL: 주문 성공({result['ordNo']}) but autotrade_orders 생성 실패: {e}")
@@ -1514,6 +1528,19 @@ async def _autotrade_monitor_loop():
                         f"monitor: 매도 성공 {symbol_code} reason={exit_reason} "
                         f"pnl={pnl_krw:+,.0f}원 ({pnl_pct:+.2f}%)"
                     )
+
+                    # 텔레그램 청산 알림
+                    try:
+                        _send_telegram(
+                            f"📉 [주식 자동매매] 청산\n"
+                            f"종목: {order.get('symbolName', '')} ({symbol_code})\n"
+                            f"사유: {exit_reason}\n"
+                            f"PnL: {pnl_pct:+.2f}% ({pnl_krw:+,.0f}원)\n"
+                            f"보유: {hold_days}일"
+                        )
+                    except Exception as tg_err:
+                        _autotrade_log.warning(f"텔레그램 청산 알림 실패 (무시): {tg_err}")
+
                 else:
                     _autotrade_log.warning(f"monitor: 매도 실패 {symbol_code}: {sell_result.get('msg')}")
                     try:
@@ -1593,6 +1620,176 @@ async def api_autotrade_orders(
         return {"items": [_doc_to_dict(d) for d in docs]}
     except Exception:
         return {"items": [], "error": "autotrade_orders 조회 실패"}
+
+
+# ── 자동매매 성과 요약 엔드포인트 ─────────────────────────────
+def _calc_autotrade_stats(orders: list[dict], kst_today_start, kst_week_start) -> dict:
+    """주문 목록에서 성과 통계를 계산한다. stock/coin 공통 로직."""
+    total = len(orders)
+    active = 0
+    exited = 0
+    wins = 0
+    losses = 0
+    total_pnl_krw = 0.0
+    total_pnl_pct_sum = 0.0
+    win_pcts = []
+    loss_pcts = []
+    today_pnl_krw = 0.0
+    today_orders = 0
+    week_pnl_krw = 0.0
+    week_orders = 0
+    pnl_sequence = []  # 연속 손실 추적용
+
+    for o in orders:
+        status = o.get("status", "")
+        if status in ("entered", "monitoring", "exit_triggered", "failed"):
+            active += 1
+        elif status == "exited":
+            exited += 1
+            pnl_krw = float(o.get("pnlKRW") or 0)
+            pnl_pct = float(o.get("pnlPct") or 0)
+            total_pnl_krw += pnl_krw
+            total_pnl_pct_sum += pnl_pct
+            pnl_sequence.append(pnl_pct)
+
+            if pnl_krw >= 0:
+                wins += 1
+                win_pcts.append(pnl_pct)
+            else:
+                losses += 1
+                loss_pcts.append(pnl_pct)
+
+            # 시간 기반 통계 — exitedAt 파싱
+            exited_at_raw = o.get("exitedAt")
+            exited_dt = None
+            if exited_at_raw:
+                try:
+                    if isinstance(exited_at_raw, str):
+                        exited_dt = datetime.fromisoformat(exited_at_raw)
+                    elif hasattr(exited_at_raw, "date"):
+                        exited_dt = exited_at_raw
+                except (ValueError, TypeError):
+                    pass
+            if exited_dt:
+                if exited_dt.tzinfo is None:
+                    exited_dt = exited_dt.replace(tzinfo=timezone(timedelta(hours=9)))
+                if exited_dt >= kst_today_start:
+                    today_pnl_krw += pnl_krw
+                    today_orders += 1
+                if exited_dt >= kst_week_start:
+                    week_pnl_krw += pnl_krw
+                    week_orders += 1
+
+    # maxDrawdownPct: 연속 손실 누적의 최대값
+    max_drawdown_pct = 0.0
+    current_dd = 0.0
+    for pct in pnl_sequence:
+        if pct < 0:
+            current_dd += pct
+            if current_dd < max_drawdown_pct:
+                max_drawdown_pct = current_dd
+        else:
+            current_dd = 0.0
+
+    win_rate = round((wins / exited * 100), 2) if exited > 0 else 0.0
+    avg_win_pct = round(sum(win_pcts) / len(win_pcts), 2) if win_pcts else 0.0
+    avg_loss_pct = round(sum(loss_pcts) / len(loss_pcts), 2) if loss_pcts else 0.0
+    total_pnl_pct = round(total_pnl_pct_sum / exited, 2) if exited > 0 else 0.0
+
+    return {
+        "totalOrders": total,
+        "activeOrders": active,
+        "exitedOrders": exited,
+        "wins": wins,
+        "losses": losses,
+        "winRate": win_rate,
+        "totalPnlKRW": round(total_pnl_krw, 0),
+        "totalPnlPct": total_pnl_pct,
+        "avgWinPct": avg_win_pct,
+        "avgLossPct": avg_loss_pct,
+        "maxDrawdownPct": round(max_drawdown_pct, 2),
+        "todayPnlKRW": round(today_pnl_krw, 0),
+        "todayOrders": today_orders,
+        "weekPnlKRW": round(week_pnl_krw, 0),
+        "weekOrders": week_orders,
+    }
+
+
+@app.get("/api/autotrade/summary")
+async def api_autotrade_summary(user: dict = Depends(verify_firebase_token)):
+    """주식 + 코인 자동매매 성과 요약 통계."""
+    _ensure_admin(user)
+    try:
+        db = _get_firestore()
+        kst = timezone(timedelta(hours=9))
+        kst_now = datetime.now(kst)
+        kst_today_start = kst_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # 이번 주 월요일 00:00 (KST)
+        days_since_monday = kst_now.weekday()  # 0=Monday
+        kst_week_start = (kst_today_start - timedelta(days=days_since_monday))
+
+        # 주식 주문 전체 조회
+        stock_orders = []
+        try:
+            for d in db.collection("autotrade_orders").stream():
+                rec = d.to_dict() or {}
+                rec["_doc_id"] = d.id
+                stock_orders.append(rec)
+        except Exception as e:
+            _autotrade_log.warning(f"autotrade_orders 조회 실패: {e}")
+
+        # 코인 주문 전체 조회
+        coin_orders = []
+        try:
+            for d in db.collection("coin_autotrade_orders").stream():
+                rec = d.to_dict() or {}
+                rec["_doc_id"] = d.id
+                coin_orders.append(rec)
+        except Exception as e:
+            _autotrade_log.warning(f"coin_autotrade_orders 조회 실패: {e}")
+
+        stock_stats = _calc_autotrade_stats(stock_orders, kst_today_start, kst_week_start)
+        coin_stats = _calc_autotrade_stats(coin_orders, kst_today_start, kst_week_start)
+
+        # skip 사유 집계 (오늘 KST)
+        recent_skips: dict = {"stock": {}, "coin": {}}
+        try:
+            # autotrade_skip (주식)
+            skip_docs = list(
+                db.collection("events")
+                .where("kind", "==", "autotrade_skip")
+                .where("created_at", ">=", kst_today_start)
+                .limit(500).stream()
+            )
+            for d in skip_docs:
+                reason = (d.to_dict() or {}).get("reason", "unknown")
+                recent_skips["stock"][reason] = recent_skips["stock"].get(reason, 0) + 1
+        except Exception as e:
+            _autotrade_log.warning(f"autotrade_skip 집계 실패: {e}")
+
+        try:
+            # coin_autotrade_skip (코인)
+            coin_skip_docs = list(
+                db.collection("events")
+                .where("kind", "==", "coin_autotrade_skip")
+                .where("created_at", ">=", kst_today_start)
+                .limit(500).stream()
+            )
+            for d in coin_skip_docs:
+                reason = (d.to_dict() or {}).get("reason", "unknown")
+                recent_skips["coin"][reason] = recent_skips["coin"].get(reason, 0) + 1
+        except Exception as e:
+            _autotrade_log.warning(f"coin_autotrade_skip 집계 실패: {e}")
+
+        return {
+            "stock": stock_stats,
+            "coin": coin_stats,
+            "recentSkips": recent_skips,
+        }
+
+    except Exception as e:
+        _autotrade_log.error(f"autotrade summary 조회 실패: {e}")
+        raise HTTPException(status_code=500, detail="성과 요약 조회 실패")
 
 
 # ── 업종별 시세 / 투자자별 매매동향 ──────────────────────────
@@ -3530,6 +3727,19 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
         }
         db.collection("coin_autotrade_orders").document(signal_doc_id).set(order_doc)
         _coin_autotrade_log.info(f"coin_autotrade_orders 문서 생성: {signal_doc_id}")
+
+        # 텔레그램 매수 알림
+        try:
+            _send_telegram(
+                f"🪙 [코인 자동매매] 매수\n"
+                f"종목: {symbol_upper}\n"
+                f"투입: {invest_krw:,}원\n"
+                f"가격: {current_price:,.0f}원\n"
+                f"시그널: score={score}"
+            )
+        except Exception as tg_err:
+            _coin_autotrade_log.warning(f"텔레그램 매수 알림 실패 (무시): {tg_err}")
+
     except Exception as e:
         # W7: 주문은 나갔는데 문서 실패 → 비상 정지
         _coin_autotrade_log.critical(
@@ -3780,6 +3990,18 @@ async def _coin_autotrade_monitor_loop():
                         f"monitor: 매도 성공 {market} reason={exit_reason} "
                         f"pnl={pnl_krw:+,.0f}원 ({pnl_pct:+.2f}%)"
                     )
+
+                    # 텔레그램 청산 알림
+                    try:
+                        _send_telegram(
+                            f"🪙 [코인 자동매매] 청산\n"
+                            f"종목: {symbol}\n"
+                            f"사유: {exit_reason}\n"
+                            f"PnL: {pnl_pct:+.2f}%"
+                        )
+                    except Exception as tg_err:
+                        _coin_autotrade_log.warning(f"텔레그램 청산 알림 실패 (무시): {tg_err}")
+
                 else:
                     _coin_autotrade_log.warning(f"monitor: 매도 실패 {market}: {sell_result}")
                     try:

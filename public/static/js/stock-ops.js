@@ -1926,4 +1926,279 @@
     });
   }
 
+  /* ══════════════════════════════════════════════════════════════
+     자동매매 성과 대시보드 — 주식 (stock-ops-pane-at-perf)
+     API: GET /api/autotrade/summary, GET /api/autotrade/orders
+  ══════════════════════════════════════════════════════════════ */
+
+  const SKIP_REASON_KR = {
+    market_closed: '장외 시간',
+    price_too_high: '고가 종목',
+    score_low: '점수 미달',
+    stage_mismatch: '단계 미달',
+    budget_exceeded: '한도 초과',
+    qty_zero: '수량 부족',
+    already_holding: '이미 보유',
+    duplicate_signal: '중복 시그널',
+    price_deviation: '가격 괴리',
+    max_concurrent_holdings: '동시보유 초과',
+    max_sector_concentration: '섹터 집중',
+    symbol_resolve_failed: '종목코드 실패',
+    daily_loss_limit: '일일손실 한도',
+    budget_too_small: '투입금 부족',
+  };
+
+  const STK_EXIT_REASON_MAP = {
+    'stop_loss':       { label: '손절', color: 'rose' },
+    'take_profit':     { label: '익절', color: 'emerald' },
+    'time_decay_6h':   { label: '시간감쇠 6h', color: 'amber' },
+    'time_decay_12h':  { label: '시간감쇠 12h', color: 'amber' },
+    'max_loss':        { label: '강제청산', color: 'rose' },
+    'hold_expired':    { label: '보유만료', color: 'slate' },
+    'market_close':    { label: '장마감', color: 'slate' },
+    'manual':          { label: '수동', color: 'sky' },
+  };
+
+  function fmtStkExitReason(reason) {
+    if (!reason) return '<span class="text-slate-500">-</span>';
+    const m = STK_EXIT_REASON_MAP[reason];
+    if (m) return `<span class="px-1.5 py-0.5 rounded text-[10px] bg-${m.color}-500/20 text-${m.color}-400">${m.label}</span>`;
+    return `<span class="text-slate-400">${esc(reason)}</span>`;
+  }
+
+  let stockAtPerfData = { summary: null, orders: null, loading: false };
+
+  async function loadStockAutoPerf() {
+    if (stockAtPerfData.loading) return;
+    stockAtPerfData.loading = true;
+    const el = document.getElementById('stock-at-perf-content');
+    if (el) el.innerHTML = '<div class="ops-empty">로딩 중...</div>';
+
+    try {
+      const [sumRes, ordRes] = await Promise.allSettled([
+        apiFetch('/api/autotrade/summary'),
+        apiFetch('/api/autotrade/orders?limit=50'),
+      ]);
+
+      if (sumRes.status === 'fulfilled' && sumRes.value.ok) {
+        stockAtPerfData.summary = sumRes.value.body;
+      } else {
+        stockAtPerfData.summary = null;
+        console.warn('[stock-at-perf] summary 로드 실패', sumRes);
+      }
+
+      if (ordRes.status === 'fulfilled' && ordRes.value.ok) {
+        stockAtPerfData.orders = ordRes.value.body;
+      } else {
+        stockAtPerfData.orders = null;
+        console.warn('[stock-at-perf] orders 로드 실패', ordRes);
+      }
+    } catch (e) {
+      console.warn('[stock-at-perf] 네트워크 오류', e);
+    }
+
+    stockAtPerfData.loading = false;
+    renderStockAutoPerf();
+  }
+  window.loadStockAutoPerf = loadStockAutoPerf;
+
+  function renderStockAutoPerf() {
+    const el = document.getElementById('stock-at-perf-content');
+    if (!el) return;
+
+    let html = '';
+
+    // --- 성과 요약 카드 ---
+    const sum = stockAtPerfData.summary;
+    const s = sum && sum.stock ? sum.stock : null;
+
+    if (s) {
+      html += renderSummaryCards(s);
+    } else {
+      html += `<div class="rounded-lg border border-dashed border-slate-700/60 bg-slate-800/20 p-4 mb-4 text-sm text-slate-500">
+        성과 요약 데이터를 불러올 수 없습니다. API를 확인하세요.
+      </div>`;
+    }
+
+    // --- 스킵 현황 ---
+    const skips = sum && sum.recentSkips && sum.recentSkips.stock ? sum.recentSkips.stock : null;
+    html += renderSkipSection(skips, 'stock');
+
+    // --- 주문 목록 테이블 ---
+    const orders = stockAtPerfData.orders;
+    html += renderOrdersTable(orders, 'stock');
+
+    el.innerHTML = html;
+  }
+
+  function renderSummaryCards(s) {
+    const pnlCls = (s.totalPnlKRW || 0) >= 0 ? 'text-green-400' : 'text-red-400';
+    const todayCls = (s.todayPnlKRW || 0) >= 0 ? 'text-green-400' : 'text-red-400';
+    const weekCls = (s.weekPnlKRW || 0) >= 0 ? 'text-green-400' : 'text-red-400';
+
+    return `
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">총 PnL</div>
+          <div class="text-sm font-semibold ${pnlCls}">${fmtKRW(s.totalPnlKRW)}</div>
+          <div class="text-xs ${pnlCls}">${fmtPct(s.totalPnlPct)}</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">승률</div>
+          <div class="text-sm font-semibold text-slate-200">${s.winRate != null ? s.winRate.toFixed(1) + '%' : '-'}</div>
+          <div class="text-xs text-slate-500">${s.wins ?? '-'}W / ${s.losses ?? '-'}L</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">오늘 PnL</div>
+          <div class="text-sm font-semibold ${todayCls}">${fmtKRW(s.todayPnlKRW)}</div>
+          <div class="text-xs text-slate-500">주문 ${s.todayOrders ?? 0}건</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">주간 PnL</div>
+          <div class="text-sm font-semibold ${weekCls}">${fmtKRW(s.weekPnlKRW)}</div>
+          <div class="text-xs text-slate-500">주문 ${s.weekOrders ?? 0}건</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">활성 포지션</div>
+          <div class="text-sm font-semibold text-slate-200">${s.activeOrders ?? 0}</div>
+          <div class="text-xs text-slate-500">전체 ${s.totalOrders ?? 0}건</div>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">평균 수익</div>
+          <div class="text-sm font-semibold text-green-400">${s.avgWinPct != null ? fmtPct(s.avgWinPct) : '-'}</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">평균 손실</div>
+          <div class="text-sm font-semibold text-red-400">${s.avgLossPct != null ? fmtPct(s.avgLossPct) : '-'}</div>
+        </div>
+        <div class="bg-gray-800 rounded-lg p-4">
+          <div class="text-xs text-slate-500 mb-1">종료 주문</div>
+          <div class="text-sm font-semibold text-slate-200">${s.exitedOrders ?? 0}</div>
+        </div>
+      </div>`;
+  }
+
+  function renderSkipSection(skips, market) {
+    if (!skips || !Object.keys(skips).length) {
+      return `<div class="rounded-lg border border-dashed border-slate-700/60 bg-slate-800/20 p-4 mb-4 text-sm text-slate-500">
+        오늘의 스킵 기록이 없습니다.
+      </div>`;
+    }
+
+    const entries = Object.entries(skips).sort((a, b) => b[1] - a[1]);
+    const maxCount = Math.max(...entries.map(e => e[1]), 1);
+
+    let html = `<div class="mb-4">
+      <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">스킵 현황 (오늘)</div>
+      <div class="space-y-1.5">`;
+
+    for (const [reason, count] of entries) {
+      const label = SKIP_REASON_KR[reason] || reason;
+      const pct = (count / maxCount * 100).toFixed(0);
+      html += `
+        <div class="flex items-center gap-2">
+          <div class="w-28 text-xs text-slate-400 truncate" title="${esc(reason)}">${esc(label)}</div>
+          <div class="flex-1 h-4 bg-slate-800 rounded overflow-hidden">
+            <div class="h-full bg-amber-500/40 rounded" style="width:${pct}%"></div>
+          </div>
+          <div class="w-8 text-right text-xs text-slate-400 font-mono">${count}</div>
+        </div>`;
+    }
+
+    html += '</div></div>';
+    return html;
+  }
+
+  function renderOrdersTable(ordersData, market) {
+    const items = (ordersData && ordersData.items) || (Array.isArray(ordersData) ? ordersData : []);
+    if (!items.length) {
+      return `<div class="rounded-lg border border-dashed border-slate-700/60 bg-slate-800/20 p-4 text-sm text-slate-500">
+        자동매매 주문 기록이 없습니다.
+      </div>`;
+    }
+
+    const statusMap = {
+      entered: { label: '진입', cls: 'bg-yellow-500/20 text-yellow-400' },
+      monitoring: { label: '모니터링', cls: 'bg-blue-500/20 text-blue-400' },
+      exit_triggered: { label: '청산중', cls: 'bg-orange-500/20 text-orange-400' },
+      exited: null, // PnL 기준으로 동적 결정
+      failed: { label: '실패', cls: 'bg-red-500/20 text-red-400' },
+    };
+
+    const TH = 'px-3 py-2 text-left text-[11px] font-semibold text-slate-500 uppercase tracking-wider';
+    const TD = 'px-3 py-2 text-xs';
+
+    let html = `
+      <div class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">주문 목록 (최근 50건)</div>
+      <div class="overflow-x-auto rounded-lg border border-slate-700/50">
+        <table class="w-full">
+          <thead class="bg-slate-800/60">
+            <tr>
+              <th class="${TH}">시간</th>
+              <th class="${TH}">종목</th>
+              <th class="${TH}">방향</th>
+              <th class="${TH}">진입가</th>
+              <th class="${TH}">현재/청산가</th>
+              <th class="${TH}">PnL%</th>
+              <th class="${TH}">상태</th>
+              <th class="${TH}">청산사유</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-800">`;
+
+    for (const o of items) {
+      const time = o.created_at || o.createdAt || o.enteredAt || '';
+      const timeStr = time ? new Date(time).toLocaleString('ko-KR', { month:'numeric', day:'numeric', hour:'2-digit', minute:'2-digit' }) : '-';
+      const symbol = o.symbolName || o.symbol || o.symbolCode || '-';
+      const dir = o.direction || o.side || '-';
+      const entryPrice = o.entryPrice || o.avgPrice || 0;
+      const currentPrice = o.exitPrice || o.currentPrice || 0;
+      const pnlPct = o.pnlPct ?? o.pnl_pct ?? null;
+      const status = o.status || 'entered';
+      const exitReason = o.exitReason || o.exit_reason || '';
+
+      // direction badge
+      const dirHtml = dir === 'long' || dir === 'buy'
+        ? '<span class="text-emerald-400 font-semibold">Long</span>'
+        : dir === 'short' || dir === 'sell'
+        ? '<span class="text-rose-400 font-semibold">Short</span>'
+        : `<span class="text-slate-400">${esc(dir)}</span>`;
+
+      // status badge
+      let statusHtml;
+      if (status === 'exited') {
+        const isWin = pnlPct != null && pnlPct >= 0;
+        statusHtml = `<span class="px-1.5 py-0.5 rounded text-[10px] ${isWin ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}">${isWin ? '종료(+)' : '종료(-)'}</span>`;
+      } else {
+        const sm = statusMap[status] || { label: status, cls: 'bg-slate-500/20 text-slate-400' };
+        statusHtml = `<span class="px-1.5 py-0.5 rounded text-[10px] ${sm.cls}">${sm.label}</span>`;
+      }
+
+      // pnl color
+      const pnlHtml = pnlPct != null
+        ? `<span class="${pnlPct >= 0 ? 'text-green-400' : 'text-red-400'} font-semibold">${fmtPct(pnlPct)}</span>`
+        : '<span class="text-slate-500">-</span>';
+
+      // exitReason chip
+      const exitHtml = market === 'stock' ? fmtStkExitReason(exitReason) : exitReason;
+
+      html += `
+            <tr class="hover:bg-slate-800/40">
+              <td class="${TD} text-slate-400">${timeStr}</td>
+              <td class="${TD} text-slate-200 font-semibold">${esc(symbol)}</td>
+              <td class="${TD}">${dirHtml}</td>
+              <td class="${TD} text-slate-300">${entryPrice ? fmtKRW(entryPrice) : '-'}</td>
+              <td class="${TD} text-slate-300">${currentPrice ? fmtKRW(currentPrice) : '-'}</td>
+              <td class="${TD}">${pnlHtml}</td>
+              <td class="${TD}">${statusHtml}</td>
+              <td class="${TD}">${exitHtml}</td>
+            </tr>`;
+    }
+
+    html += '</tbody></table></div>';
+    return html;
+  }
+
 })();
