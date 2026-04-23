@@ -21,6 +21,7 @@ venv/
 .claude/
 .gstack/
 _workspace/
+.codex
 
 # Firebase
 .firebase/

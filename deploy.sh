@@ -4,7 +4,7 @@
 # 사용법: ./deploy.sh YOUR_GCP_PROJECT_ID
 # ============================================================
 
-set -e
+set -euo pipefail
 
 # .env 자동 로드 (이미 export된 값이 있으면 그대로 둠 — 쉘 export 우선)
 ENV_FILE="$(dirname "$0")/.env"
@@ -22,7 +22,7 @@ fi
 REQUIRED_ENVS=(KIS_APP_KEY KIS_APP_SECRET KIS_ACCOUNT_NO KIS_ACCOUNT_PROD NAVER_CLIENT_ID NAVER_CLIENT_SECRET MOLIT_API_KEY TELEGRAM_TOKEN TELEGRAM_CHAT_ID WEBHOOK_SECRET UPBIT_ACCESS_KEY UPBIT_SECRET_KEY)
 MISSING=()
 for v in "${REQUIRED_ENVS[@]}"; do
-  if [ -z "${!v}" ]; then MISSING+=("$v"); fi
+  if [ -z "${!v:-}" ]; then MISSING+=("$v"); fi
 done
 if [ "${#MISSING[@]}" -gt 0 ]; then
   echo "❌ 다음 env 변수가 비어 있습니다 (배포 중단):"
@@ -42,6 +42,7 @@ echo ""
 
 # 1. public/ 정적 자산 최신화 (index.html + static/*)
 echo "[1/5] public/ 동기화 (index.html + static/)..."
+mkdir -p public public/static
 cp index.html public/index.html
 rsync -a --delete static/ public/static/
 
@@ -49,7 +50,7 @@ rsync -a --delete static/ public/static/
 echo "[2/5] Docker 이미지 빌드 및 푸시..."
 gcloud builds submit --tag "${IMAGE}" --project "${PROJECT_ID}"
 
-# 3. Cloud Run 배포 (GCP_PROJECT 주입으로 Vertex AI 사용 가능)
+# 3. Cloud Run 배포
 echo "[3/5] Cloud Run 배포..."
 gcloud run deploy "${SERVICE_NAME}" \
   --image "${IMAGE}" \
@@ -70,7 +71,6 @@ SA_EMAIL=$(gcloud run services describe "${SERVICE_NAME}" \
   --project "${PROJECT_ID}" \
   --format "value(spec.template.spec.serviceAccountName)")
 
-# 서비스 계정이 기본값(compute)이면 자동 감지
 if [ -z "${SA_EMAIL}" ]; then
   PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
   SA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
@@ -82,9 +82,9 @@ gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
   --role="roles/aiplatform.user" \
   --quiet
 
-# 5. Firebase Hosting 배포
-echo "[5/5] Firebase Hosting 배포..."
-firebase deploy --only hosting --project "${PROJECT_ID}"
+# 5. Hosting과 Firestore rules를 같이 배포해 운영 드리프트를 줄인다.
+echo "[5/5] Firebase Hosting + Firestore rules 배포..."
+firebase deploy --only hosting,firestore:rules --project "${PROJECT_ID}"
 
 echo ""
 echo "✅ 배포 완료!"
