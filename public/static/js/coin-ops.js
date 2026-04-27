@@ -1354,6 +1354,12 @@ function _renderEngineConfigUI(config) {
       <td class="${TD_CLS}"><input id="cfg-cutoff-${idx}" data-cfg-field="cutoff" type="number" min="0" max="100" value="${cfg.cutoff ?? ''}" class="w-14 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
       <td class="${TD_CLS}"><input id="cfg-target-${idx}" data-cfg-field="targetPct" type="number" min="0.1" max="10" step="0.1" value="${cfg.targetPct ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
       <td class="${TD_CLS}"><input id="cfg-minrr-${idx}" data-cfg-field="minRR" type="number" min="0.5" max="5" step="0.1" value="${cfg.minRR ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-size-${idx}" data-cfg-field="sizeMultiplier" type="number" min="0.1" max="5" step="0.1" value="${cfg.sizeMultiplier ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-maxkrw-${idx}" data-cfg-field="maxPerSymbolKRW" type="number" min="5000" max="2000000" step="5000" value="${cfg.maxPerSymbolKRW ?? ''}" class="w-24 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-partial-pct-${idx}" data-cfg-field="partialTakeProfitPct" type="number" min="0.5" max="20" step="0.1" value="${cfg.partialTakeProfitPct ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-partial-ratio-${idx}" data-cfg-field="partialTakeProfitRatio" type="number" min="0.1" max="0.9" step="0.1" value="${cfg.partialTakeProfitRatio ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-redip-${idx}" data-cfg-field="reentryDipPct" type="number" min="0.5" max="20" step="0.1" value="${cfg.reentryDipPct ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+      <td class="${TD_CLS}"><input id="cfg-reruns-${idx}" data-cfg-field="maxDailyReentries" type="number" min="0" max="10" step="1" value="${cfg.maxDailyReentries ?? ''}" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
     </tr>`;
 
   el.innerHTML = `
@@ -1366,7 +1372,7 @@ function _renderEngineConfigUI(config) {
         <table class="${TABLE_CLS}">
           <thead class="${THEAD_CLS}"><tr>
             <th class="${TH_CLS}">종목</th><th class="${TH_CLS}">상태</th><th class="${TH_CLS}">Cutoff</th>
-            <th class="${TH_CLS}">Target%</th><th class="${TH_CLS}">MinRR</th>
+            <th class="${TH_CLS}">Target%</th><th class="${TH_CLS}">MinRR</th><th class="${TH_CLS}">SizeX</th><th class="${TH_CLS}">MaxKRW</th><th class="${TH_CLS}">Partial%</th><th class="${TH_CLS}">PartialR</th><th class="${TH_CLS}">ReDip%</th><th class="${TH_CLS}">Re/day</th>
           </tr></thead>
           <tbody id="cfg-tbody" class="${TBODY_CLS}">
             ${entries.map(([sym, cfg], i) => row(sym, cfg, i)).join('')}
@@ -1404,7 +1410,13 @@ function addEngineConfigRow() {
         <input id="cfg-minrr-${idx}" data-cfg-field="minRR" type="number" min="0.5" max="5" step="0.1" value="1.5" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center">
         <button onclick="removeEngineConfigNewRow(${_engineConfigNewRows})" class="text-rose-400 hover:text-rose-300 text-xs px-1">✕</button>
       </div>
-    </td>`;
+    </td>
+    <td class="${TD_CLS}"><input id="cfg-size-${idx}" data-cfg-field="sizeMultiplier" type="number" min="0.1" max="5" step="0.1" value="1.0" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-maxkrw-${idx}" data-cfg-field="maxPerSymbolKRW" type="number" min="5000" max="2000000" step="5000" value="100000" class="w-24 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-partial-pct-${idx}" data-cfg-field="partialTakeProfitPct" type="number" min="0.5" max="20" step="0.1" value="3.0" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-partial-ratio-${idx}" data-cfg-field="partialTakeProfitRatio" type="number" min="0.1" max="0.9" step="0.1" value="0.5" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-redip-${idx}" data-cfg-field="reentryDipPct" type="number" min="0.5" max="20" step="0.1" value="2.5" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>
+    <td class="${TD_CLS}"><input id="cfg-reruns-${idx}" data-cfg-field="maxDailyReentries" type="number" min="0" max="10" step="1" value="2" class="w-16 rounded-md border border-slate-700 bg-slate-900 text-slate-200 text-xs px-2 py-1 text-center"></td>`;
   tbody.appendChild(tr);
 }
 
@@ -1436,6 +1448,12 @@ async function saveEngineConfig() {
     const cutoffEl = tr.querySelector('[data-cfg-field="cutoff"]');
     const targetEl = tr.querySelector('[data-cfg-field="targetPct"]');
     const minrrEl = tr.querySelector('[data-cfg-field="minRR"]');
+    const sizeEl = tr.querySelector('[data-cfg-field="sizeMultiplier"]');
+    const maxkrwEl = tr.querySelector('[data-cfg-field="maxPerSymbolKRW"]');
+    const partialPctEl = tr.querySelector('[data-cfg-field="partialTakeProfitPct"]');
+    const partialRatioEl = tr.querySelector('[data-cfg-field="partialTakeProfitRatio"]');
+    const redipEl = tr.querySelector('[data-cfg-field="reentryDipPct"]');
+    const rerunsEl = tr.querySelector('[data-cfg-field="maxDailyReentries"]');
 
     const entry = {};
     if (statusEl) entry.status = statusEl.value;
@@ -1454,11 +1472,41 @@ async function saveEngineConfig() {
       if (v < 0.5 || v > 5) { valid = false; return; }
       entry.minRR = v;
     }
+    if (sizeEl && sizeEl.value !== '') {
+      const v = parseFloat(sizeEl.value);
+      if (v < 0.1 || v > 5) { valid = false; return; }
+      entry.sizeMultiplier = v;
+    }
+    if (maxkrwEl && maxkrwEl.value !== '') {
+      const v = parseInt(maxkrwEl.value);
+      if (v < 5000 || v > 2000000) { valid = false; return; }
+      entry.maxPerSymbolKRW = v;
+    }
+    if (partialPctEl && partialPctEl.value !== '') {
+      const v = parseFloat(partialPctEl.value);
+      if (v < 0.5 || v > 20) { valid = false; return; }
+      entry.partialTakeProfitPct = v;
+    }
+    if (partialRatioEl && partialRatioEl.value !== '') {
+      const v = parseFloat(partialRatioEl.value);
+      if (v <= 0 || v >= 1) { valid = false; return; }
+      entry.partialTakeProfitRatio = v;
+    }
+    if (redipEl && redipEl.value !== '') {
+      const v = parseFloat(redipEl.value);
+      if (v < 0.5 || v > 20) { valid = false; return; }
+      entry.reentryDipPct = v;
+    }
+    if (rerunsEl && rerunsEl.value !== '') {
+      const v = parseInt(rerunsEl.value);
+      if (v < 0 || v > 10) { valid = false; return; }
+      entry.maxDailyReentries = v;
+    }
     if (Object.keys(entry).length) payload[sym] = entry;
   });
 
   if (!valid) {
-    if (msg) { msg.style.color = '#f87171'; msg.textContent = '입력값 범위를 확인하세요 (cutoff 0~100, target 0.1~10, minRR 0.5~5)'; }
+    if (msg) { msg.style.color = '#f87171'; msg.textContent = '입력값 범위를 확인하세요 (cutoff 0~100, target 0.1~10, minRR 0.5~5, size 0.1~5, maxKRW 5000~2000000, partial 0.5~20, ratio 0~1, reentry 0.5~20, re/day 0~10)'; }
     btn.disabled = false; btn.style.opacity = '1'; return;
   }
 

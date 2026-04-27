@@ -851,6 +851,8 @@
     const currentInvested = cfg.currentInvestedKRW != null ? cfg.currentInvestedKRW : 0;
     const todayOrders = cfg.todayOrderCount != null ? cfg.todayOrderCount : 0;
     const marketOpen = !!cfg.marketOpen;
+    const ready = cfg.ready !== false;
+    const blockedMessages = Array.isArray(cfg.blockedReasonMessages) ? cfg.blockedReasonMessages : [];
 
     // 진행 바: currentInvested / maxTotal
     const pct = maxTotal > 0 ? Math.min(100, (currentInvested / maxTotal) * 100) : 0;
@@ -879,6 +881,12 @@
           ? '<span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>장중</span>'
           : '<span class="text-slate-600">장외</span>'}</span>
       </div>`;
+
+    const blockedHtml = !ready && blockedMessages.length
+      ? `<div class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
+          ${blockedMessages.map(msg => `<div>${esc(msg)}</div>`).join('')}
+        </div>`
+      : '';
 
     // 설정 편집 폼
     let settingsForm = '';
@@ -984,6 +992,7 @@
         </div>
         ${progressBar}
         ${statsRow}
+        ${blockedHtml}
         ${settingsForm}
         ${logsHtml}
       </div>${killModal}`;

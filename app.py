@@ -852,6 +852,86 @@ def _save_autotrade_config(updates: dict):
     _autotrade_config_ts = _time.time()
 
 
+def _stock_autotrade_status_snapshot(cfg: dict | None = None) -> dict:
+    """주식 자동매매의 실행 준비 상태를 계산한다."""
+    blocked_reasons: list[str] = []
+    if not _kis_account_configured():
+        blocked_reasons.append("kis_env_missing")
+    if not WEBHOOK_SECRET:
+        blocked_reasons.append("webhook_secret_missing")
+
+    reason_messages = {
+        "kis_env_missing": "KIS_APP_KEY/KIS_APP_SECRET/KIS_ACCOUNT_NO/KIS_ACCOUNT_PROD가 설정되지 않았습니다.",
+        "webhook_secret_missing": "WEBHOOK_SECRET이 설정되지 않아 시그널 웹훅을 받을 수 없습니다.",
+    }
+    return {
+        "ready": len(blocked_reasons) == 0,
+        "blockedReasons": blocked_reasons,
+        "blockedReasonMessages": [reason_messages[r] for r in blocked_reasons if r in reason_messages],
+        "enabled": bool((cfg or {}).get("enabled")),
+    }
+
+
+def _autotrade_event_detail(base: dict, **updates) -> dict:
+    """자동매매 event payload를 일관된 shape로 정리한다."""
+    detail = {
+        "symbol": base.get("symbol", ""),
+        "symbolCode": base.get("symbolCode", ""),
+        "signalId": base.get("signalId", ""),
+        "score": base.get("score"),
+        "stage": base.get("stage", ""),
+        "direction": base.get("direction", ""),
+        "entryPrice": base.get("entryPrice"),
+        "currentPrice": base.get("currentPrice"),
+        "budget": base.get("budget"),
+        "qty": base.get("qty"),
+    }
+    detail.update(updates)
+    return {k: v for k, v in detail.items() if v is not None and v != ""}
+
+
+def _market_closed_skip_detail(base: dict) -> dict:
+    """장외 스킵 payload를 구성한다.
+
+    trade_ready 신호가 장외에 들어오면 발신기 정책 위반을 식별할 수 있게 경고 필드를 추가한다.
+    """
+    updates = {"reason": "market_closed"}
+    if (base.get("stage") or "") == "trade_ready":
+        updates["warning"] = "after_hours_trade_ready"
+    return _autotrade_event_detail(base, **updates)
+
+
+def _stock_autotrade_debug_snapshot(db, limit: int = 20) -> dict:
+    """최근 주식 신호와 자동매매 skip/error 이벤트를 묶어 반환한다."""
+    signals = [
+        _doc_to_dict(d) for d in db.collection("stock_signals")
+        .order_by("created_at", direction=_firestore.Query.DESCENDING)
+        .limit(limit).stream()
+    ]
+    skips = [
+        _doc_to_dict(d) for d in db.collection("events")
+        .order_by("created_at", direction=_firestore.Query.DESCENDING)
+        .where("kind", "==", "autotrade_skip")
+        .limit(limit).stream()
+    ]
+    errors = [
+        _doc_to_dict(d) for d in db.collection("events")
+        .order_by("created_at", direction=_firestore.Query.DESCENDING)
+        .where("kind", "==", "autotrade_error")
+        .limit(limit).stream()
+    ]
+    return {
+        "recentSignals": signals,
+        "recentSkips": skips,
+        "recentErrors": errors,
+        "counts": {
+            "recentSignals": len(signals),
+            "recentSkips": len(skips),
+            "recentErrors": len(errors),
+        },
+    }
+
+
 def _resolve_symbol_code(symbol_raw: str) -> str | None:
     """symbol이 종목코드(6자리 숫자)이면 그대로, 종목명이면 네이버 검색으로 코드 변환.
 
@@ -1015,6 +1095,15 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
     stage = norm.get("stage", "")
     stop_loss = norm.get("stopLoss", 0)
     target_price = norm.get("targetPrice", 0)
+    entry_price_hint = float(norm.get("entryPrice") or 0)
+    event_base = {
+        "symbol": symbol_raw,
+        "signalId": signal_doc_id,
+        "score": score,
+        "stage": stage,
+        "direction": direction,
+        "entryPrice": entry_price_hint,
+    }
 
     def _log_event(kind: str, detail: dict):
         try:
@@ -1033,18 +1122,19 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             proc_ref = db.collection("autotrade_processed").document(signal_doc_id)
             if proc_ref.get().exists:
                 _autotrade_log.info(f"autotrade skip: 이미 처리된 시그널: {signal_doc_id}")
-                _log_event("autotrade_skip", {
-                    "reason": "duplicate_signal", "symbol": symbol_raw,
-                    "signalId": signal_doc_id,
-                })
+                _log_event("autotrade_skip", _autotrade_event_detail(
+                    event_base,
+                    reason="duplicate_signal",
+                ))
                 return
         except Exception as e:
             # fail-closed: 중복 체크 실패 시 주문 안 함 (실돈 안전)
             _autotrade_log.error(f"autotrade: 중복 체크 실패 → skip: {e}")
-            _log_event("autotrade_error", {
-                "reason": "duplicate_check_failed", "symbol": symbol_raw,
-                "signalId": signal_doc_id, "error": str(e),
-            })
+            _log_event("autotrade_error", _autotrade_event_detail(
+                event_base,
+                reason="duplicate_check_failed",
+                error=str(e),
+            ))
             return
 
     # 1) enabled 체크
@@ -1065,44 +1155,46 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
     # 3) 장중 확인
     if not _is_market_open_now():
         _autotrade_log.info("autotrade skip: 장외 시간")
-        _log_event("autotrade_skip", {
-            "reason": "market_closed", "symbol": symbol_raw, "signalId": signal_doc_id,
-        })
+        _log_event("autotrade_skip", _market_closed_skip_detail(event_base))
         return
 
     # 4) symbol 해결 — symbolCode 우선 사용 (v2)
     symbol_code_from_norm = (norm.get("symbolCode") or "").strip()
     if symbol_code_from_norm and re.fullmatch(r"\d{6}", symbol_code_from_norm):
         symbol_code = symbol_code_from_norm
+        event_base["symbolCode"] = symbol_code
     else:
         # fallback: 종목명으로 해결 (하위 호환)
         symbol_code = await asyncio.to_thread(_resolve_symbol_code, symbol_raw)
+        event_base["symbolCode"] = symbol_code or ""
         if symbol_code:
-            _log_event("autotrade_skip", {
-                "reason": "symbolCode_missing_fallback_used", "symbol": symbol_raw,
-                "symbolCode": symbol_code, "signalId": signal_doc_id,
-                "warning": "symbolCode_missing",
-            })
+            _log_event("autotrade_skip", _autotrade_event_detail(
+                event_base,
+                reason="symbolCode_missing_fallback_used",
+                warning="symbolCode_missing",
+            ))
         if not symbol_code:
             _autotrade_log.warning(f"autotrade skip: symbol 해결 실패: {symbol_raw}")
-            _log_event("autotrade_error", {
-                "reason": "symbol_resolve_failed", "symbol": symbol_raw,
-                "signalId": signal_doc_id, "warning": "symbolCode_missing",
-            })
+            _log_event("autotrade_error", _autotrade_event_detail(
+                event_base,
+                reason="symbol_resolve_failed",
+                warning="symbolCode_missing",
+            ))
             return
 
     # 4-b) 가격 사전 필터: entryPrice 기준으로 1주도 못 사면 조기 스킵 (API 호출 절약)
-    entry_price_hint = float(norm.get("entryPrice") or 0)
     max_per_symbol = cfg.get("maxPerSymbolKRW", 100_000)
     if entry_price_hint > 0 and entry_price_hint > max_per_symbol:
         _autotrade_log.info(
             f"autotrade skip: 고가 종목 ({symbol_raw} ≈{entry_price_hint:,.0f}원 > 한도 {max_per_symbol:,.0f}원)"
         )
-        _log_event("autotrade_skip", {
-            "reason": "price_too_high", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id,
-            "entryPrice": entry_price_hint, "maxPerSymbolKRW": max_per_symbol,
-        })
+        _log_event("autotrade_skip", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="price_too_high",
+            budget=max_per_symbol,
+            maxPerSymbolKRW=max_per_symbol,
+        ))
         return
 
     # 4-c) 리스크 필터: 동시 보유 수 + 섹터 집중도 (v2)
@@ -1111,11 +1203,13 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
     max_concurrent = cfg.get("maxConcurrentHoldings", 5)
     if len(active_orders) >= max_concurrent:
         _autotrade_log.info(f"autotrade skip: 동시 보유 상한 도달 ({len(active_orders)}/{max_concurrent})")
-        _log_event("autotrade_skip", {
-            "reason": "max_concurrent_holdings", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id,
-            "currentCount": len(active_orders), "maxConcurrentHoldings": max_concurrent,
-        })
+        _log_event("autotrade_skip", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="max_concurrent_holdings",
+            currentCount=len(active_orders),
+            maxConcurrentHoldings=max_concurrent,
+        ))
         return
 
     # 섹터 집중도 체크
@@ -1136,12 +1230,14 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         )
         if same_sector_count >= max_sector_conc:
             _autotrade_log.info(f"autotrade skip: 섹터 집중 ({signal_sector}: {same_sector_count}/{max_sector_conc})")
-            _log_event("autotrade_skip", {
-                "reason": "max_sector_concentration", "symbol": symbol_raw,
-                "symbolCode": symbol_code, "signalId": signal_doc_id,
-                "sector": signal_sector, "sectorCount": same_sector_count,
-                "maxSectorConcentration": max_sector_conc,
-            })
+            _log_event("autotrade_skip", _autotrade_event_detail(
+                event_base,
+                symbolCode=symbol_code,
+                reason="max_sector_concentration",
+                sector=signal_sector,
+                sectorCount=same_sector_count,
+                maxSectorConcentration=max_sector_conc,
+            ))
             return
 
     # 5) 현재 보유 + 잔액 확인
@@ -1149,10 +1245,12 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
         snapshot = await asyncio.to_thread(_fetch_kis_account_snapshot, True)
     except Exception as e:
         _autotrade_log.error(f"autotrade error: 계좌 조회 실패: {e}")
-        _log_event("autotrade_error", {
-            "reason": "account_fetch_failed", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id, "error": str(e),
-        })
+        _log_event("autotrade_error", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="account_fetch_failed",
+            error=str(e),
+        ))
         return
 
     holdings = snapshot.get("holdings", [])
@@ -1160,10 +1258,11 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
     for h in holdings:
         if h.get("symbol") == symbol_code:
             _autotrade_log.info(f"autotrade skip: 이미 보유 중: {symbol_code}")
-            _log_event("autotrade_skip", {
-                "reason": "already_holding", "symbol": symbol_raw,
-                "symbolCode": symbol_code, "signalId": signal_doc_id,
-            })
+            _log_event("autotrade_skip", _autotrade_event_detail(
+                event_base,
+                symbolCode=symbol_code,
+                reason="already_holding",
+            ))
             return
 
     # 현재 투자 총액 (보유 종목 평가금액 합)
@@ -1174,11 +1273,14 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
 
     if remaining <= 0:
         _autotrade_log.info(f"autotrade skip: 한도 초과 (invested={current_invested}, max={max_total})")
-        _log_event("autotrade_skip", {
-            "reason": "budget_exceeded", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id,
-            "currentInvested": current_invested, "maxTotalKRW": max_total,
-        })
+        _log_event("autotrade_skip", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="budget_exceeded",
+            currentInvested=current_invested,
+            maxTotalKRW=max_total,
+            budget=remaining,
+        ))
         return
 
     # 6) 현재가 조회
@@ -1191,10 +1293,12 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
             raise ValueError(f"현재가 이상: {current_price}")
     except Exception as e:
         _autotrade_log.error(f"autotrade error: 현재가 조회 실패: {symbol_code}: {e}")
-        _log_event("autotrade_error", {
-            "reason": "price_fetch_failed", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id, "error": str(e),
-        })
+        _log_event("autotrade_error", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="price_fetch_failed",
+            error=str(e),
+        ))
         return
 
     # 6-b) 가격 보호장치: entryPrice 대비 현재가 괴리율 체크
@@ -1206,12 +1310,13 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
                 f"autotrade skip: 가격 괴리 {deviation:.1%} "
                 f"(entry={entry_price}, current={current_price})"
             )
-            _log_event("autotrade_skip", {
-                "reason": "price_deviation", "symbol": symbol_raw,
-                "symbolCode": symbol_code, "signalId": signal_doc_id,
-                "entryPrice": entry_price, "currentPrice": current_price,
-                "deviation": round(deviation, 4),
-            })
+            _log_event("autotrade_skip", _autotrade_event_detail(
+                event_base,
+                symbolCode=symbol_code,
+                reason="price_deviation",
+                currentPrice=current_price,
+                deviation=round(deviation, 4),
+            ))
             return
 
     # 7) 수량 계산
@@ -1219,11 +1324,14 @@ async def _autotrade_on_signal(norm: dict, signal_doc_id: str):
     qty = int(budget / current_price)
     if qty <= 0:
         _autotrade_log.info(f"autotrade skip: 수량 0 (budget={budget}, price={current_price})")
-        _log_event("autotrade_skip", {
-            "reason": "qty_zero", "symbol": symbol_raw,
-            "symbolCode": symbol_code, "signalId": signal_doc_id,
-            "budget": budget, "currentPrice": current_price,
-        })
+        _log_event("autotrade_skip", _autotrade_event_detail(
+            event_base,
+            symbolCode=symbol_code,
+            reason="qty_zero",
+            budget=budget,
+            currentPrice=current_price,
+            qty=qty,
+        ))
         return
 
     # 8) 주문 전 로깅
@@ -1620,6 +1728,26 @@ async def api_autotrade_orders(
         return {"items": [_doc_to_dict(d) for d in docs]}
     except Exception:
         return {"items": [], "error": "autotrade_orders 조회 실패"}
+
+
+@app.get("/api/autotrade/debug")
+async def api_autotrade_debug(
+    limit: int = Query(default=20, le=100),
+    user: dict = Depends(verify_firebase_token),
+):
+    """주식 자동매매 진단용 최근 신호/skip/error 묶음 조회."""
+    _ensure_admin(user)
+    try:
+        db = _get_firestore()
+        return _stock_autotrade_debug_snapshot(db, limit=limit)
+    except Exception:
+        return {
+            "recentSignals": [],
+            "recentSkips": [],
+            "recentErrors": [],
+            "counts": {"recentSignals": 0, "recentSkips": 0, "recentErrors": 0},
+            "error": "autotrade debug 조회 실패",
+        }
 
 
 # ── 자동매매 성과 요약 엔드포인트 ─────────────────────────────
@@ -3180,7 +3308,7 @@ async def api_autotrade_config_get(user: dict = Depends(verify_firebase_token)):
     """자동매매 설정 조회 (admin only). 동적 필드(투자잔액/주문건수/장상태) 포함."""
     _ensure_admin(user)
     cfg = _load_autotrade_config(force=True)  # 항상 최신
-    extra: dict = {}
+    extra: dict = _stock_autotrade_status_snapshot(cfg)
     # 현재 투자 잔액
     try:
         snapshot = _fetch_kis_account_snapshot(force=False)
@@ -3223,6 +3351,10 @@ async def api_autotrade_config_post(req: Request, user: dict = Depends(verify_fi
     if "enabled" in body:
         if not isinstance(body["enabled"], bool):
             raise HTTPException(400, "enabled must be bool")
+        if body["enabled"]:
+            status = _stock_autotrade_status_snapshot(_autotrade_config)
+            if not status["ready"]:
+                raise HTTPException(503, " / ".join(status["blockedReasonMessages"]))
     if "maxTotalKRW" in body:
         v = body["maxTotalKRW"]
         if not isinstance(v, (int, float)) or v < 10000 or v > 1_000_000:
@@ -3341,6 +3473,10 @@ _COIN_AUTOTRADE_DEFAULTS: dict = {
 _coin_autotrade_config: dict = {**_COIN_AUTOTRADE_DEFAULTS}
 _coin_autotrade_config_ts: float = 0.0
 _COIN_AUTOTRADE_CACHE_TTL: float = 30.0
+_COIN_ENGINE_DEFAULTS: dict = {"symbols": {}}
+_coin_engine_config: dict = {**_COIN_ENGINE_DEFAULTS}
+_coin_engine_config_ts: float = 0.0
+_COIN_ENGINE_CACHE_TTL: float = 30.0
 
 
 def _load_coin_autotrade_config(force: bool = False) -> dict:
@@ -3378,6 +3514,137 @@ def _save_coin_autotrade_config(updates: dict):
         raise
     _coin_autotrade_config.update(updates)
     _coin_autotrade_config_ts = _time.time()
+
+
+def _load_coin_engine_config(force: bool = False) -> dict:
+    """Firestore settings/coin-engine에서 심볼별 전략 설정 로드."""
+    global _coin_engine_config, _coin_engine_config_ts
+    import time as _time
+    now = _time.time()
+    if not force and (now - _coin_engine_config_ts) < _COIN_ENGINE_CACHE_TTL:
+        return _coin_engine_config
+    try:
+        db = _get_firestore()
+        doc = db.collection("settings").document("coin-engine").get()
+        if doc.exists:
+            saved = doc.to_dict() or {}
+            merged = {**_COIN_ENGINE_DEFAULTS, **saved}
+            merged["symbols"] = saved.get("symbols", {}) if isinstance(saved.get("symbols", {}), dict) else {}
+            _coin_engine_config.clear()
+            _coin_engine_config.update(merged)
+        else:
+            _coin_engine_config.clear()
+            _coin_engine_config.update(_COIN_ENGINE_DEFAULTS)
+        _coin_engine_config_ts = now
+    except Exception as e:
+        _coin_autotrade_log.warning(f"coin engine config 로드 실패 (메모리 캐시 유지): {e}")
+    return _coin_engine_config
+
+
+def _coin_engine_symbol_config(symbol: str, engine_cfg: dict | None = None) -> dict:
+    """코인별 엔진 설정 조회. 심볼은 대소문자 무시."""
+    symbols = ((engine_cfg or {}).get("symbols") or {})
+    symbol_upper = (symbol or "").strip().upper().replace("KRW-", "")
+    if not symbol_upper or not isinstance(symbols, dict):
+        return {}
+    matched = symbols.get(symbol_upper)
+    return matched if isinstance(matched, dict) else {}
+
+
+def _coin_invest_budget_plan(
+    *,
+    total_asset: float,
+    current_invested: float,
+    krw_balance: float,
+    max_total: float,
+    default_position_size_pct: float,
+    default_max_per_symbol: float,
+    symbol_cfg: dict | None = None,
+) -> dict:
+    """코인 진입 예산 계산. 심볼별 sizeMultiplier / maxPerSymbolKRW override 지원."""
+    symbol_cfg = symbol_cfg or {}
+    size_multiplier = float(symbol_cfg.get("sizeMultiplier") or 1.0)
+    size_multiplier = max(0.1, min(size_multiplier, 5.0))
+    position_size_pct = default_position_size_pct * size_multiplier
+    budget_by_pct = total_asset * (position_size_pct / 100.0)
+    max_per_symbol = float(symbol_cfg.get("maxPerSymbolKRW") or default_max_per_symbol)
+    remaining = max_total - current_invested
+    invest_krw = int(min(budget_by_pct, max_per_symbol, remaining, krw_balance))
+    return {
+        "sizeMultiplier": round(size_multiplier, 4),
+        "positionSizePct": round(position_size_pct, 4),
+        "budgetByPct": int(budget_by_pct),
+        "maxPerSymbolKRW": int(max_per_symbol),
+        "remainingKRW": int(remaining),
+        "investKRW": invest_krw,
+    }
+
+
+def _coin_partial_take_profit_plan(
+    *,
+    current_price: float,
+    entry_price: float,
+    current_volume: float,
+    order: dict,
+    symbol_cfg: dict | None = None,
+) -> dict:
+    """부분익절 실행 여부와 매도 수량 계산."""
+    symbol_cfg = symbol_cfg or {}
+    threshold_pct = float(symbol_cfg.get("partialTakeProfitPct") or 0)
+    ratio = float(symbol_cfg.get("partialTakeProfitRatio") or 0)
+    if threshold_pct <= 0 or ratio <= 0 or current_volume <= 0 or entry_price <= 0:
+        return {"shouldSell": False}
+    if bool(order.get("partialExitDone")):
+        return {"shouldSell": False}
+    pnl_pct = ((current_price - entry_price) / entry_price) * 100
+    if pnl_pct < threshold_pct:
+        return {"shouldSell": False, "thresholdPct": threshold_pct, "pnlPct": round(pnl_pct, 4)}
+    sell_volume = round(current_volume * min(max(ratio, 0.05), 0.95), 12)
+    if sell_volume <= 0:
+        return {"shouldSell": False}
+    return {
+        "shouldSell": True,
+        "thresholdPct": threshold_pct,
+        "sellRatio": ratio,
+        "sellVolume": sell_volume,
+        "pnlPct": round(pnl_pct, 4),
+    }
+
+
+def _coin_reentry_check(
+    *,
+    current_price: float,
+    symbol_cfg: dict | None = None,
+    last_exited_order: dict | None = None,
+    daily_reentry_count: int = 0,
+) -> tuple[bool, dict]:
+    """직전 청산가 대비 눌림 재진입 허용 여부."""
+    symbol_cfg = symbol_cfg or {}
+    if not last_exited_order:
+        return True, {"mode": "initial_entry"}
+    max_daily = int(symbol_cfg.get("maxDailyReentries") or 0)
+    if max_daily > 0 and daily_reentry_count >= max_daily:
+        return False, {"reason": "reentry_daily_limit", "dailyReentryCount": daily_reentry_count, "maxDailyReentries": max_daily}
+    exit_price = float(last_exited_order.get("exitPrice") or 0)
+    dip_pct = float(symbol_cfg.get("reentryDipPct") or 0)
+    if exit_price <= 0 or dip_pct <= 0:
+        return True, {"mode": "reentry_no_dip_rule"}
+    trigger_price = exit_price * (1 - dip_pct / 100.0)
+    if current_price <= trigger_price:
+        return True, {
+            "mode": "reentry",
+            "lastExitPrice": exit_price,
+            "dipPct": dip_pct,
+            "triggerPrice": round(trigger_price, 8),
+            "dailyReentryCount": daily_reentry_count,
+        }
+    return False, {
+        "reason": "reentry_price_not_reached",
+        "lastExitPrice": exit_price,
+        "dipPct": dip_pct,
+        "triggerPrice": round(trigger_price, 8),
+        "currentPrice": current_price,
+    }
 
 
 # 업비트 API — n8n 서버 프록시 경유 (IP 화이트리스트 우회)
@@ -3455,6 +3722,65 @@ def _get_active_coin_autotrade_orders(db) -> list[dict]:
     return active
 
 
+def _get_latest_exited_coin_order(db, symbol: str, within_hours: int = 24) -> dict | None:
+    """최근 청산된 동일 심볼 주문 1건 조회."""
+    symbol_upper = (symbol or "").strip().upper().replace("KRW-", "")
+    if not symbol_upper:
+        return None
+    try:
+        docs = list(
+            db.collection("coin_autotrade_orders")
+            .where("symbol", "==", symbol_upper)
+            .where("status", "==", "exited")
+            .order_by("exitedAt", direction=_firestore.Query.DESCENDING)
+            .limit(5)
+            .stream()
+        )
+    except Exception:
+        return None
+    if not docs:
+        return None
+    now_kst = datetime.now(timezone(timedelta(hours=9)))
+    for d in docs:
+        rec = d.to_dict() or {}
+        exited_at = rec.get("exitedAt")
+        try:
+            exited_dt = datetime.fromisoformat(exited_at) if isinstance(exited_at, str) else exited_at
+            if exited_dt and exited_dt.tzinfo is None:
+                exited_dt = exited_dt.replace(tzinfo=timezone(timedelta(hours=9)))
+            if exited_dt and ((now_kst - exited_dt).total_seconds() / 3600) <= within_hours:
+                rec["_doc_id"] = d.id
+                return rec
+        except Exception:
+            continue
+    return None
+
+
+def _count_coin_reentries_today(db, symbol: str) -> int:
+    """오늘 동일 심볼 재진입 횟수 집계."""
+    symbol_upper = (symbol or "").strip().upper().replace("KRW-", "")
+    if not symbol_upper:
+        return 0
+    kst = timezone(timedelta(hours=9))
+    kst_today = datetime.now(kst).replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        docs = list(
+            db.collection("coin_autotrade_orders")
+            .where("symbol", "==", symbol_upper)
+            .where("enteredAt", ">=", kst_today.isoformat())
+            .limit(100)
+            .stream()
+        )
+    except Exception:
+        return 0
+    count = 0
+    for d in docs:
+        rec = d.to_dict() or {}
+        if rec.get("entryKind") == "reentry":
+            count += 1
+    return count
+
+
 async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
     """코인 signal 수신 후 자동매매 조건 체크 → 업비트 매수 주문."""
     db = _get_firestore()
@@ -3466,6 +3792,9 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
     stop_loss = norm.get("stopLoss", 0)
     target_price = norm.get("targetPrice", 0) if norm.get("targetPrice") else 0
     entry_price_signal = float(norm.get("entryPrice") or 0)
+    engine_cfg = _load_coin_engine_config()
+    symbol_upper = symbol_raw.strip().upper().replace("KRW-", "")
+    symbol_cfg = _coin_engine_symbol_config(symbol_upper, engine_cfg)
 
     # targetPrice 자동 계산: 시그널에 없으면 entryPrice +3% (백테스트 target_reached 평균 기반)
     if not target_price and entry_price_signal > 0:
@@ -3518,7 +3847,6 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
         return
 
     # 심볼 허용 목록 (BTC → allowedSymbols에 BTC 있는지)
-    symbol_upper = symbol_raw.strip().upper().replace("KRW-", "")
     if symbol_upper not in [s.upper() for s in cfg.get("allowedSymbols", [])]:
         _coin_autotrade_log.info(f"coin autotrade skip: symbol={symbol_upper} not in allowedSymbols")
         return
@@ -3636,13 +3964,37 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
             })
             return
 
+    # 7-c) 청산 후 눌림 재진입 규칙
+    last_exited_order = await asyncio.to_thread(_get_latest_exited_coin_order, db, symbol_upper, 24)
+    daily_reentry_count = await asyncio.to_thread(_count_coin_reentries_today, db, symbol_upper)
+    reentry_allowed, reentry_detail = _coin_reentry_check(
+        current_price=current_price,
+        symbol_cfg=symbol_cfg,
+        last_exited_order=last_exited_order,
+        daily_reentry_count=daily_reentry_count,
+    )
+    if not reentry_allowed:
+        _coin_autotrade_log.info(f"coin autotrade skip: 재진입 조건 미충족 {symbol_upper} {reentry_detail}")
+        _log_event("coin_autotrade_skip", {
+            "symbol": symbol_raw,
+            "signalId": signal_doc_id,
+            **reentry_detail,
+        })
+        return
+    entry_kind = reentry_detail.get("mode", "initial_entry")
+
     # 8) 투입 금액 계산
-    position_size_pct = cfg.get("positionSizePct", 10.0)
     total_asset = krw_balance + current_invested
-    budget_by_pct = total_asset * (position_size_pct / 100.0)
-    max_per_symbol = cfg.get("maxPerSymbolKRW", 100_000)
-    invest_krw = min(budget_by_pct, max_per_symbol, remaining, krw_balance)
-    invest_krw = int(invest_krw)  # 업비트는 정수 KRW
+    budget_plan = _coin_invest_budget_plan(
+        total_asset=total_asset,
+        current_invested=current_invested,
+        krw_balance=krw_balance,
+        max_total=max_total,
+        default_position_size_pct=cfg.get("positionSizePct", 10.0),
+        default_max_per_symbol=cfg.get("maxPerSymbolKRW", 100_000),
+        symbol_cfg=symbol_cfg,
+    )
+    invest_krw = budget_plan["investKRW"]
 
     if invest_krw < 5000:  # 업비트 최소 주문 5,000원
         _coin_autotrade_log.info(f"coin autotrade skip: 투입금 부족 (invest_krw={invest_krw})")
@@ -3650,6 +4002,8 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
             "reason": "budget_too_small", "symbol": symbol_raw,
             "signalId": signal_doc_id,
             "investKRW": invest_krw, "krwBalance": krw_balance,
+            "sizeMultiplier": budget_plan["sizeMultiplier"],
+            "maxPerSymbolKRW": budget_plan["maxPerSymbolKRW"],
         })
         return
 
@@ -3660,6 +4014,9 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
         "score": score, "stage": stage, "direction": direction,
         "stopLoss": stop_loss, "targetPrice": target_price,
         "signalId": signal_doc_id,
+        "entryKind": entry_kind,
+        "sizeMultiplier": budget_plan["sizeMultiplier"],
+        "symbolMaxPerKRW": budget_plan["maxPerSymbolKRW"],
     }
     _coin_autotrade_log.info(f"coin autotrade 매수 주문 시도: {order_detail}")
     _log_event("coin_autotrade_attempt", order_detail)
@@ -3716,6 +4073,8 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
             "targetPrice":  target_price,
             "ordUuid":      order_uuid,
             "status":       "entered",
+            "entryKind":    entry_kind,
+            "reentryFromOrderId": (last_exited_order or {}).get("_doc_id"),
             "enteredAt":    datetime.now(timezone(timedelta(hours=9))).isoformat(),
             "exitedAt":     None,
             "exitOrdUuid":  None,
@@ -3723,6 +4082,15 @@ async def _coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
             "pnlKRW":       None,
             "pnlPct":       None,
             "exitReason":   None,
+            "partialExitDone": False,
+            "partialExitAt": None,
+            "partialExitPrice": None,
+            "partialExitVolume": None,
+            "partialExitOrdUuid": None,
+            "partialTakeProfitPct": symbol_cfg.get("partialTakeProfitPct"),
+            "partialTakeProfitRatio": symbol_cfg.get("partialTakeProfitRatio"),
+            "reentryDipPct": symbol_cfg.get("reentryDipPct"),
+            "maxDailyReentries": symbol_cfg.get("maxDailyReentries"),
             "created_at":   _firestore.SERVER_TIMESTAMP,
         }
         db.collection("coin_autotrade_orders").document(signal_doc_id).set(order_doc)
@@ -3795,6 +4163,7 @@ async def _coin_autotrade_monitor_loop():
                 continue
 
             cfg = _load_coin_autotrade_config()
+            engine_cfg = _load_coin_engine_config()
             max_hold_hours = cfg.get("maxHoldHours", 24)
             max_daily_loss = cfg.get("maxDailyLossPct", -2.0)
             max_total = cfg.get("maxTotalKRW", 200_000)
@@ -3822,6 +4191,7 @@ async def _coin_autotrade_monitor_loop():
                 doc_id = order.get("_doc_id", "")
                 market = order.get("market", "")
                 symbol = order.get("symbol", "")
+                symbol_cfg = _coin_engine_symbol_config(symbol, engine_cfg)
                 entry_price = float(order.get("entryPrice") or 0)
                 sl = float(order.get("stopLoss") or 0)
                 tp = float(order.get("targetPrice") or 0)
@@ -3872,12 +4242,96 @@ async def _coin_autotrade_monitor_loop():
                     except (ValueError, TypeError):
                         hold_hours = 0.0
 
+                order_partial_cfg = {
+                    "partialTakeProfitPct": order.get("partialTakeProfitPct", symbol_cfg.get("partialTakeProfitPct")),
+                    "partialTakeProfitRatio": order.get("partialTakeProfitRatio", symbol_cfg.get("partialTakeProfitRatio")),
+                }
+
+                # 부분익절: +N% 도달 시 일부만 먼저 매도하고, 나머지는 trailing/hold로 관리
+                partial_plan = _coin_partial_take_profit_plan(
+                    current_price=current_price,
+                    entry_price=entry_price,
+                    current_volume=0.0,  # balance 조회 후 보정
+                    order=order,
+                    symbol_cfg=order_partial_cfg,
+                )
+                if partial_plan.get("thresholdPct") and not partial_plan.get("shouldSell"):
+                    order["_partialThresholdPct"] = partial_plan["thresholdPct"]
+                if partial_plan.get("thresholdPct") and not order.get("partialExitDone"):
+                    balance_volume = 0.0
+                    try:
+                        accs = await asyncio.to_thread(_upbit_get_accounts)
+                        for acc in accs:
+                            if acc.get("currency", "").upper() == symbol.upper():
+                                balance_volume = float(acc.get("balance") or 0)
+                                break
+                    except Exception as e:
+                        _coin_autotrade_log.warning(f"monitor: 부분익절 잔고 조회 실패 {symbol}: {e}")
+                    partial_plan = _coin_partial_take_profit_plan(
+                        current_price=current_price,
+                        entry_price=entry_price,
+                        current_volume=balance_volume,
+                        order=order,
+                        symbol_cfg=order_partial_cfg,
+                    )
+                    if partial_plan.get("shouldSell"):
+                        sell_volume = partial_plan["sellVolume"]
+                        try:
+                            partial_result = await asyncio.to_thread(
+                                _upbit_place_order, market, "ask",
+                                ord_type="market", volume=str(sell_volume),
+                            )
+                            partial_uuid = partial_result.get("uuid", "")
+                            if partial_uuid:
+                                remain_ratio = max(0.0, 1.0 - float(partial_plan["sellRatio"]))
+                                db.collection("coin_autotrade_orders").document(doc_id).update({
+                                    "status": "monitoring",
+                                    "partialExitDone": True,
+                                    "partialExitAt": datetime.now(timezone(timedelta(hours=9))).isoformat(),
+                                    "partialExitPrice": current_price,
+                                    "partialExitVolume": sell_volume,
+                                    "partialExitOrdUuid": partial_uuid,
+                                    "investedKRW": round(invested_krw * remain_ratio, 2),
+                                })
+                                db.collection("events").document().set({
+                                    "kind": "coin_autotrade_partial_exit",
+                                    "symbol": symbol,
+                                    "market": market,
+                                    "signalId": order.get("signalId", ""),
+                                    "price": current_price,
+                                    "volume": sell_volume,
+                                    "thresholdPct": partial_plan["thresholdPct"],
+                                    "payload": {
+                                        "symbol": symbol,
+                                        "market": market,
+                                        "price": current_price,
+                                        "volume": sell_volume,
+                                        "thresholdPct": partial_plan["thresholdPct"],
+                                    },
+                                    "created_at": _firestore.SERVER_TIMESTAMP,
+                                })
+                                continue
+                        except Exception as e:
+                            _coin_autotrade_log.error(f"monitor: 부분익절 주문 실패 {market}: {e}")
+                            try:
+                                db.collection("events").document().set({
+                                    "kind": "coin_autotrade_error",
+                                    "reason": "partial_exit_order_failed",
+                                    "market": market,
+                                    "symbol": symbol,
+                                    "error": str(e),
+                                    "payload": {"reason": "partial_exit_order_failed", "market": market, "symbol": symbol, "error": str(e)},
+                                    "created_at": _firestore.SERVER_TIMESTAMP,
+                                })
+                            except Exception:
+                                pass
+
                 # 조건 체크 (우선순위: 일일손실 > 손절 > 익절 > trailing stop > 보유시간)
                 if daily_loss_triggered:
                     exit_reason = "daily_loss_limit"
                 elif sl > 0 and current_price <= sl:
                     exit_reason = "stop_loss"
-                elif tp > 0 and current_price >= tp:
+                elif tp > 0 and current_price >= tp and not order_partial_cfg.get("partialTakeProfitPct"):
                     exit_reason = "take_profit"
                 elif peak_pnl_pct >= 1.0 and pnl_pct <= peak_pnl_pct - 0.5:
                     # trailing stop: +1% 이상 갔다가 고점 대비 0.5%p 하락하면 익절
@@ -5008,6 +5462,30 @@ async def api_coin_engine_config_post(req: Request, user: dict = Depends(verify_
             v = conf["minRR"]
             if not isinstance(v, (int, float)) or v < 0.5 or v > 5:
                 raise HTTPException(400, f"{sym}: minRR는 0.5~5")
+        if "sizeMultiplier" in conf:
+            v = conf["sizeMultiplier"]
+            if not isinstance(v, (int, float)) or v < 0.1 or v > 5:
+                raise HTTPException(400, f"{sym}: sizeMultiplier는 0.1~5")
+        if "maxPerSymbolKRW" in conf:
+            v = conf["maxPerSymbolKRW"]
+            if not isinstance(v, (int, float)) or v < 5_000 or v > 2_000_000:
+                raise HTTPException(400, f"{sym}: maxPerSymbolKRW는 5,000~2,000,000")
+        if "partialTakeProfitPct" in conf:
+            v = conf["partialTakeProfitPct"]
+            if not isinstance(v, (int, float)) or v < 0.5 or v > 20:
+                raise HTTPException(400, f"{sym}: partialTakeProfitPct는 0.5~20")
+        if "partialTakeProfitRatio" in conf:
+            v = conf["partialTakeProfitRatio"]
+            if not isinstance(v, (int, float)) or v <= 0 or v >= 1:
+                raise HTTPException(400, f"{sym}: partialTakeProfitRatio는 0~1 사이")
+        if "reentryDipPct" in conf:
+            v = conf["reentryDipPct"]
+            if not isinstance(v, (int, float)) or v < 0.5 or v > 20:
+                raise HTTPException(400, f"{sym}: reentryDipPct는 0.5~20")
+        if "maxDailyReentries" in conf:
+            v = conf["maxDailyReentries"]
+            if not isinstance(v, (int, float)) or v < 0 or v > 10:
+                raise HTTPException(400, f"{sym}: maxDailyReentries는 0~10")
 
     try:
         db = _get_firestore()
