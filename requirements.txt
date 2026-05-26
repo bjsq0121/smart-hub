@@ -10,3 +10,5 @@ google-cloud-firestore==2.19.0
 google-auth==2.36.0
 firebase-admin==6.6.0
 PyJWT==2.9.0
+pyupbit==0.2.34
+ccxt==4.4.35

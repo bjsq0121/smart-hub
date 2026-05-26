@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 
 COPY app.py danawa_scraper.py naver_shopping.py price_search.py index.html ./
+COPY smart_hub/ ./smart_hub/
 COPY static/ ./static/
 
 ENV PORT=8080

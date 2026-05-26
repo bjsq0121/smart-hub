@@ -1,9 +1,11 @@
 import unittest
+import importlib
 from unittest.mock import patch
 
 from fastapi import HTTPException
 
 import app
+import smart_hub.coin as coin_module
 
 
 class FakeRequest:
@@ -55,6 +57,83 @@ class FakeDB:
 
 
 class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
+    def test_stock_routes_are_registered_from_stock_module(self):
+        stock_module = importlib.import_module("smart_hub.stock")
+
+        self.assertIs(app.stock_router, stock_module.router)
+        routes = {
+            (getattr(route, "path", ""), tuple(sorted(getattr(route, "methods", []) or []))): route
+            for route in stock_module.router.routes
+        }
+        daily_stats = routes[("/api/stock/paper/daily-stats", ("GET",))]
+        quote = routes[("/api/stock/quote", ("GET",))]
+        account_balance = routes[("/api/stock/account/balance", ("GET",))]
+        account_holdings = routes[("/api/stock/account/holdings", ("GET",))]
+        search = routes[("/api/stock/search", ("GET",))]
+        order_prepare = routes[("/api/stock/paper/order/prepare", ("POST",))]
+        order = routes[("/api/stock/paper/order", ("POST",))]
+        positions = routes[("/api/stock/paper/positions", ("GET",))]
+        orders = routes[("/api/stock/paper/orders", ("GET",))]
+        recent_symbols = routes[("/api/stock/paper/recent-symbols", ("GET",))]
+        self.assertEqual(daily_stats.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(quote.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(account_balance.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(account_holdings.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(search.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(order_prepare.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(order.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(positions.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(orders.endpoint.__module__, "smart_hub.stock")
+        self.assertEqual(recent_symbols.endpoint.__module__, "smart_hub.stock")
+
+    def test_coin_routes_are_registered_from_coin_module(self):
+        coin_module = importlib.import_module("smart_hub.coin")
+
+        self.assertIs(app.coin_router, coin_module.router)
+        routes = {
+            (getattr(route, "path", ""), tuple(sorted(getattr(route, "methods", []) or []))): route
+            for route in coin_module.router.routes
+        }
+        config_get = routes[("/api/coin/autotrade/config", ("GET",))]
+        config_post = routes[("/api/coin/autotrade/config", ("POST",))]
+        kill = routes[("/api/coin/autotrade/kill", ("POST",))]
+        orders = routes[("/api/coin/autotrade/orders", ("GET",))]
+        performance = routes[("/api/performance", ("GET",))]
+        performance_by_symbol = routes[("/api/performance/by-symbol", ("GET",))]
+        pnl_series = routes[("/api/trade-results/pnl-series", ("GET",))]
+        backtest_run = routes[("/api/backtest/run", ("POST",))]
+        backtest_sweep = routes[("/api/backtest/sweep", ("POST",))]
+        engine_config_get = routes[("/api/coin/engine-config", ("GET",))]
+        engine_config_post = routes[("/api/coin/engine-config", ("POST",))]
+        signals = routes[("/api/signals", ("GET",))]
+        paper_trades = routes[("/api/paper-trades", ("GET",))]
+        trade_results = routes[("/api/trade-results", ("GET",))]
+        self.assertEqual(config_get.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(config_post.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(kill.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(orders.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(performance.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(performance_by_symbol.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(pnl_series.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(backtest_run.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(backtest_sweep.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(engine_config_get.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(engine_config_post.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(signals.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(paper_trades.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(trade_results.endpoint.__module__, "smart_hub.coin")
+
+    def test_coin_execution_internals_are_not_exported_from_app(self):
+        self.assertFalse(hasattr(app, "_upbit_get_accounts"))
+        self.assertFalse(hasattr(app, "_coin_engine_symbol_config"))
+        self.assertFalse(hasattr(app, "_coin_invest_budget_plan"))
+        self.assertFalse(hasattr(app, "_coin_partial_take_profit_plan"))
+        self.assertFalse(hasattr(app, "_coin_reentry_check"))
+        self.assertTrue(hasattr(coin_module, "upbit_get_accounts"))
+        self.assertTrue(hasattr(coin_module, "safe_coin_autotrade_on_signal"))
+        self.assertTrue(hasattr(coin_module, "start_coin_autotrade_monitor"))
+        self.assertTrue(hasattr(coin_module, "start_trx_strategy_loop"))
+
     def test_readiness_reports_missing_kis_env(self):
         with patch.multiple(
             app,
@@ -134,11 +213,11 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["stage"], "candidate")
 
     def test_coin_engine_symbol_config_uses_defaults_without_match(self):
-        cfg = app._coin_engine_symbol_config("TRX", {"symbols": {"XRP": {"sizeMultiplier": 1.8}}})
+        cfg = coin_module.coin_engine_symbol_config("TRX", {"symbols": {"XRP": {"sizeMultiplier": 1.8}}})
         self.assertEqual(cfg, {})
 
     def test_coin_engine_symbol_config_matches_uppercase_symbol(self):
-        cfg = app._coin_engine_symbol_config("trx", {
+        cfg = coin_module.coin_engine_symbol_config("trx", {
             "symbols": {
                 "TRX": {"sizeMultiplier": 1.6, "maxPerSymbolKRW": 180000},
             }
@@ -147,7 +226,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cfg["maxPerSymbolKRW"], 180000)
 
     def test_coin_budget_plan_applies_symbol_multiplier_and_cap(self):
-        plan = app._coin_invest_budget_plan(
+        plan = coin_module.coin_invest_budget_plan(
             total_asset=1_000_000,
             current_invested=100_000,
             krw_balance=300_000,
@@ -161,7 +240,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["investKRW"], 180000)
 
     def test_coin_partial_take_profit_plan_sells_half_once_threshold_hit(self):
-        plan = app._coin_partial_take_profit_plan(
+        plan = coin_module.coin_partial_take_profit_plan(
             current_price=103.0,
             entry_price=100.0,
             current_volume=10.0,
@@ -173,7 +252,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plan["thresholdPct"], 3.0)
 
     def test_coin_partial_take_profit_plan_skips_when_already_done(self):
-        plan = app._coin_partial_take_profit_plan(
+        plan = coin_module.coin_partial_take_profit_plan(
             current_price=105.0,
             entry_price=100.0,
             current_volume=10.0,
@@ -183,7 +262,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(plan["shouldSell"])
 
     def test_coin_reentry_check_requires_dip_after_recent_exit(self):
-        allowed, detail = app._coin_reentry_check(
+        allowed, detail = coin_module.coin_reentry_check(
             current_price=97.0,
             symbol_cfg={"reentryDipPct": 2.5, "maxDailyReentries": 2},
             last_exited_order={"exitPrice": 100.0},
@@ -193,7 +272,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["dipPct"], 2.5)
 
     def test_coin_reentry_check_blocks_without_required_dip(self):
-        allowed, detail = app._coin_reentry_check(
+        allowed, detail = coin_module.coin_reentry_check(
             current_price=99.0,
             symbol_cfg={"reentryDipPct": 2.5, "maxDailyReentries": 2},
             last_exited_order={"exitPrice": 100.0},
@@ -203,7 +282,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail["reason"], "reentry_price_not_reached")
 
     def test_coin_reentry_check_blocks_when_daily_limit_hit(self):
-        allowed, detail = app._coin_reentry_check(
+        allowed, detail = coin_module.coin_reentry_check(
             current_price=97.0,
             symbol_cfg={"reentryDipPct": 2.5, "maxDailyReentries": 2},
             last_exited_order={"exitPrice": 100.0},

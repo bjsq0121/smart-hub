@@ -1,0 +1,1 @@
+"""Smart Hub backend package."""
