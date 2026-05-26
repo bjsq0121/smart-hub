@@ -98,6 +98,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         config_post = routes[("/api/coin/autotrade/config", ("POST",))]
         kill = routes[("/api/coin/autotrade/kill", ("POST",))]
         orders = routes[("/api/coin/autotrade/orders", ("GET",))]
+        trx_strategy_state = routes[("/api/coin/trx-strategy/state", ("GET",))]
         performance = routes[("/api/performance", ("GET",))]
         performance_by_symbol = routes[("/api/performance/by-symbol", ("GET",))]
         pnl_series = routes[("/api/trade-results/pnl-series", ("GET",))]
@@ -112,6 +113,7 @@ class StockAutotradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config_post.endpoint.__module__, "smart_hub.coin")
         self.assertEqual(kill.endpoint.__module__, "smart_hub.coin")
         self.assertEqual(orders.endpoint.__module__, "smart_hub.coin")
+        self.assertEqual(trx_strategy_state.endpoint.__module__, "smart_hub.coin")
         self.assertEqual(performance.endpoint.__module__, "smart_hub.coin")
         self.assertEqual(performance_by_symbol.endpoint.__module__, "smart_hub.coin")
         self.assertEqual(pnl_series.endpoint.__module__, "smart_hub.coin")

@@ -1188,6 +1188,25 @@ async def api_coin_autotrade_config_get(user: dict = Depends(coin_auth)):
     return {**cfg, **extra}
 
 
+@router.get("/api/coin/trx-strategy/state")
+async def api_coin_trx_strategy_state(user: dict = Depends(coin_auth)):
+    """Read TRX DCA strategy state for the operations dashboard."""
+    d = deps()
+    d.ensure_admin(user)
+    try:
+        doc = d.get_firestore().collection("settings").document("coin-trx-strategy-state").get()
+        if not doc.exists:
+            return {"ok": True, "state": None}
+        state = doc.to_dict() or {}
+        for key in ("noPositionSince", "updatedAt"):
+            value = state.get(key)
+            if hasattr(value, "isoformat"):
+                state[key] = value.isoformat()
+        return {"ok": True, "state": state}
+    except Exception:
+        return {"ok": False, "error": "TRX strategy state 조회 실패"}
+
+
 @router.post("/api/coin/autotrade/config")
 async def api_coin_autotrade_config_post(req: Request, user: dict = Depends(coin_auth)):
     """Update coin autotrade config."""
