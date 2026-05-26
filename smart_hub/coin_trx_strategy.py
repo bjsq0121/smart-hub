@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 STATE_COLLECTION = "settings"
 STATE_DOCUMENT = "coin-trx-strategy-state"
+TRADE_COLLECTION = "coin_trx_strategy_trades"
 MARKET_TRX = "KRW-TRX"
 MARKET_USDT = "KRW-USDT"
 MIN_ORDER_KRW = 5_000
@@ -127,6 +128,40 @@ class StrategyStateStore(Protocol):
 
     def patch(self, updates: dict[str, Any]) -> StrategyState:
         ...
+
+
+class TradeRecorder(Protocol):
+    def record(self, trade: dict[str, Any]) -> None:
+        ...
+
+
+class NullTradeRecorder:
+    def record(self, trade: dict[str, Any]) -> None:
+        return None
+
+
+class MemoryTradeRecorder:
+    def __init__(self):
+        self.trades: list[dict[str, Any]] = []
+
+    def record(self, trade: dict[str, Any]) -> None:
+        self.trades.append(dict(trade))
+
+
+class FirestoreTradeRecorder:
+    def __init__(self, db: Any, firestore: Any | None = None):
+        self.db = db
+        self.firestore = firestore
+
+    def record(self, trade: dict[str, Any]) -> None:
+        trade = dict(trade)
+        created_at = utc_now()
+        trade.setdefault("market", MARKET_TRX)
+        trade.setdefault("createdAtIso", dt_to_iso(created_at))
+        trade["createdAt"] = self.firestore.SERVER_TIMESTAMP if self.firestore is not None else dt_to_iso(created_at)
+        trade_type = str(trade.get("type") or "trade")
+        doc_id = f"{trade_type}-{trade.get('uuid')}" if trade.get("uuid") else f"{trade_type}-{int(created_at.timestamp() * 1000)}"
+        self.db.collection(TRADE_COLLECTION).document(doc_id).set(trade, merge=True)
 
 
 class MemoryStrategyStateStore:
@@ -322,12 +357,14 @@ class TRXDcaStrategy:
         sleep_seconds: int = 60,
         market: str = MARKET_TRX,
         enabled_checker: Any | None = None,
+        trade_recorder: TradeRecorder | None = None,
     ):
         self.broker = broker
         self.state_store = state_store
         self.sleep_seconds = sleep_seconds
         self.market = market
         self.enabled_checker = enabled_checker
+        self.trade_recorder = trade_recorder or NullTradeRecorder()
 
     async def run_forever(self) -> None:
         while True:
@@ -417,6 +454,20 @@ class TRXDcaStrategy:
             state.updated_at = now
             state.last_error = None
             self.state_store.save(state)
+            self._record_trade(
+                {
+                    "type": "sell",
+                    "reason": "profit_take",
+                    "market": self.market,
+                    "uuid": result.get("uuid"),
+                    "price": current_price,
+                    "avgBuyPrice": balance.trx_avg_buy_price,
+                    "trxVolume": sell_volume,
+                    "krwAmount": sell_volume * current_price,
+                    "realizedPnlKRW": (current_price - balance.trx_avg_buy_price) * sell_volume,
+                    "realizedPnlPct": ((current_price / balance.trx_avg_buy_price) - 1.0) * 100.0,
+                }
+            )
             self._log("profit_take", {"price": current_price, "volume": sell_volume, "avg": balance.trx_avg_buy_price})
             return {"action": "profit_take", "price": current_price, "volume": sell_volume}
 
@@ -444,6 +495,18 @@ class TRXDcaStrategy:
         state.last_error = None
         state.updated_at = utc_now()
         self.state_store.save(state)
+        self._record_trade(
+            {
+                "type": "buy",
+                "reason": action,
+                "market": self.market,
+                "uuid": result.get("uuid"),
+                "price": current_price,
+                "krwAmount": int(krw_amount),
+                "trxVolume": (float(krw_amount) / current_price) if current_price > 0 else None,
+                "kimchiPremiumPct": premium_or_error,
+            }
+        )
         self._log(action, {"krw": int(krw_amount), "price": current_price, "kimchiPremiumPct": premium_or_error})
         return {"action": action, "krw": int(krw_amount), "price": current_price}
 
@@ -489,6 +552,15 @@ class TRXDcaStrategy:
                 uuid = order.get("uuid")
                 if uuid:
                     self.broker.cancel_order(uuid)
+                    self._record_trade(
+                        {
+                            "type": "cancel",
+                            "reason": "stale_buy_order",
+                            "market": self.market,
+                            "uuid": uuid,
+                            "orderCreatedAt": dt_to_iso(created_at),
+                        }
+                    )
                     self._log("cancel_stale_buy", {"uuid": uuid, "createdAt": dt_to_iso(created_at)})
             except Exception as exc:
                 self._record_error(f"stale_order_cancel_failed: {exc}")
@@ -508,6 +580,12 @@ class TRXDcaStrategy:
     def _log(self, event: str, detail: dict[str, Any]) -> None:
         print(f"[TRX_STRATEGY][{event}] {datetime.now().isoformat()} {detail}")
 
+    def _record_trade(self, trade: dict[str, Any]) -> None:
+        try:
+            self.trade_recorder.record(trade)
+        except Exception as exc:
+            self._log("trade_record_failed", {"error": str(exc)[:300], "trade": trade})
+
 
 trx_strategy_task: asyncio.Task | None = None
 
@@ -520,6 +598,7 @@ async def start_trx_strategy_loop(db: Any, firestore: Any | None = None, enabled
     strategy = TRXDcaStrategy(
         broker=LazyPyUpbitBroker(),
         state_store=FirestoreStrategyStateStore(db, firestore),
+        trade_recorder=FirestoreTradeRecorder(db, firestore),
         sleep_seconds=60,
         enabled_checker=enabled_checker,
     )

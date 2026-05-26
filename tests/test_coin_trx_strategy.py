@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from smart_hub.coin_trx_strategy import (
     BalanceSnapshot,
+    MemoryTradeRecorder,
     MemoryStrategyStateStore,
     StrategyState,
     TRXDcaStrategy,
@@ -71,12 +72,16 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
         store = MemoryStrategyStateStore(StrategyState(no_position_since=now))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        recorder = MemoryTradeRecorder()
+        strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
 
         result = await strategy.run_once(now=now)
 
         self.assertEqual(result["action"], "rsi_entry_buy")
         self.assertEqual(broker.buy_orders[0]["krw"], 100_000)
+        self.assertEqual(recorder.trades[0]["type"], "buy")
+        self.assertEqual(recorder.trades[0]["reason"], "rsi_entry_buy")
+        self.assertEqual(recorder.trades[0]["trxVolume"], 1000.0)
 
     async def test_dca_uses_last_dca_price_and_resets_profit_flag(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
@@ -115,13 +120,17 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.prices["KRW-TRX"] = 103.1
         broker.fail_kimchi = True
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=False))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        recorder = MemoryTradeRecorder()
+        strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
 
         result = await strategy.run_once(now=now)
 
         self.assertEqual(result["action"], "profit_take")
         self.assertEqual(broker.sell_orders[0]["volume"], 500.0)
         self.assertTrue(store.state.is_profit_taken)
+        self.assertEqual(recorder.trades[0]["type"], "sell")
+        self.assertEqual(recorder.trades[0]["reason"], "profit_take")
+        self.assertAlmostEqual(recorder.trades[0]["realizedPnlKRW"], 1550.0)
 
         second = await strategy.run_once(now=now + timedelta(minutes=1))
         self.assertEqual(second["action"], "hold")

@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 import requests
 
-from smart_hub.coin_trx_strategy import start_trx_strategy_loop
+from smart_hub.coin_trx_strategy import MARKET_TRX, TRADE_COLLECTION, start_trx_strategy_loop
 
 
 router = APIRouter(tags=["coin"])
@@ -320,6 +320,15 @@ def upbit_get_ticker(market: str) -> dict:
     if data and isinstance(data, list):
         return data[0]
     return {}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def upbit_place_order(market: str, side: str, **kwargs) -> dict:
@@ -1209,6 +1218,92 @@ async def api_coin_trx_strategy_state(user: dict = Depends(coin_auth)):
         return {"ok": True, "state": state}
     except Exception:
         return {"ok": False, "error": "TRX strategy state 조회 실패"}
+
+
+@router.get("/api/coin/trx-strategy/dashboard")
+async def api_coin_trx_strategy_dashboard(limit: int = Query(default=100, le=300), user: dict = Depends(coin_auth)):
+    """TRX strategy trade history and quantity/PnL dashboard data."""
+    d = deps()
+    d.ensure_admin(user)
+
+    snapshot: dict = {"market": MARKET_TRX}
+    snapshot_error = None
+    try:
+        accounts = upbit_get_accounts()
+        ticker = upbit_get_ticker(MARKET_TRX)
+        current_price = _safe_float(ticker.get("trade_price") or ticker.get("tradePrice"))
+        trx_balance = 0.0
+        avg_buy_price = 0.0
+        krw_balance = 0.0
+        for row in accounts or []:
+            currency = str(row.get("currency", "")).upper()
+            if currency == "TRX":
+                trx_balance = _safe_float(row.get("balance"))
+                avg_buy_price = _safe_float(row.get("avg_buy_price"))
+            elif currency == "KRW":
+                krw_balance = _safe_float(row.get("balance"))
+        evaluation_krw = trx_balance * current_price
+        cost_basis_krw = trx_balance * avg_buy_price
+        unrealized_pnl_krw = evaluation_krw - cost_basis_krw if avg_buy_price > 0 and current_price > 0 else 0.0
+        unrealized_pnl_pct = ((current_price / avg_buy_price) - 1.0) * 100.0 if avg_buy_price > 0 and current_price > 0 else 0.0
+        snapshot.update(
+            {
+                "trxBalance": trx_balance,
+                "avgBuyPrice": avg_buy_price,
+                "currentPrice": current_price,
+                "krwBalance": krw_balance,
+                "evaluationKRW": evaluation_krw,
+                "costBasisKRW": cost_basis_krw,
+                "unrealizedPnlKRW": unrealized_pnl_krw,
+                "unrealizedPnlPct": unrealized_pnl_pct,
+            }
+        )
+    except Exception as exc:
+        snapshot_error = str(exc)[:300]
+        snapshot["error"] = "업비트 잔고/현재가 조회 실패"
+
+    trades: list[dict] = []
+    trades_error = None
+    try:
+        docs = (
+            d.get_firestore()
+            .collection(TRADE_COLLECTION)
+            .order_by("createdAt", direction=d.firestore.Query.DESCENDING)
+            .limit(limit)
+            .stream()
+        )
+        trades = [d.doc_to_dict(doc) for doc in docs]
+    except Exception as exc:
+        trades_error = str(exc)[:300]
+
+    buy_trades = [t for t in trades if t.get("type") == "buy"]
+    sell_trades = [t for t in trades if t.get("type") == "sell"]
+    cancel_trades = [t for t in trades if t.get("type") == "cancel"]
+    total_buy_trx = sum(_safe_float(t.get("trxVolume")) for t in buy_trades)
+    total_sell_trx = sum(_safe_float(t.get("trxVolume")) for t in sell_trades)
+    total_buy_krw = sum(_safe_float(t.get("krwAmount")) for t in buy_trades)
+    total_sell_krw = sum(_safe_float(t.get("krwAmount")) for t in sell_trades)
+    realized_pnl_krw = sum(_safe_float(t.get("realizedPnlKRW")) for t in sell_trades)
+    unrealized_pnl_krw = _safe_float(snapshot.get("unrealizedPnlKRW"))
+    combined_pnl_krw = realized_pnl_krw + unrealized_pnl_krw
+    summary = {
+        "tradeCount": len(trades),
+        "buyCount": len(buy_trades),
+        "sellCount": len(sell_trades),
+        "cancelCount": len(cancel_trades),
+        "totalBuyTRX": total_buy_trx,
+        "totalSellTRX": total_sell_trx,
+        "netBotTRX": total_buy_trx - total_sell_trx,
+        "totalBuyKRW": total_buy_krw,
+        "totalSellKRW": total_sell_krw,
+        "realizedPnlKRW": realized_pnl_krw,
+        "combinedPnlKRW": combined_pnl_krw,
+        "quantityIncreased": (total_buy_trx - total_sell_trx) > 0,
+        "notLosing": combined_pnl_krw >= 0,
+        "snapshotError": snapshot_error,
+        "tradesError": trades_error,
+    }
+    return {"ok": snapshot_error is None and trades_error is None, "snapshot": snapshot, "summary": summary, "trades": trades}
 
 
 @router.post("/api/coin/autotrade/config")

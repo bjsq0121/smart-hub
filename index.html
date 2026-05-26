@@ -263,7 +263,7 @@
       </h2>
       <div class="flex items-center gap-3">
         <span id="ops-last-update" class="text-xs text-slate-500"></span>
-        <button onclick="loadTrxOps()" class="px-4 py-1.5 rounded-full border border-white/10 bg-white/0 hover:bg-white/5 text-slate-400 hover:text-slate-200 text-xs transition">
+        <button onclick="refreshTrxOpsPage()" class="px-4 py-1.5 rounded-full border border-white/10 bg-white/0 hover:bg-white/5 text-slate-400 hover:text-slate-200 text-xs transition">
           새로고침
         </button>
       </div>
@@ -279,6 +279,11 @@
     <section class="ops-pane active" id="ops-pane-signals">
       <div id="coin-autotrade-section"></div>
       <div id="ops-signals-content" class="hidden text-slate-500 text-sm">bak: 코인 신호 검증 데이터</div>
+    </section>
+
+    <!-- TRX 매매기록 / 수량 / 손익 -->
+    <section class="ops-pane" id="ops-pane-trx-dashboard">
+      <div id="trx-dashboard-content" class="text-slate-500 text-sm">로딩 중...</div>
     </section>
 
     <!-- bak: 📊 검증 중 (paper trade) -->

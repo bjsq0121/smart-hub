@@ -67,6 +67,8 @@ const NAV_GROUPS = {
     auth: true,
     subs: [
       { id: 'signals', label: 'TRX 수량늘리기', page: 'page-ops', opsPane: 'signals' },
+      { id: 'trx-dashboard', label: 'TRX 기록/손익', page: 'page-ops', opsPane: 'trx-dashboard',
+        onActivate: () => { if (typeof loadTrxDashboard === 'function') loadTrxDashboard(); } },
     ],
     bakSubs: [
       { id: 'signals-bak', label: '🎯 신호', page: 'page-ops', opsPane: 'signals' },

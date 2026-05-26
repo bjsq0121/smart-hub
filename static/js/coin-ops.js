@@ -172,6 +172,11 @@ const coinAutoState = {
   enableConfirmChecked: false,
 };
 const COIN_AT_POLL_MS = 30_000;
+const trxDashboardState = {
+  data: null,
+  err: null,
+  pollingTimer: null,
+};
 
 // fetch helper (coin-ops 전용, 주식운영 apiFetch와 동일 패턴)
 async function coinApiFetch(url, opts) {
@@ -244,6 +249,180 @@ async function loadTrxOps() {
   startCoinAutoPolling();
 }
 window.loadTrxOps = loadTrxOps;
+
+async function refreshTrxOpsPage() {
+  const dashboardPane = document.getElementById('ops-pane-trx-dashboard');
+  if (dashboardPane && dashboardPane.classList.contains('active')) {
+    await loadTrxDashboard();
+    return;
+  }
+  await loadTrxOps();
+}
+window.refreshTrxOpsPage = refreshTrxOpsPage;
+
+async function loadTrxDashboard() {
+  opsLastLoadTime = Date.now();
+  updateOpsTimestamp();
+  try {
+    const r = await coinApiFetch('/api/coin/trx-strategy/dashboard?limit=100');
+    if (!r.ok || !r.body) {
+      trxDashboardState.data = null;
+      trxDashboardState.err = (r.body && (r.body.detail || r.body.error)) || ('HTTP ' + r.status);
+    } else {
+      trxDashboardState.data = r.body;
+      trxDashboardState.err = null;
+    }
+  } catch (e) {
+    trxDashboardState.data = null;
+    trxDashboardState.err = '네트워크 오류';
+  }
+  renderTrxDashboard();
+  startTrxDashboardPolling();
+}
+window.loadTrxDashboard = loadTrxDashboard;
+
+function startTrxDashboardPolling() {
+  if (trxDashboardState.pollingTimer) clearInterval(trxDashboardState.pollingTimer);
+  trxDashboardState.pollingTimer = setInterval(() => {
+    const pane = document.getElementById('ops-pane-trx-dashboard');
+    if (!pane || !pane.classList.contains('active')) return;
+    loadTrxDashboard();
+  }, COIN_AT_POLL_MS);
+}
+
+function fmtTrx(n) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + ' TRX';
+}
+
+function fmtPrice(n) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '원';
+}
+
+function tradeReasonLabel(reason) {
+  const map = {
+    rsi_entry_buy: 'RSI 첫 매수',
+    scout_buy: '정찰병 매수',
+    dca_buy: 'DCA 매수',
+    profit_take: '50% 익절',
+    stale_buy_order: '미체결 취소',
+  };
+  return map[reason] || reason || '-';
+}
+
+function tradeTypeBadge(type) {
+  const map = {
+    buy: ['emerald', '매수'],
+    sell: ['sky', '매도'],
+    cancel: ['slate', '취소'],
+  };
+  const item = map[type] || ['slate', type || '-'];
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold bg-${item[0]}-500/10 text-${item[0]}-400 border border-${item[0]}-500/30">${item[1]}</span>`;
+}
+
+function renderTrxMetric(label, value, hint, tone) {
+  const color = tone || 'slate';
+  return `
+    <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+      <div class="text-xs text-slate-500 mb-1">${label}</div>
+      <div class="text-xl font-bold text-${color}-300">${value}</div>
+      ${hint ? `<div class="text-[11px] text-slate-500 mt-2">${hint}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderTrxDashboard() {
+  const el = document.getElementById('trx-dashboard-content');
+  if (!el) return;
+  if (trxDashboardState.err) {
+    el.innerHTML = `<div class="rounded-lg border border-rose-500/30 bg-rose-500/10 p-4 text-rose-300">${esc(trxDashboardState.err)}</div>`;
+    return;
+  }
+  const data = trxDashboardState.data || {};
+  const snapshot = data.snapshot || {};
+  const summary = data.summary || {};
+  const trades = Array.isArray(data.trades) ? data.trades : [];
+  const pnl = Number(summary.combinedPnlKRW || 0);
+  const pnlTone = pnl > 0 ? 'emerald' : pnl < 0 ? 'rose' : 'slate';
+  const qtyTone = Number(summary.netBotTRX || 0) > 0 ? 'emerald' : 'slate';
+  const statusLine = [
+    summary.snapshotError ? '업비트 잔고 조회 일부 실패' : '',
+    summary.tradesError ? '매매기록 조회 일부 실패' : '',
+  ].filter(Boolean).join(' · ');
+
+  const rows = trades.map(t => {
+    const created = t.createdAtIso || t.createdAt || '';
+    return `
+      <tr class="border-b border-white/5 hover:bg-white/[0.03]">
+        <td class="px-3 py-3 text-slate-400 whitespace-nowrap">${created ? fmtRel(created) : '-'}</td>
+        <td class="px-3 py-3">${tradeTypeBadge(t.type)}</td>
+        <td class="px-3 py-3 text-slate-300">${esc(tradeReasonLabel(t.reason))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtPrice(Number(t.price || 0))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtKRW(Math.round(Number(t.krwAmount || 0)))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtTrx(Number(t.trxVolume || 0))}</td>
+        <td class="px-3 py-3 text-right ${pnlColor(Number(t.realizedPnlPct || 0))}">${t.type === 'sell' ? fmtKRW(Math.round(Number(t.realizedPnlKRW || 0))) : '-'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  el.innerHTML = `
+    ${statusLine ? `<div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">${esc(statusLine)}</div>` : ''}
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+      ${renderTrxMetric('현재 보유 수량', fmtTrx(Number(snapshot.trxBalance || 0)), `평단 ${fmtPrice(Number(snapshot.avgBuyPrice || 0))}`, 'sky')}
+      ${renderTrxMetric('현재 평가금액', fmtKRW(Math.round(Number(snapshot.evaluationKRW || 0))), `현재가 ${fmtPrice(Number(snapshot.currentPrice || 0))}`, 'slate')}
+      ${renderTrxMetric('봇 기록 순증가', fmtTrx(Number(summary.netBotTRX || 0)), `매수 ${fmtTrx(Number(summary.totalBuyTRX || 0))} · 매도 ${fmtTrx(Number(summary.totalSellTRX || 0))}`, qtyTone)}
+      ${renderTrxMetric('손익 체크', fmtKRW(Math.round(pnl)), `실현 ${fmtKRW(Math.round(Number(summary.realizedPnlKRW || 0)))} · 평가 ${fmtPct(Number(snapshot.unrealizedPnlPct || 0))}`, pnlTone)}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">수량 상태</div>
+        <div class="text-sm ${summary.quantityIncreased ? 'text-emerald-300' : 'text-slate-400'}">
+          ${summary.quantityIncreased ? '봇 기록 기준 TRX 수량은 순증가 중입니다.' : '아직 봇 기록 기준 순증가 수량이 없습니다.'}
+        </div>
+      </div>
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">손익 상태</div>
+        <div class="text-sm ${summary.notLosing ? 'text-emerald-300' : 'text-rose-300'}">
+          ${summary.notLosing ? '실현손익 + 현재 평가손익이 0원 이상입니다.' : '실현손익 + 현재 평가손익이 마이너스입니다.'}
+        </div>
+      </div>
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">기록</div>
+        <div class="text-sm text-slate-300">
+          매수 ${summary.buyCount || 0}회 · 매도 ${summary.sellCount || 0}회 · 취소 ${summary.cancelCount || 0}회
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg border border-white/10 bg-slate-950/40 overflow-hidden">
+      <div class="px-4 py-3 border-b border-white/10 flex justify-between items-center gap-3">
+        <div>
+          <div class="text-sm font-semibold text-slate-200">TRX 매매기록</div>
+          <div class="text-[11px] text-slate-500">주문 성공 후 저장된 기록 기준입니다. 기존 수동 보유분은 현재 보유 수량에만 반영됩니다.</div>
+        </div>
+        <button onclick="loadTrxDashboard()" class="px-3 py-1.5 rounded-md border border-white/10 text-xs text-slate-400 hover:text-slate-200 hover:bg-white/5">새로고침</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-white/[0.03] text-xs text-slate-500">
+            <tr>
+              <th class="px-3 py-2 text-left font-medium">시각</th>
+              <th class="px-3 py-2 text-left font-medium">구분</th>
+              <th class="px-3 py-2 text-left font-medium">사유</th>
+              <th class="px-3 py-2 text-right font-medium">가격</th>
+              <th class="px-3 py-2 text-right font-medium">금액</th>
+              <th class="px-3 py-2 text-right font-medium">수량</th>
+              <th class="px-3 py-2 text-right font-medium">실현손익</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">아직 저장된 TRX 매매기록이 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
 
 async function loadCoinAutoLogs() {
   try {
