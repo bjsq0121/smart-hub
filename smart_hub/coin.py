@@ -212,6 +212,7 @@ COIN_AUTOTRADE_DEFAULTS: dict = {
     "maxDailyLossPct":        -2.0,
     "maxHoldHours":           24,
     "positionSizePct":        10.0,
+    "legacySignalTradingEnabled": False,
 }
 coin_autotrade_config: dict = {**COIN_AUTOTRADE_DEFAULTS}
 coin_autotrade_config_ts: float = 0.0
@@ -459,6 +460,9 @@ async def coin_autotrade_on_signal(norm: dict, signal_doc_id: str):
 
     # 1) enabled 체크
     if not cfg.get("enabled"):
+        return
+    if not cfg.get("legacySignalTradingEnabled", False):
+        coin_autotrade_log.info("coin autotrade skip: legacy signal trading disabled")
         return
 
     # 2) 조건 체크
