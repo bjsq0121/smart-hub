@@ -93,6 +93,21 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.state.last_dca_price, 97.9)
         self.assertFalse(store.state.is_profit_taken)
 
+    async def test_existing_manual_holding_seeds_dca_from_current_price(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=120.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 100.0
+        store = MemoryStrategyStateStore(StrategyState(no_position_since=now - timedelta(hours=2)))
+        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "hold")
+        self.assertEqual(store.state.last_dca_price, 100.0)
+        self.assertIsNone(store.state.no_position_since)
+        self.assertEqual(broker.buy_orders, [])
+
     async def test_profit_take_sells_half_once_and_ignores_kimchi_failure(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()

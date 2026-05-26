@@ -158,9 +158,7 @@ class FirestoreStrategyStateStore:
         doc = self._doc_ref().get()
         if getattr(doc, "exists", False):
             return StrategyState.from_dict(doc.to_dict() or {})
-        state = StrategyState(updated_at=utc_now())
-        self.save(state)
-        return state
+        return StrategyState()
 
     def save(self, state: StrategyState) -> None:
         state.updated_at = utc_now()
@@ -398,7 +396,7 @@ class TRXDcaStrategy:
             state.no_position_since = None
             changed = True
         if not state.last_dca_price:
-            state.last_dca_price = balance.trx_avg_buy_price or current_price
+            state.last_dca_price = current_price
             changed = True
         if changed:
             self.state_store.save(state)
