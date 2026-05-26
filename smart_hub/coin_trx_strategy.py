@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+import requests
+
 
 STATE_COLLECTION = "settings"
 STATE_DOCUMENT = "coin-trx-strategy-state"
@@ -21,6 +23,8 @@ TRADE_COLLECTION = "coin_trx_strategy_trades"
 MARKET_TRX = "KRW-TRX"
 MARKET_USDT = "KRW-USDT"
 MIN_ORDER_KRW = 5_000
+DEFAULT_UPBIT_PROXY_URL = "http://34.47.98.167:9090/"
+DEFAULT_UPBIT_PROXY_SECRET = "smarthub-upbit-proxy-2026"
 
 
 def utc_now() -> datetime:
@@ -236,13 +240,19 @@ class Broker(Protocol):
 
 
 class PyUpbitBroker:
-    """pyupbit/ccxt backed exchange adapter for production use."""
+    """pyupbit/ccxt backed exchange adapter for production use.
+
+    Public market data uses pyupbit directly. Private Upbit calls go through the
+    existing Upbit proxy because production API keys are IP-restricted.
+    """
 
     def __init__(self, access_key: str | None = None, secret_key: str | None = None, pause_seconds: float = 0.2):
         import ccxt
         import pyupbit
 
         self.pyupbit = pyupbit
+        self.proxy_url = os.getenv("UPBIT_PROXY_URL", DEFAULT_UPBIT_PROXY_URL)
+        self.proxy_secret = os.getenv("UPBIT_PROXY_SECRET", DEFAULT_UPBIT_PROXY_SECRET)
         self.upbit = pyupbit.Upbit(
             access_key or os.getenv("UPBIT_ACCESS_KEY", ""),
             secret_key or os.getenv("UPBIT_SECRET_KEY", ""),
@@ -254,13 +264,41 @@ class PyUpbitBroker:
         if self.pause_seconds > 0:
             time.sleep(self.pause_seconds)
 
-    def get_balance_snapshot(self) -> BalanceSnapshot:
+    def _upbit_proxy(self, method: str, path: str, query: str = "", data: dict[str, Any] | None = None) -> Any:
         self._pause()
-        balances = self.upbit.get_balances() or []
+        body: dict[str, Any] = {"method": method, "path": path}
+        if query:
+            body["query"] = query
+        if data:
+            body["data"] = data
+        resp = requests.post(
+            self.proxy_url,
+            headers={"Content-Type": "application/json", "X-Proxy-Secret": self.proxy_secret},
+            json=body,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _ensure_private_response(self, value: Any, expected_type: type, context: str) -> Any:
+        if isinstance(value, dict) and value.get("error"):
+            raise RuntimeError(f"{context}: {value.get('error')}")
+        if not isinstance(value, expected_type):
+            raise RuntimeError(f"{context}: unexpected response {type(value).__name__} {str(value)[:200]}")
+        return value
+
+    def get_balance_snapshot(self) -> BalanceSnapshot:
+        balances = self._ensure_private_response(
+            self._upbit_proxy("GET", "/v1/accounts"),
+            list,
+            "upbit_accounts_failed",
+        )
         trx_balance = 0.0
         trx_avg_buy_price = 0.0
         krw_balance = 0.0
         for row in balances:
+            if not isinstance(row, dict):
+                raise RuntimeError(f"upbit_accounts_failed: invalid row {type(row).__name__}")
             currency = str(row.get("currency", "")).upper()
             if currency == "KRW":
                 krw_balance = float(row.get("balance") or 0)
@@ -295,21 +333,29 @@ class PyUpbitBroker:
         return float(price)
 
     def market_buy_krw(self, market: str, krw_amount: float) -> dict[str, Any]:
-        self._pause()
-        return self.upbit.buy_market_order(market, int(krw_amount)) or {}
+        result = self._upbit_proxy(
+            "POST",
+            "/v1/orders",
+            data={"market": market, "side": "bid", "ord_type": "price", "price": str(int(krw_amount))},
+        )
+        return self._ensure_private_response(result or {}, dict, "upbit_market_buy_failed")
 
     def market_sell_volume(self, market: str, volume: float) -> dict[str, Any]:
-        self._pause()
-        return self.upbit.sell_market_order(market, volume) or {}
+        result = self._upbit_proxy(
+            "POST",
+            "/v1/orders",
+            data={"market": market, "side": "ask", "ord_type": "market", "volume": str(volume)},
+        )
+        return self._ensure_private_response(result or {}, dict, "upbit_market_sell_failed")
 
     def get_open_orders(self, market: str) -> list[dict[str, Any]]:
-        self._pause()
-        orders = self.upbit.get_order(market) or []
+        orders = self._upbit_proxy("GET", "/v1/orders", query=f"market={market}&state=wait") or []
+        orders = self._ensure_private_response(orders, list, "upbit_open_orders_failed")
         return orders if isinstance(orders, list) else [orders]
 
     def cancel_order(self, uuid: str) -> dict[str, Any]:
-        self._pause()
-        return self.upbit.cancel_order(uuid) or {}
+        result = self._upbit_proxy("DELETE", "/v1/order", query=f"uuid={uuid}") or {}
+        return self._ensure_private_response(result, dict, "upbit_cancel_order_failed")
 
 
 class LazyPyUpbitBroker:
