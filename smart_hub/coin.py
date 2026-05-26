@@ -1159,6 +1159,7 @@ async def start_coin_autotrade_monitor():
         deps().get_firestore(),
         deps().firestore,
         enabled_checker=lambda: bool(load_coin_autotrade_config().get("enabled")),
+        budget_provider=lambda: load_coin_autotrade_config(),
     )
     coin_autotrade_log.info("TRX strategy loop created on startup")
 

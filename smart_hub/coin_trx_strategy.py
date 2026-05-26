@@ -404,6 +404,7 @@ class TRXDcaStrategy:
         market: str = MARKET_TRX,
         enabled_checker: Any | None = None,
         trade_recorder: TradeRecorder | None = None,
+        budget_provider: Any | None = None,
     ):
         self.broker = broker
         self.state_store = state_store
@@ -411,6 +412,7 @@ class TRXDcaStrategy:
         self.market = market
         self.enabled_checker = enabled_checker
         self.trade_recorder = trade_recorder or NullTradeRecorder()
+        self.budget_provider = budget_provider
 
     async def run_forever(self) -> None:
         while True:
@@ -462,9 +464,9 @@ class TRXDcaStrategy:
         rsi = self._safe_rsi()
         elapsed = now - (state.no_position_since or now)
         if rsi is not None and rsi <= 30:
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "rsi_entry_buy", state)
+            return self._try_buy(balance.krw_balance * 0.10, current_price, "rsi_entry_buy", state, 0.0)
         if elapsed >= timedelta(hours=24):
-            return self._try_buy(balance.krw_balance * 0.03, current_price, "scout_buy", state)
+            return self._try_buy(balance.krw_balance * 0.03, current_price, "scout_buy", state, 0.0)
         return {"action": "wait_entry", "rsi": rsi, "noPositionSince": dt_to_iso(state.no_position_since)}
 
     def _handle_existing_position(
@@ -518,11 +520,32 @@ class TRXDcaStrategy:
             return {"action": "profit_take", "price": current_price, "volume": sell_volume}
 
         if current_price <= float(state.last_dca_price) * 0.98:
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
+            current_cost_basis = max(0.0, balance.trx_balance * balance.trx_avg_buy_price)
+            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state, current_cost_basis)
 
         return {"action": "hold", "price": current_price}
 
-    def _try_buy(self, krw_amount: float, current_price: float, action: str, state: StrategyState) -> dict[str, Any]:
+    def _try_buy(
+        self,
+        krw_amount: float,
+        current_price: float,
+        action: str,
+        state: StrategyState,
+        current_cost_basis_krw: float,
+    ) -> dict[str, Any]:
+        max_total_krw, max_per_order_krw = self._budget_limits()
+        if max_per_order_krw > 0:
+            krw_amount = min(krw_amount, max_per_order_krw)
+        if max_total_krw > 0:
+            remaining_budget = max_total_krw - max(0.0, current_cost_basis_krw)
+            if remaining_budget < MIN_ORDER_KRW:
+                return {
+                    "action": "buy_skipped_budget_cap",
+                    "krw": int(krw_amount),
+                    "currentCostBasisKRW": int(current_cost_basis_krw),
+                    "maxTotalKRW": int(max_total_krw),
+                }
+            krw_amount = min(krw_amount, remaining_budget)
         if krw_amount < MIN_ORDER_KRW:
             return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
         ok, premium_or_error = self._buy_allowed_by_kimchi(current_price)
@@ -582,6 +605,16 @@ class TRXDcaStrategy:
             return False, f"kimchi_premium_high: {premium_pct:.2f}%"
         return True, round(premium_pct, 4)
 
+    def _budget_limits(self) -> tuple[float, float]:
+        if self.budget_provider is None:
+            return 0.0, 0.0
+        try:
+            cfg = self.budget_provider() or {}
+            return float(cfg.get("maxTotalKRW") or 0), float(cfg.get("maxPerSymbolKRW") or 0)
+        except Exception as exc:
+            self._record_error(f"budget_config_unavailable: {exc}")
+            return 0.0, 0.0
+
     def _cleanup_stale_buy_orders(self, now: datetime) -> None:
         try:
             orders = self.broker.get_open_orders(self.market)
@@ -636,7 +669,12 @@ class TRXDcaStrategy:
 trx_strategy_task: asyncio.Task | None = None
 
 
-async def start_trx_strategy_loop(db: Any, firestore: Any | None = None, enabled_checker: Any | None = None) -> None:
+async def start_trx_strategy_loop(
+    db: Any,
+    firestore: Any | None = None,
+    enabled_checker: Any | None = None,
+    budget_provider: Any | None = None,
+) -> None:
     """Start one background TRX strategy task for the FastAPI process."""
     global trx_strategy_task
     if trx_strategy_task is not None and not trx_strategy_task.done():
@@ -647,5 +685,6 @@ async def start_trx_strategy_loop(db: Any, firestore: Any | None = None, enabled
         trade_recorder=FirestoreTradeRecorder(db, firestore),
         sleep_seconds=60,
         enabled_checker=enabled_checker,
+        budget_provider=budget_provider,
     )
     trx_strategy_task = asyncio.create_task(strategy.run_forever())
