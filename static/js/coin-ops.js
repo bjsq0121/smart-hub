@@ -306,8 +306,12 @@ function tradeReasonLabel(reason) {
     scout_buy: '정찰병 매수',
     dca_buy: 'DCA 매수',
     dca_limit_ladder_buy: '3단 지정가',
-    profit_take: '50% 익절',
+    profit_take: '익절',
+    profit_take_stage_1: '1차 익절',
+    profit_take_stage_2: '2차 익절',
+    profit_take_stage_3: '3차 익절',
     stale_buy_order: '미체결 취소',
+    repriced_buy_order: '가격 재배치',
   };
   return map[reason] || reason || '-';
 }

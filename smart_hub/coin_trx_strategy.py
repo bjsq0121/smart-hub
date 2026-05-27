@@ -110,6 +110,7 @@ class StrategyState:
     pending_dca_order_price: float | None = None
     pending_dca_order_krw: float | None = None
     pending_dca_orders: list[dict[str, Any]] = field(default_factory=list)
+    profit_take_stage: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StrategyState":
@@ -148,6 +149,7 @@ class StrategyState:
             pending_dca_order_price=_safe_float(pending_price) if pending_price is not None else None,
             pending_dca_order_krw=_safe_float(pending_krw) if pending_krw is not None else None,
             pending_dca_orders=pending_orders,
+            profit_take_stage=int(data.get("profitTakeStage") or 0),
         )
 
     def to_firestore_updates(self) -> dict[str, Any]:
@@ -161,6 +163,7 @@ class StrategyState:
             "pendingDcaOrderPrice": self.pending_dca_order_price,
             "pendingDcaOrderKRW": self.pending_dca_order_krw,
             "pendingDcaOrders": self.pending_dca_orders,
+            "profitTakeStage": self.profit_take_stage,
         }
 
 
@@ -577,29 +580,59 @@ class TRXDcaStrategy:
             state.last_dca_price = current_price
             changed = True
         if changed:
+            state.profit_take_stage = 0
             self.state_store.save(state)
             return {"action": "hold", "price": current_price}
 
-        if (
-            not state.is_profit_taken
-            and balance.trx_avg_buy_price > 0
-            and current_price >= balance.trx_avg_buy_price * 1.03
-        ):
-            sell_volume = balance.trx_balance * 0.50
+        profit_take = self._try_staged_profit_take(state, balance, current_price, now)
+        if profit_take is not None:
+            return profit_take
+
+        dca_trigger_price = self._round_krw_bid_price(float(state.last_dca_price) * 0.98)
+        if current_price <= dca_trigger_price:
+            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
+        ladder_prices = self._dca_ladder_prices(current_price, float(state.last_dca_price))
+        return self._try_place_limit_buy_ladder(balance.krw_balance * 0.10, current_price, ladder_prices, state, now)
+
+    def _try_staged_profit_take(
+        self,
+        state: StrategyState,
+        balance: BalanceSnapshot,
+        current_price: float,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        if balance.trx_avg_buy_price <= 0 or balance.trx_balance <= 0:
+            return None
+        if state.is_profit_taken:
+            return None
+        if state.profit_take_stage >= 3:
+            state.is_profit_taken = True
+            return None
+        pnl_pct = ((current_price / balance.trx_avg_buy_price) - 1.0) * 100.0
+        stages = [
+            (0, 1.2, 0.30, "profit_take_stage_1"),
+            (1, 2.0, 0.30, "profit_take_stage_2"),
+            (2, 3.0, 0.20, "profit_take_stage_3"),
+        ]
+        for current_stage, threshold_pct, sell_ratio, action in stages:
+            if state.profit_take_stage != current_stage or pnl_pct < threshold_pct:
+                continue
+            sell_volume = balance.trx_balance * sell_ratio
             try:
                 result = self.broker.market_sell_volume(self.market, sell_volume)
             except Exception as exc:
-                return self._record_error(f"profit_take_failed: {exc}", action="error")
+                return self._record_error(f"{action}_failed: {exc}", action="error")
             if not result.get("uuid"):
-                return self._record_error(f"profit_take_rejected: {result}", action="error")
-            state.is_profit_taken = True
+                return self._record_error(f"{action}_rejected: {result}", action="error")
+            state.profit_take_stage = current_stage + 1
+            state.is_profit_taken = state.profit_take_stage >= 3
             state.updated_at = now
             state.last_error = None
             self.state_store.save(state)
             self._record_trade(
                 {
                     "type": "sell",
-                    "reason": "profit_take",
+                    "reason": action,
                     "market": self.market,
                     "uuid": result.get("uuid"),
                     "price": current_price,
@@ -607,17 +640,13 @@ class TRXDcaStrategy:
                     "trxVolume": sell_volume,
                     "krwAmount": sell_volume * current_price,
                     "realizedPnlKRW": (current_price - balance.trx_avg_buy_price) * sell_volume,
-                    "realizedPnlPct": ((current_price / balance.trx_avg_buy_price) - 1.0) * 100.0,
+                    "realizedPnlPct": pnl_pct,
+                    "profitTakeStage": state.profit_take_stage,
                 }
             )
-            self._log("profit_take", {"price": current_price, "volume": sell_volume, "avg": balance.trx_avg_buy_price})
-            return {"action": "profit_take", "price": current_price, "volume": sell_volume}
-
-        dca_trigger_price = self._round_krw_bid_price(float(state.last_dca_price) * 0.98)
-        if current_price <= dca_trigger_price:
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
-        ladder_prices = self._dca_ladder_prices(current_price, float(state.last_dca_price))
-        return self._try_place_limit_buy_ladder(balance.krw_balance * 0.10, current_price, ladder_prices, state)
+            self._log(action, {"price": current_price, "volume": sell_volume, "avg": balance.trx_avg_buy_price})
+            return {"action": action, "price": current_price, "volume": sell_volume}
+        return None
 
     def _round_krw_bid_price(self, price: float) -> float:
         if price <= 0:
@@ -645,17 +674,42 @@ class TRXDcaStrategy:
         return math.floor(price / tick) * tick
 
     def _dca_ladder_prices(self, current_price: float, last_dca_price: float) -> list[float]:
-        raw_prices = [
-            current_price * 0.996,
-            current_price * 0.99,
-            last_dca_price * 0.98,
-        ]
+        regime = self._market_regime(current_price)
+        offsets = {
+            "up": [0.002, 0.006, 0.012],
+            "range": [0.004, 0.010, 0.018],
+            "down": [0.008, 0.018, 0.030],
+        }.get(regime, [0.004, 0.010, 0.018])
+        raw_prices = [current_price * (1.0 - offset) for offset in offsets]
         prices: list[float] = []
         for price in raw_prices:
             rounded = self._round_krw_bid_price(price)
             if rounded > 0 and rounded not in prices:
                 prices.append(rounded)
         return prices
+
+    def _market_regime(self, current_price: float) -> str:
+        try:
+            candles = self.broker.get_ohlcv(self.market, interval="minute5", count=30)
+        except Exception as exc:
+            self._record_error(f"regime_candles_unavailable: {exc}")
+            return "range"
+        closes = [_safe_float(row.get("close")) for row in candles if isinstance(row, dict) and row.get("close") is not None]
+        if len(closes) < 20 or current_price <= 0:
+            return "range"
+        recent = closes[-20:]
+        first = recent[0]
+        last = recent[-1]
+        if first <= 0 or last <= 0:
+            return "range"
+        if abs((last / current_price) - 1.0) > 0.20:
+            return "range"
+        change_pct = (last / first) - 1.0
+        if change_pct >= 0.008:
+            return "up"
+        if change_pct <= -0.008:
+            return "down"
+        return "range"
 
     def _split_krw_amount(self, krw_amount: float, parts: int) -> list[int]:
         if parts <= 0:
@@ -700,6 +754,7 @@ class TRXDcaStrategy:
         state.no_position_since = None
         state.last_dca_price = current_price
         state.is_profit_taken = False
+        state.profit_take_stage = 0
         state.last_error = None
         state.updated_at = utc_now()
         self.state_store.save(state)
@@ -786,14 +841,35 @@ class TRXDcaStrategy:
         current_price: float,
         limit_prices: list[float],
         state: StrategyState,
+        now: datetime,
     ) -> dict[str, Any]:
-        pending = self._find_open_buy_order()
-        if pending:
+        open_bids = self._open_buy_orders()
+        if open_bids and not self._should_reprice_ladder(open_bids, limit_prices, now):
+            pending = open_bids[0]
             return {
                 "action": "dca_limit_buy_ladder_pending",
                 "uuid": pending.get("uuid"),
                 "price": _safe_float(pending.get("price")),
             }
+        if open_bids:
+            for order in open_bids:
+                uuid = order.get("uuid")
+                if not uuid:
+                    continue
+                try:
+                    self.broker.cancel_order(uuid)
+                    self._record_trade(
+                        {
+                            "type": "cancel",
+                            "reason": "repriced_buy_order",
+                            "market": self.market,
+                            "uuid": uuid,
+                            "price": _safe_float(order.get("price")),
+                        }
+                    )
+                except Exception as exc:
+                    return self._record_error(f"repriced_order_cancel_failed: {exc}", action="error")
+            self._clear_pending_dca_order(state)
 
         max_total_krw, max_per_order_krw, current_bot_invested_krw = self._budget_limits()
         if max_per_order_krw > 0:
@@ -861,6 +937,21 @@ class TRXDcaStrategy:
             "krw": int(sum(amounts)),
         }
 
+    def _should_reprice_ladder(self, open_bids: list[dict[str, Any]], desired_prices: list[float], now: datetime) -> bool:
+        open_prices = sorted(int(_safe_float(order.get("price"))) for order in open_bids if _safe_float(order.get("price")) > 0)
+        desired = sorted(int(price) for price in desired_prices if price > 0)
+        if open_prices == desired:
+            return False
+        created_times = [
+            parse_dt(order.get("created_at") or order.get("createdAt"))
+            for order in open_bids
+            if order.get("created_at") or order.get("createdAt")
+        ]
+        newest = max((created for created in created_times if created is not None), default=None)
+        if newest is not None and now - newest < timedelta(minutes=10):
+            return False
+        return True
+
     def _save_pending_ladder(self, state: StrategyState, placed_orders: list[dict[str, Any]]) -> None:
         first = placed_orders[0]
         state.pending_dca_orders = placed_orders
@@ -907,6 +998,7 @@ class TRXDcaStrategy:
                 state.no_position_since = None
                 state.last_dca_price = fill_price or _safe_float(pending.get("price"))
                 state.is_profit_taken = False
+                state.profit_take_stage = 0
                 state.last_error = None
                 changed = True
                 self._record_trade(
@@ -1028,15 +1120,16 @@ class TRXDcaStrategy:
                 self._record_error(f"stale_order_cancel_failed: {exc}")
 
     def _find_open_buy_order(self) -> dict[str, Any] | None:
+        orders = self._open_buy_orders()
+        return orders[0] if orders else None
+
+    def _open_buy_orders(self) -> list[dict[str, Any]]:
         try:
             orders = self.broker.get_open_orders(self.market)
         except Exception as exc:
             self._record_error(f"open_order_fetch_failed: {exc}")
-            return None
-        for order in orders:
-            if order.get("side") == "bid":
-                return order
-        return None
+            return []
+        return [order for order in orders if order.get("side") == "bid"]
 
     def _record_error(self, message: str, action: str = "error") -> dict[str, Any]:
         msg = message[:500]
