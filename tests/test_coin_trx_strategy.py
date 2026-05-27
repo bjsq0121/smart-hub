@@ -181,7 +181,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.state.last_dca_price, 97.9)
         self.assertFalse(store.state.is_profit_taken)
 
-    async def test_dca_places_limit_buy_when_price_is_above_trigger(self):
+    async def test_dca_places_three_limit_buys_when_price_is_above_trigger(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=400.0, krw_balance=500_000)
@@ -203,15 +203,17 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await strategy.run_once(now=now)
 
-        self.assertEqual(result["action"], "dca_limit_buy_placed")
-        self.assertEqual(broker.limit_buy_orders[0]["price"], 544.0)
-        self.assertAlmostEqual(broker.limit_buy_orders[0]["volume"], 50_000 / 544.0)
+        self.assertEqual(result["action"], "dca_limit_buy_ladder_placed")
+        self.assertEqual([o["price"] for o in broker.limit_buy_orders], [552.0, 549.0, 544.0])
+        self.assertEqual(sum(int(t["krwAmount"]) for t in recorder.trades), 50_000)
         self.assertEqual(broker.buy_orders, [])
         self.assertEqual(store.state.last_dca_price, 556.0)
         self.assertEqual(store.state.pending_dca_order_uuid, "limit-buy-1")
-        self.assertEqual(store.state.pending_dca_order_price, 544.0)
-        self.assertEqual(recorder.trades[0]["type"], "buy_order")
-        self.assertEqual(recorder.trades[0]["reason"], "dca_limit_buy")
+        self.assertEqual(store.state.pending_dca_order_price, 552.0)
+        self.assertEqual([o["uuid"] for o in store.state.pending_dca_orders], ["limit-buy-1", "limit-buy-2", "limit-buy-3"])
+        self.assertEqual([o["price"] for o in store.state.pending_dca_orders], [552.0, 549.0, 544.0])
+        self.assertEqual([t["type"] for t in recorder.trades], ["buy_order", "buy_order", "buy_order"])
+        self.assertEqual([t["reason"] for t in recorder.trades], ["dca_limit_ladder_buy"] * 3)
 
     async def test_dca_does_not_place_duplicate_limit_buy_when_bid_is_open(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
@@ -234,7 +236,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         result = await strategy.run_once(now=now)
 
-        self.assertEqual(result["action"], "dca_limit_buy_pending")
+        self.assertEqual(result["action"], "dca_limit_buy_ladder_pending")
         self.assertEqual(result["uuid"], "pending-dca")
         self.assertEqual(broker.limit_buy_orders, [])
 
@@ -307,7 +309,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
 
         broker.fail_kimchi = False
         second = await strategy.run_once(now=now + timedelta(minutes=1))
-        self.assertEqual(second["action"], "dca_limit_buy_placed")
+        self.assertEqual(second["action"], "dca_limit_buy_ladder_placed")
         self.assertEqual(len(broker.sell_orders), 1)
 
     async def test_high_or_failed_kimchi_blocks_buys(self):

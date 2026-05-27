@@ -305,6 +305,7 @@ function tradeReasonLabel(reason) {
     rsi_entry_buy: 'RSI 첫 매수',
     scout_buy: '정찰병 매수',
     dca_buy: 'DCA 매수',
+    dca_limit_ladder_buy: '3단 지정가',
     profit_take: '50% 익절',
     stale_buy_order: '미체결 취소',
   };
@@ -314,6 +315,7 @@ function tradeReasonLabel(reason) {
 function tradeTypeBadge(type) {
   const map = {
     buy: ['emerald', '매수'],
+    buy_order: ['amber', '매수대기'],
     sell: ['sky', '매도'],
     cancel: ['slate', '취소'],
   };

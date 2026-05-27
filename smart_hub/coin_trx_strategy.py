@@ -11,7 +11,7 @@ import asyncio
 import math
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
@@ -109,6 +109,7 @@ class StrategyState:
     pending_dca_order_uuid: str | None = None
     pending_dca_order_price: float | None = None
     pending_dca_order_krw: float | None = None
+    pending_dca_orders: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StrategyState":
@@ -120,6 +121,23 @@ class StrategyState:
             last_dca_price = None
         pending_price = data.get("pendingDcaOrderPrice")
         pending_krw = data.get("pendingDcaOrderKRW")
+        pending_orders = []
+        for row in data.get("pendingDcaOrders") or []:
+            if not isinstance(row, dict):
+                continue
+            uuid = row.get("uuid")
+            price = _safe_float(row.get("price"))
+            krw = _safe_float(row.get("krwAmount") or row.get("krw"))
+            if uuid and price > 0:
+                pending_orders.append({"uuid": uuid, "price": price, "krwAmount": krw})
+        if not pending_orders and data.get("pendingDcaOrderUuid"):
+            pending_orders.append(
+                {
+                    "uuid": data.get("pendingDcaOrderUuid"),
+                    "price": _safe_float(pending_price),
+                    "krwAmount": _safe_float(pending_krw),
+                }
+            )
         return cls(
             no_position_since=parse_dt(data.get("noPositionSince")),
             last_dca_price=last_dca_price,
@@ -129,6 +147,7 @@ class StrategyState:
             pending_dca_order_uuid=data.get("pendingDcaOrderUuid"),
             pending_dca_order_price=_safe_float(pending_price) if pending_price is not None else None,
             pending_dca_order_krw=_safe_float(pending_krw) if pending_krw is not None else None,
+            pending_dca_orders=pending_orders,
         )
 
     def to_firestore_updates(self) -> dict[str, Any]:
@@ -141,6 +160,7 @@ class StrategyState:
             "pendingDcaOrderUuid": self.pending_dca_order_uuid,
             "pendingDcaOrderPrice": self.pending_dca_order_price,
             "pendingDcaOrderKRW": self.pending_dca_order_krw,
+            "pendingDcaOrders": self.pending_dca_orders,
         }
 
 
@@ -596,7 +616,8 @@ class TRXDcaStrategy:
         dca_trigger_price = self._round_krw_bid_price(float(state.last_dca_price) * 0.98)
         if current_price <= dca_trigger_price:
             return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
-        return self._try_place_limit_buy(balance.krw_balance * 0.10, current_price, dca_trigger_price, "dca_limit_buy", state)
+        ladder_prices = self._dca_ladder_prices(current_price, float(state.last_dca_price))
+        return self._try_place_limit_buy_ladder(balance.krw_balance * 0.10, current_price, ladder_prices, state)
 
     def _round_krw_bid_price(self, price: float) -> float:
         if price <= 0:
@@ -622,6 +643,27 @@ class TRXDcaStrategy:
         else:
             tick = 1_000
         return math.floor(price / tick) * tick
+
+    def _dca_ladder_prices(self, current_price: float, last_dca_price: float) -> list[float]:
+        raw_prices = [
+            current_price * 0.996,
+            current_price * 0.99,
+            last_dca_price * 0.98,
+        ]
+        prices: list[float] = []
+        for price in raw_prices:
+            rounded = self._round_krw_bid_price(price)
+            if rounded > 0 and rounded not in prices:
+                prices.append(rounded)
+        return prices
+
+    def _split_krw_amount(self, krw_amount: float, parts: int) -> list[int]:
+        if parts <= 0:
+            return []
+        base = int(krw_amount) // parts
+        amounts = [base] * parts
+        amounts[-1] += int(krw_amount) - sum(amounts)
+        return [amount for amount in amounts if amount >= MIN_ORDER_KRW]
 
     def _try_buy(
         self,
@@ -738,52 +780,177 @@ class TRXDcaStrategy:
         self._log(action, {"krw": int(krw_amount), "price": limit_price, "kimchiPremiumPct": premium_or_error})
         return {"action": f"{action}_placed", "krw": int(krw_amount), "price": limit_price, "volume": volume}
 
-    def _reconcile_pending_dca_order(self, state: StrategyState) -> bool:
-        uuid = state.pending_dca_order_uuid
-        if not uuid:
-            return False
-        try:
-            order = self.broker.get_order(uuid)
-        except Exception as exc:
-            self._record_error(f"pending_dca_order_fetch_failed: {exc}")
-            return False
-        order_state = order.get("state")
-        if order_state == "wait":
-            return False
-        if order_state == "done":
-            fill_price = _safe_float(order.get("price"), state.pending_dca_order_price or 0.0)
-            volume = _safe_float(order.get("executed_volume") or order.get("volume"))
-            krw_amount = state.pending_dca_order_krw or (fill_price * volume)
-            state.no_position_since = None
-            state.last_dca_price = fill_price or state.pending_dca_order_price
-            state.is_profit_taken = False
-            state.last_error = None
-            self._clear_pending_dca_order(state)
-            state.updated_at = utc_now()
-            self.state_store.save(state)
+    def _try_place_limit_buy_ladder(
+        self,
+        krw_amount: float,
+        current_price: float,
+        limit_prices: list[float],
+        state: StrategyState,
+    ) -> dict[str, Any]:
+        pending = self._find_open_buy_order()
+        if pending:
+            return {
+                "action": "dca_limit_buy_ladder_pending",
+                "uuid": pending.get("uuid"),
+                "price": _safe_float(pending.get("price")),
+            }
+
+        max_total_krw, max_per_order_krw, current_bot_invested_krw = self._budget_limits()
+        if max_per_order_krw > 0:
+            krw_amount = min(krw_amount, max_per_order_krw)
+        if max_total_krw > 0:
+            remaining_budget = max_total_krw - max(0.0, current_bot_invested_krw)
+            if remaining_budget < MIN_ORDER_KRW:
+                return {
+                    "action": "buy_skipped_budget_cap",
+                    "krw": int(krw_amount),
+                    "currentBotInvestedKRW": int(current_bot_invested_krw),
+                    "maxTotalKRW": int(max_total_krw),
+                }
+            krw_amount = min(krw_amount, remaining_budget)
+        if krw_amount < MIN_ORDER_KRW:
+            return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
+        ok, premium_or_error = self._buy_allowed_by_kimchi(current_price)
+        if not ok:
+            self._record_error(str(premium_or_error), action="buy_blocked_kimchi")
+            return {"action": "buy_blocked_kimchi", "reason": str(premium_or_error)}
+
+        prices = [price for price in limit_prices if price > 0]
+        amounts = self._split_krw_amount(krw_amount, len(prices))
+        prices = prices[: len(amounts)]
+        if not prices:
+            return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
+
+        placed_orders: list[dict[str, Any]] = []
+        for price, amount in zip(prices, amounts):
+            volume = float(amount) / price
+            try:
+                result = self.broker.limit_buy(self.market, price, volume)
+            except Exception as exc:
+                if placed_orders:
+                    self._save_pending_ladder(state, placed_orders)
+                return self._record_error(f"dca_limit_ladder_buy_failed: {exc}", action="error")
+            if not result.get("uuid"):
+                if placed_orders:
+                    self._save_pending_ladder(state, placed_orders)
+                return self._record_error(f"dca_limit_ladder_buy_rejected: {result}", action="error")
+            order = {"uuid": result.get("uuid"), "price": price, "krwAmount": int(amount), "volume": volume}
+            placed_orders.append(order)
             self._record_trade(
                 {
-                    "type": "buy",
-                    "reason": "dca_limit_filled",
+                    "type": "buy_order",
+                    "reason": "dca_limit_ladder_buy",
                     "market": self.market,
-                    "uuid": uuid,
-                    "price": state.last_dca_price,
-                    "krwAmount": int(krw_amount),
+                    "uuid": result.get("uuid"),
+                    "price": price,
+                    "currentPrice": current_price,
+                    "krwAmount": int(amount),
                     "trxVolume": volume,
+                    "kimchiPremiumPct": premium_or_error,
                 }
             )
-            self._log("dca_limit_filled", {"uuid": uuid, "price": state.last_dca_price, "volume": volume})
-            return True
-        if order_state == "cancel":
-            self._clear_pending_dca_order(state)
+
+        self._save_pending_ladder(state, placed_orders)
+        self._log(
+            "dca_limit_ladder_buy",
+            {"orders": len(placed_orders), "prices": [order["price"] for order in placed_orders], "krw": int(sum(amounts))},
+        )
+        return {
+            "action": "dca_limit_buy_ladder_placed",
+            "orders": placed_orders,
+            "krw": int(sum(amounts)),
+        }
+
+    def _save_pending_ladder(self, state: StrategyState, placed_orders: list[dict[str, Any]]) -> None:
+        first = placed_orders[0]
+        state.pending_dca_orders = placed_orders
+        state.pending_dca_order_uuid = first["uuid"]
+        state.pending_dca_order_price = first["price"]
+        state.pending_dca_order_krw = first["krwAmount"]
+        state.last_error = None
+        state.updated_at = utc_now()
+        self.state_store.save(state)
+
+    def _reconcile_pending_dca_order(self, state: StrategyState) -> bool:
+        pending_orders = list(state.pending_dca_orders)
+        if not pending_orders and state.pending_dca_order_uuid:
+            pending_orders = [
+                {
+                    "uuid": state.pending_dca_order_uuid,
+                    "price": state.pending_dca_order_price,
+                    "krwAmount": state.pending_dca_order_krw,
+                }
+            ]
+        if not pending_orders:
+            return False
+
+        remaining: list[dict[str, Any]] = []
+        changed = False
+        for pending in pending_orders:
+            uuid = pending.get("uuid")
+            if not uuid:
+                continue
+            try:
+                order = self.broker.get_order(uuid)
+            except Exception as exc:
+                self._record_error(f"pending_dca_order_fetch_failed: {exc}")
+                remaining.append(pending)
+                continue
+            order_state = order.get("state")
+            if order_state == "wait":
+                remaining.append(pending)
+                continue
+            if order_state == "done":
+                fill_price = _safe_float(order.get("price"), _safe_float(pending.get("price")))
+                volume = _safe_float(order.get("executed_volume") or order.get("volume"))
+                krw_amount = _safe_float(pending.get("krwAmount")) or (fill_price * volume)
+                state.no_position_since = None
+                state.last_dca_price = fill_price or _safe_float(pending.get("price"))
+                state.is_profit_taken = False
+                state.last_error = None
+                changed = True
+                self._record_trade(
+                    {
+                        "type": "buy",
+                        "reason": "dca_limit_filled",
+                        "market": self.market,
+                        "uuid": uuid,
+                        "price": state.last_dca_price,
+                        "krwAmount": int(krw_amount),
+                        "trxVolume": volume,
+                    }
+                )
+                self._log("dca_limit_filled", {"uuid": uuid, "price": state.last_dca_price, "volume": volume})
+                continue
+            if order_state == "cancel":
+                changed = True
+                continue
+            remaining.append(pending)
+
+        if changed:
+            state.pending_dca_orders = remaining
+            self._sync_primary_pending_dca_order(state)
             state.updated_at = utc_now()
             self.state_store.save(state)
+            return True
         return False
 
     def _clear_pending_dca_order(self, state: StrategyState) -> None:
         state.pending_dca_order_uuid = None
         state.pending_dca_order_price = None
         state.pending_dca_order_krw = None
+        state.pending_dca_orders = []
+
+    def _sync_primary_pending_dca_order(self, state: StrategyState) -> None:
+        if not state.pending_dca_orders:
+            state.pending_dca_order_uuid = None
+            state.pending_dca_order_price = None
+            state.pending_dca_order_krw = None
+            return
+        first = state.pending_dca_orders[0]
+        state.pending_dca_order_uuid = first.get("uuid")
+        state.pending_dca_order_price = _safe_float(first.get("price"))
+        state.pending_dca_order_krw = _safe_float(first.get("krwAmount"))
 
     def _safe_rsi(self) -> float | None:
         try:
@@ -842,8 +1009,10 @@ class TRXDcaStrategy:
                 if uuid:
                     self.broker.cancel_order(uuid)
                     state = self.state_store.load()
-                    if state.pending_dca_order_uuid == uuid:
-                        self._clear_pending_dca_order(state)
+                    before_count = len(state.pending_dca_orders)
+                    state.pending_dca_orders = [order for order in state.pending_dca_orders if order.get("uuid") != uuid]
+                    if state.pending_dca_order_uuid == uuid or len(state.pending_dca_orders) != before_count:
+                        self._sync_primary_pending_dca_order(state)
                         self.state_store.save(state)
                     self._record_trade(
                         {
