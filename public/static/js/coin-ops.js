@@ -158,6 +158,8 @@ let _engineConfigNewRows = 0;   // 엔진 설정 신규 행 카운터
 const coinAutoState = {
   config: null,
   configErr: null,
+  trxState: null,
+  trxStateErr: null,
   logs: null,
   logsErr: null,
   pollingTimer: null,
@@ -170,6 +172,11 @@ const coinAutoState = {
   enableConfirmChecked: false,
 };
 const COIN_AT_POLL_MS = 30_000;
+const trxDashboardState = {
+  data: null,
+  err: null,
+  pollingTimer: null,
+};
 
 // fetch helper (coin-ops 전용, 주식운영 apiFetch와 동일 패턴)
 async function coinApiFetch(url, opts) {
@@ -203,7 +210,10 @@ function coinToast(msg) {
 
 async function loadCoinAutoConfig() {
   try {
-    const r = await coinApiFetch('/api/coin/autotrade/config');
+    const [r, stateRes] = await Promise.all([
+      coinApiFetch('/api/coin/autotrade/config'),
+      coinApiFetch('/api/coin/trx-strategy/state'),
+    ]);
     if (!r.ok) {
       coinAutoState.config = null;
       coinAutoState.configErr = { status: r.status, detail: (r.body && (r.body.detail || r.body.error)) || ('HTTP ' + r.status) };
@@ -211,12 +221,207 @@ async function loadCoinAutoConfig() {
       coinAutoState.config = r.body;
       coinAutoState.configErr = null;
     }
+    if (stateRes.ok && stateRes.body && stateRes.body.ok) {
+      coinAutoState.trxState = stateRes.body.state || null;
+      coinAutoState.trxStateErr = null;
+    } else {
+      coinAutoState.trxState = null;
+      coinAutoState.trxStateErr = (stateRes.body && (stateRes.body.error || stateRes.body.detail)) || null;
+    }
   } catch (e) {
     coinAutoState.config = null;
     coinAutoState.configErr = { status: 0, detail: '네트워크 오류' };
+    coinAutoState.trxState = null;
+    coinAutoState.trxStateErr = '네트워크 오류';
   }
-  await loadCoinAutoLogs();
+  // bak: 기존 coin_autotrade event 로그는 n8n 시그널 기반 화면용이라 TRX 운영 화면에서는 로드하지 않는다.
   renderCoinAutoSection();
+}
+
+async function loadTrxOps() {
+  opsLastLoadTime = Date.now();
+  updateOpsTimestamp();
+  const stale = document.getElementById('ops-stale-warning');
+  if (stale) stale.className = 'hidden';
+  const strategyBar = document.getElementById('ops-strategy-bar');
+  if (strategyBar) strategyBar.innerHTML = '';
+  await loadCoinAutoConfig();
+  startCoinAutoPolling();
+}
+window.loadTrxOps = loadTrxOps;
+
+async function refreshTrxOpsPage() {
+  const dashboardPane = document.getElementById('ops-pane-trx-dashboard');
+  if (dashboardPane && dashboardPane.classList.contains('active')) {
+    await loadTrxDashboard();
+    return;
+  }
+  await loadTrxOps();
+}
+window.refreshTrxOpsPage = refreshTrxOpsPage;
+
+async function loadTrxDashboard() {
+  opsLastLoadTime = Date.now();
+  updateOpsTimestamp();
+  try {
+    const r = await coinApiFetch('/api/coin/trx-strategy/dashboard?limit=100');
+    if (!r.ok || !r.body) {
+      trxDashboardState.data = null;
+      trxDashboardState.err = (r.body && (r.body.detail || r.body.error)) || ('HTTP ' + r.status);
+    } else {
+      trxDashboardState.data = r.body;
+      trxDashboardState.err = null;
+    }
+  } catch (e) {
+    trxDashboardState.data = null;
+    trxDashboardState.err = '네트워크 오류';
+  }
+  renderTrxDashboard();
+  startTrxDashboardPolling();
+}
+window.loadTrxDashboard = loadTrxDashboard;
+
+function startTrxDashboardPolling() {
+  if (trxDashboardState.pollingTimer) clearInterval(trxDashboardState.pollingTimer);
+  trxDashboardState.pollingTimer = setInterval(() => {
+    const pane = document.getElementById('ops-pane-trx-dashboard');
+    if (!pane || !pane.classList.contains('active')) return;
+    loadTrxDashboard();
+  }, COIN_AT_POLL_MS);
+}
+
+function fmtTrx(n) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + ' TRX';
+}
+
+function fmtPrice(n) {
+  if (n == null || isNaN(n)) return '-';
+  return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '원';
+}
+
+function tradeReasonLabel(reason) {
+  const map = {
+    rsi_entry_buy: 'RSI 첫 매수',
+    scout_buy: '정찰병 매수',
+    dca_buy: 'DCA 매수',
+    profit_take: '50% 익절',
+    stale_buy_order: '미체결 취소',
+  };
+  return map[reason] || reason || '-';
+}
+
+function tradeTypeBadge(type) {
+  const map = {
+    buy: ['emerald', '매수'],
+    sell: ['sky', '매도'],
+    cancel: ['slate', '취소'],
+  };
+  const item = map[type] || ['slate', type || '-'];
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-semibold bg-${item[0]}-500/10 text-${item[0]}-400 border border-${item[0]}-500/30">${item[1]}</span>`;
+}
+
+function renderTrxMetric(label, value, hint, tone) {
+  const color = tone || 'slate';
+  return `
+    <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+      <div class="text-xs text-slate-500 mb-1">${label}</div>
+      <div class="text-xl font-bold text-${color}-300">${value}</div>
+      ${hint ? `<div class="text-[11px] text-slate-500 mt-2">${hint}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderTrxDashboard() {
+  const el = document.getElementById('trx-dashboard-content');
+  if (!el) return;
+  if (trxDashboardState.err) {
+    el.innerHTML = `<div class="rounded-lg border border-rose-500/30 bg-rose-500/10 p-4 text-rose-300">${esc(trxDashboardState.err)}</div>`;
+    return;
+  }
+  const data = trxDashboardState.data || {};
+  const snapshot = data.snapshot || {};
+  const summary = data.summary || {};
+  const trades = Array.isArray(data.trades) ? data.trades : [];
+  const pnl = Number(summary.combinedPnlKRW || 0);
+  const pnlTone = pnl > 0 ? 'emerald' : pnl < 0 ? 'rose' : 'slate';
+  const qtyTone = Number(summary.netBotTRX || 0) > 0 ? 'emerald' : 'slate';
+  const statusLine = [
+    summary.snapshotError ? '업비트 잔고 조회 일부 실패' : '',
+    summary.tradesError ? '매매기록 조회 일부 실패' : '',
+  ].filter(Boolean).join(' · ');
+
+  const rows = trades.map(t => {
+    const created = t.createdAtIso || t.createdAt || '';
+    return `
+      <tr class="border-b border-white/5 hover:bg-white/[0.03]">
+        <td class="px-3 py-3 text-slate-400 whitespace-nowrap">${created ? fmtRel(created) : '-'}</td>
+        <td class="px-3 py-3">${tradeTypeBadge(t.type)}</td>
+        <td class="px-3 py-3 text-slate-300">${esc(tradeReasonLabel(t.reason))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtPrice(Number(t.price || 0))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtKRW(Math.round(Number(t.krwAmount || 0)))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtTrx(Number(t.trxVolume || 0))}</td>
+        <td class="px-3 py-3 text-right ${pnlColor(Number(t.realizedPnlPct || 0))}">${t.type === 'sell' ? fmtKRW(Math.round(Number(t.realizedPnlKRW || 0))) : '-'}</td>
+      </tr>
+    `;
+  }).join('');
+
+  el.innerHTML = `
+    ${statusLine ? `<div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">${esc(statusLine)}</div>` : ''}
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+      ${renderTrxMetric('현재 보유 수량', fmtTrx(Number(snapshot.trxBalance || 0)), `평단 ${fmtPrice(Number(snapshot.avgBuyPrice || 0))}`, 'sky')}
+      ${renderTrxMetric('현재 평가금액', fmtKRW(Math.round(Number(snapshot.evaluationKRW || 0))), `현재가 ${fmtPrice(Number(snapshot.currentPrice || 0))}`, 'slate')}
+      ${renderTrxMetric('봇 기록 순증가', fmtTrx(Number(summary.netBotTRX || 0)), `매수 ${fmtTrx(Number(summary.totalBuyTRX || 0))} · 매도 ${fmtTrx(Number(summary.totalSellTRX || 0))}`, qtyTone)}
+      ${renderTrxMetric('손익 체크', fmtKRW(Math.round(pnl)), `실현 ${fmtKRW(Math.round(Number(summary.realizedPnlKRW || 0)))} · 평가 ${fmtPct(Number(snapshot.unrealizedPnlPct || 0))}`, pnlTone)}
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">수량 상태</div>
+        <div class="text-sm ${summary.quantityIncreased ? 'text-emerald-300' : 'text-slate-400'}">
+          ${summary.quantityIncreased ? '봇 기록 기준 TRX 수량은 순증가 중입니다.' : '아직 봇 기록 기준 순증가 수량이 없습니다.'}
+        </div>
+      </div>
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">손익 상태</div>
+        <div class="text-sm ${summary.notLosing ? 'text-emerald-300' : 'text-rose-300'}">
+          ${summary.notLosing ? '실현손익 + 현재 평가손익이 0원 이상입니다.' : '실현손익 + 현재 평가손익이 마이너스입니다.'}
+        </div>
+      </div>
+      <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
+        <div class="text-xs text-slate-500 mb-2">기록</div>
+        <div class="text-sm text-slate-300">
+          매수 ${summary.buyCount || 0}회 · 매도 ${summary.sellCount || 0}회 · 취소 ${summary.cancelCount || 0}회
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-lg border border-white/10 bg-slate-950/40 overflow-hidden">
+      <div class="px-4 py-3 border-b border-white/10 flex justify-between items-center gap-3">
+        <div>
+          <div class="text-sm font-semibold text-slate-200">TRX 매매기록</div>
+          <div class="text-[11px] text-slate-500">주문 성공 후 저장된 기록 기준입니다. 기존 수동 보유분은 현재 보유 수량에만 반영됩니다.</div>
+        </div>
+        <button onclick="loadTrxDashboard()" class="px-3 py-1.5 rounded-md border border-white/10 text-xs text-slate-400 hover:text-slate-200 hover:bg-white/5">새로고침</button>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-white/[0.03] text-xs text-slate-500">
+            <tr>
+              <th class="px-3 py-2 text-left font-medium">시각</th>
+              <th class="px-3 py-2 text-left font-medium">구분</th>
+              <th class="px-3 py-2 text-left font-medium">사유</th>
+              <th class="px-3 py-2 text-right font-medium">가격</th>
+              <th class="px-3 py-2 text-right font-medium">금액</th>
+              <th class="px-3 py-2 text-right font-medium">수량</th>
+              <th class="px-3 py-2 text-right font-medium">실현손익</th>
+            </tr>
+          </thead>
+          <tbody>${rows || `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-500">아직 저장된 TRX 매매기록이 없습니다.</td></tr>`}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 async function loadCoinAutoLogs() {
@@ -310,7 +515,7 @@ async function killCoinAuto() {
     const r = await coinApiFetch('/api/coin/autotrade/kill', { method: 'POST' });
     if (r.ok) {
       if (coinAutoState.config) coinAutoState.config.enabled = false;
-      coinToast('코인 자동매매가 즉시 중단되었습니다.');
+      coinToast('TRX 수량늘리기 엔진이 즉시 중단되었습니다.');
     } else {
       coinToast('비상 정지 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
     }
@@ -329,17 +534,13 @@ async function saveCoinAutoConfig(form) {
   try {
     const payload = {};
     if (form.maxTotalKRW !== undefined) payload.maxTotalKRW = Number(form.maxTotalKRW);
-    if (form.maxPerSymbolKRW !== undefined) payload.maxPerSymbolKRW = Number(form.maxPerSymbolKRW);
-    if (form.minScore !== undefined) payload.minScore = Number(form.minScore);
-    if (form.maxConcurrentPositions !== undefined) payload.maxConcurrentPositions = Number(form.maxConcurrentPositions);
-    if (form.maxHoldHours !== undefined) payload.maxHoldHours = Number(form.maxHoldHours);
-    if (form.maxDailyLossPct !== undefined) payload.maxDailyLossPct = Number(form.maxDailyLossPct);
+    // bak: 기존 신호 기반 설정(maxPerSymbolKRW/minScore/maxHoldHours 등)은 숨김.
     const r = await coinApiFetch('/api/coin/autotrade/config', { method: 'POST', body: payload });
     if (r.ok && r.body && r.body.config) {
       coinAutoState.config = r.body.config;
       coinAutoState.configErr = null;
       coinAutoState.settingsOpen = false;
-      coinToast('코인 자동매매 설정이 저장되었습니다.');
+      coinToast('TRX 수량늘리기 설정이 저장되었습니다.');
     } else {
       coinToast('설정 저장 실패: ' + ((r.body && r.body.detail) || 'HTTP ' + r.status));
     }
@@ -366,7 +567,7 @@ function renderCoinAutoCard() {
     return `
       <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          <span class="text-xs font-medium text-slate-400">TRX 수량늘리기</span>
           <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
         </div>
         <div class="text-xs text-slate-500">업비트 연동 미설정 — API 키 설정이 필요합니다.</div>
@@ -378,7 +579,7 @@ function renderCoinAutoCard() {
     return `
       <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
         <div class="flex items-center justify-between mb-2">
-          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          <span class="text-xs font-medium text-slate-400">TRX 수량늘리기</span>
           <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400">OFF</span>
         </div>
         <div class="text-xs text-slate-500">${esc((err && err.detail) || '설정 조회 실패')}</div>
@@ -387,11 +588,11 @@ function renderCoinAutoCard() {
 
   const enabled = !!cfg.enabled;
   const statusChip = enabled
-    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">자동매매 ON</span>'
+    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">TRX 엔진 ON</span>'
     : '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-700/50 text-slate-400 border border-slate-600/30">OFF</span>';
 
   const toggleHtml = `
-    <button id="coin-at-toggle" class="relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-emerald-500/80' : 'bg-slate-600'}" title="${enabled ? '자동매매 끄기' : '자동매매 켜기'}">
+    <button id="coin-at-toggle" class="relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-emerald-500/80' : 'bg-slate-600'}" title="${enabled ? 'TRX 엔진 끄기' : 'TRX 엔진 켜기'}">
       <span class="inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}"></span>
     </button>`;
 
@@ -399,16 +600,17 @@ function renderCoinAutoCard() {
 
   // 설정값
   const maxTotal = cfg.maxTotalKRW != null ? cfg.maxTotalKRW : 0;
-  const maxPer = cfg.maxPerSymbolKRW != null ? cfg.maxPerSymbolKRW : 0;
-  const minScore = cfg.minScore != null ? cfg.minScore : 0;
-  const maxPos = cfg.maxConcurrentPositions != null ? cfg.maxConcurrentPositions : 0;
-  const maxHold = cfg.maxHoldHours != null ? cfg.maxHoldHours : 0;
-  const maxDailyLoss = cfg.maxDailyLossPct != null ? cfg.maxDailyLossPct : 0;
   const currentInvested = cfg.currentInvestedKRW != null ? cfg.currentInvestedKRW : 0;
   const activePos = cfg.activePositionCount != null ? cfg.activePositionCount : 0;
   const todayPnl = cfg.todayPnlPct != null ? cfg.todayPnlPct : 0;
   const todayPnlKRW = cfg.todayPnlKRW != null ? cfg.todayPnlKRW : 0;
   const upbitOk = !!cfg.upbitConfigured;
+  const st = coinAutoState.trxState || {};
+  const lastDcaPrice = st.lastDcaPrice != null ? Number(st.lastDcaPrice) : null;
+  const isProfitTaken = !!st.isProfitTaken;
+  const noPositionSince = st.noPositionSince || null;
+  const updatedAt = st.updatedAt || null;
+  const lastError = st.lastError || coinAutoState.trxStateErr || '';
 
   // 진행 바
   const pct = maxTotal > 0 ? Math.min(100, (currentInvested / maxTotal) * 100) : 0;
@@ -418,7 +620,7 @@ function renderCoinAutoCard() {
   const progressBar = `
     <div class="mt-3">
       <div class="flex items-center justify-between text-[10px] text-slate-500 mb-1">
-        <span>투자 잔액</span>
+        <span>TRX 운용 한도 사용</span>
         <span>${esc(fmt(currentInvested))} / ${esc(fmt(maxTotal))}</span>
       </div>
       <div class="w-full h-1.5 rounded-full bg-slate-700/50 overflow-hidden">
@@ -430,19 +632,37 @@ function renderCoinAutoCard() {
   const pnlColor = todayPnl > 0 ? 'emerald' : todayPnl < 0 ? 'rose' : 'slate';
   const pnlSign = todayPnl >= 0 ? '+' : '';
 
-  // 설정 요약
+  // TRX 전략 요약
   const statsRow = `
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3">
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">마지막 DCA 기준가</div>
+        <div class="text-sm font-semibold text-slate-100">${lastDcaPrice ? lastDcaPrice.toLocaleString('ko-KR') + '원' : '대기'}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">익절 권한</div>
+        <div class="text-sm font-semibold ${isProfitTaken ? 'text-slate-400' : 'text-emerald-300'}">${isProfitTaken ? '소진됨' : '대기 중'}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">미보유 시작</div>
+        <div class="text-sm font-semibold text-slate-100">${noPositionSince ? esc(fmtRel(noPositionSince)) : '보유/미확인'}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">상태 갱신</div>
+        <div class="text-sm font-semibold text-slate-100">${updatedAt ? esc(fmtRel(updatedAt)) : '대기'}</div>
+      </div>
+    </div>
     <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-slate-500">
-      <span>종목당 ${esc(fmt(maxPer))}</span>
-      <span>최소 점수 ${minScore}</span>
-      <span>동시 ${maxPos}개</span>
-      <span>보유 ${maxHold}h</span>
+      <span>전략 TRX 전용</span>
+      <span>RSI(14) 5분봉</span>
+      <span>DCA -2%</span>
+      <span>익절 +3% / 50%</span>
       <span>활성 포지션 ${activePos}개</span>
       <span class="text-${pnlColor}-400">오늘 ${pnlSign}${todayPnl.toFixed(2)}% (${pnlSign}${fmt(todayPnlKRW)})</span>
       <span>${upbitOk
         ? '<span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>업비트 연동</span>'
         : '<span class="text-amber-400">업비트 미연동</span>'}</span>
-      <span class="inline-flex items-center gap-1"><span class="w-1.5 h-1.5 rounded-full bg-sky-400 inline-block"></span>24시간</span>
+      ${lastError ? `<span class="text-rose-400">최근 오류 ${esc(lastError)}</span>` : ''}
     </div>`;
 
   // 설정 편집 폼
@@ -450,32 +670,13 @@ function renderCoinAutoCard() {
   if (coinAutoState.settingsOpen) {
     settingsForm = `
       <div class="mt-3 pt-3 border-t border-slate-700/40">
-        <div class="grid grid-cols-3 gap-2 mb-2">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-2 mb-2">
           <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">총 한도 (원)</label>
+            <label class="text-[10px] text-slate-500 block mb-0.5">TRX 총 운용 한도 (원)</label>
             <input id="coin-at-maxTotal" type="number" value="${maxTotal}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
           </div>
-          <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">종목당 한도 (원)</label>
-            <input id="coin-at-maxPer" type="number" value="${maxPer}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
-          </div>
-          <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">최소 점수</label>
-            <input id="coin-at-minScore" type="number" step="1" min="0" max="100" value="${minScore}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
-          </div>
-        </div>
-        <div class="grid grid-cols-3 gap-2 mb-2">
-          <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">동시 포지션 수</label>
-            <input id="coin-at-maxPos" type="number" min="1" max="20" value="${maxPos}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
-          </div>
-          <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">보유 시간 (h)</label>
-            <input id="coin-at-maxHold" type="number" min="1" max="168" value="${maxHold}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
-          </div>
-          <div>
-            <label class="text-[10px] text-slate-500 block mb-0.5">일일 손실 한도 (%)</label>
-            <input id="coin-at-maxLoss" type="number" step="0.1" min="-100" max="0" value="${maxDailyLoss}" class="w-full px-2 py-1 rounded bg-slate-800/60 border border-slate-700/50 text-xs text-slate-200 focus:border-slate-500 outline-none" />
+          <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2 text-[10px] text-slate-500">
+            bak 숨김: 신호 점수, stage, 종목별 한도, 보유시간 설정은 기존 n8n 코인 전략용입니다.
           </div>
         </div>
         <div class="flex items-center gap-2">
@@ -486,13 +687,13 @@ function renderCoinAutoCard() {
   } else {
     settingsForm = `
       <div class="mt-2">
-        <button id="coin-at-open-settings" class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors underline underline-offset-2">설정 변경</button>
+        <button id="coin-at-open-settings" class="text-[10px] text-slate-500 hover:text-slate-300 transition-colors underline underline-offset-2">TRX 한도 변경</button>
       </div>`;
   }
 
-  // 로그 섹션
+  // bak: 기존 coin_autotrade 이벤트 로그 섹션은 TRX 전략 로그 파이프라인 정리 전까지 숨김.
   let logsHtml = '';
-  if (coinAutoState.logs && coinAutoState.logs.length > 0) {
+  if (false && coinAutoState.logs && coinAutoState.logs.length > 0) {
     const logRows = coinAutoState.logs.map(log => {
       const kind = log.kind || '';
       const isError = kind.includes('error');
@@ -518,16 +719,6 @@ function renderCoinAutoCard() {
         <div class="text-[10px] text-slate-500 mb-1">최근 자동매매</div>
         ${logRows}
       </div>`;
-  } else if (coinAutoState.logsErr) {
-    logsHtml = `
-      <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
-        로그는 이벤트 탭에서 확인
-      </div>`;
-  } else {
-    logsHtml = `
-      <div class="mt-3 pt-3 border-t border-slate-700/40 text-[10px] text-slate-600">
-        자동매매 기록 없음
-      </div>`;
   }
 
   // 비상 정지 모달
@@ -536,7 +727,7 @@ function renderCoinAutoCard() {
     killModal = `
       <div id="coin-kill-modal" class="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60">
         <div class="rounded-xl border border-slate-700/50 bg-slate-900 p-5 w-80 shadow-2xl">
-          <div class="text-sm font-medium text-slate-200 mb-3">코인 자동매매를 즉시 중단합니다.</div>
+          <div class="text-sm font-medium text-slate-200 mb-3">TRX 수량늘리기 엔진을 즉시 중단합니다.</div>
           <div class="text-xs text-slate-400 mb-4">진행하시겠습니까?</div>
           <label class="flex items-center gap-2 text-xs text-slate-400 mb-4 cursor-pointer select-none">
             <input type="checkbox" id="coin-kill-check" class="rounded border-slate-600" ${coinAutoState.killConfirmChecked ? 'checked' : ''} />
@@ -556,14 +747,14 @@ function renderCoinAutoCard() {
     enableModal = `
       <div id="coin-enable-modal" class="fixed inset-0 z-[9998] flex items-center justify-center bg-black/60">
         <div class="rounded-xl border border-slate-700/50 bg-slate-900 p-5 w-80 shadow-2xl">
-          <div class="text-sm font-medium text-slate-200 mb-3">코인 자동매매를 켭니다.</div>
-          <div class="text-xs text-slate-400 mb-4">24시간 자동 거래됩니다. 활성화하시겠습니까?</div>
+          <div class="text-sm font-medium text-slate-200 mb-3">TRX 수량늘리기 엔진을 켭니다.</div>
+          <div class="text-xs text-slate-400 mb-4">TRX DCA/익절 전략이 60초 주기로 실행됩니다. 활성화하시겠습니까?</div>
           <label class="flex items-center gap-2 text-xs text-slate-400 mb-4 cursor-pointer select-none">
             <input type="checkbox" id="coin-enable-check" class="rounded border-slate-600" ${coinAutoState.enableConfirmChecked ? 'checked' : ''} />
-            <span>24시간 자동 거래에 동의합니다</span>
+            <span>TRX 자동 매매 실행에 동의합니다</span>
           </label>
           <div class="flex items-center gap-2">
-            <button id="coin-enable-confirm" class="px-3 py-1.5 rounded text-xs font-semibold transition-colors ${coinAutoState.enableConfirmChecked ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' : 'bg-slate-800 text-slate-600 border border-slate-700/40 cursor-not-allowed'}" ${coinAutoState.enableConfirmChecked ? '' : 'disabled'}>자동매매 활성화</button>
+            <button id="coin-enable-confirm" class="px-3 py-1.5 rounded text-xs font-semibold transition-colors ${coinAutoState.enableConfirmChecked ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30' : 'bg-slate-800 text-slate-600 border border-slate-700/40 cursor-not-allowed'}" ${coinAutoState.enableConfirmChecked ? '' : 'disabled'}>TRX 엔진 활성화</button>
             <button id="coin-enable-cancel" class="px-3 py-1.5 rounded text-xs text-slate-500 hover:text-slate-300 transition-colors">취소</button>
           </div>
         </div>
@@ -574,7 +765,7 @@ function renderCoinAutoCard() {
     <div class="rounded-xl border border-slate-700/50 bg-slate-800/30 p-4 mb-6">
       <div class="flex items-center justify-between mb-1">
         <div class="flex items-center gap-2">
-          <span class="text-xs font-medium text-slate-400">코인 자동매매</span>
+          <span class="text-xs font-medium text-slate-400">TRX 수량늘리기</span>
           ${statusChip}
         </div>
         <div class="flex items-center gap-2">
@@ -674,11 +865,6 @@ function bindCoinAutoHandlers() {
       const form = {};
       const el = (id) => document.getElementById(id);
       if (el('coin-at-maxTotal')) form.maxTotalKRW = el('coin-at-maxTotal').value;
-      if (el('coin-at-maxPer')) form.maxPerSymbolKRW = el('coin-at-maxPer').value;
-      if (el('coin-at-minScore')) form.minScore = el('coin-at-minScore').value;
-      if (el('coin-at-maxPos')) form.maxConcurrentPositions = el('coin-at-maxPos').value;
-      if (el('coin-at-maxHold')) form.maxHoldHours = el('coin-at-maxHold').value;
-      if (el('coin-at-maxLoss')) form.maxDailyLossPct = el('coin-at-maxLoss').value;
       saveCoinAutoConfig(form);
     };
   }
