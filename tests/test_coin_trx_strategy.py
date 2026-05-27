@@ -313,6 +313,35 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorder.trades[0]["type"], "buy")
         self.assertEqual(recorder.trades[0]["reason"], "dca_limit_filled")
 
+    async def test_filled_dca_limit_buy_adds_bot_inventory(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=1100.0, trx_avg_buy_price=540.0, krw_balance=450_000)
+        broker.prices["KRW-TRX"] = 543.0
+        broker.order_status["limit-buy-1"] = {
+            "uuid": "limit-buy-1",
+            "state": "done",
+            "price": "544",
+            "volume": "91.9117647",
+        }
+        store = MemoryStrategyStateStore(
+            StrategyState(
+                last_dca_price=556.0,
+                is_profit_taken=True,
+                pending_dca_order_uuid="limit-buy-1",
+                pending_dca_order_price=544.0,
+                pending_dca_order_krw=50_000,
+                bot_inventory_trx=10.0,
+                bot_inventory_cost_krw=5_000.0,
+            )
+        )
+        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+
+        await strategy.run_once(now=now)
+
+        self.assertAlmostEqual(store.state.bot_inventory_trx, 101.9117647)
+        self.assertEqual(store.state.bot_inventory_cost_krw, 55_000.0)
+
     async def test_existing_manual_holding_seeds_dca_from_current_price(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
@@ -328,38 +357,72 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(store.state.no_position_since)
         self.assertEqual(broker.buy_orders, [])
 
+    async def test_profit_take_does_not_sell_existing_manual_holding_without_bot_inventory(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=691.06227524, trx_avg_buy_price=518.50750936, krw_balance=457_000)
+        broker.prices["KRW-TRX"] = 552.0
+        broker.binance_trx_usdt = 0.4
+        store = MemoryStrategyStateStore(StrategyState(last_dca_price=556.0, is_profit_taken=False))
+        strategy = TRXDcaStrategy(
+            broker=broker,
+            state_store=store,
+            sleep_seconds=0,
+            budget_provider=lambda: {
+                "maxTotalKRW": 300_000,
+                "maxPerSymbolKRW": 180_000,
+                "currentBotInvestedKRW": 0,
+            },
+        )
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "dca_limit_buy_ladder_placed")
+        self.assertEqual(broker.sell_orders, [])
+        self.assertEqual(store.state.bot_inventory_trx, 0.0)
+
     async def test_profit_take_sells_in_three_stages_and_ignores_kimchi_failure(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=100.0, krw_balance=500_000)
         broker.prices["KRW-TRX"] = 103.1
         broker.fail_kimchi = True
-        store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=False))
+        store = MemoryStrategyStateStore(
+            StrategyState(
+                last_dca_price=100.0,
+                is_profit_taken=False,
+                bot_inventory_trx=100.0,
+                bot_inventory_cost_krw=10_000.0,
+            )
+        )
         recorder = MemoryTradeRecorder()
         strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
 
         result = await strategy.run_once(now=now)
 
         self.assertEqual(result["action"], "profit_take_stage_1")
-        self.assertEqual(broker.sell_orders[0]["volume"], 300.0)
+        self.assertEqual(broker.sell_orders[0]["volume"], 30.0)
         self.assertFalse(store.state.is_profit_taken)
         self.assertEqual(store.state.profit_take_stage, 1)
+        self.assertAlmostEqual(store.state.bot_inventory_trx, 70.0)
+        self.assertAlmostEqual(store.state.bot_inventory_cost_krw, 7_000.0)
         self.assertEqual(recorder.trades[0]["type"], "sell")
         self.assertEqual(recorder.trades[0]["reason"], "profit_take_stage_1")
-        self.assertAlmostEqual(recorder.trades[0]["realizedPnlKRW"], 930.0)
+        self.assertAlmostEqual(recorder.trades[0]["realizedPnlKRW"], 93.0)
 
         broker.prices["KRW-TRX"] = 102.1
         second = await strategy.run_once(now=now + timedelta(minutes=1))
         self.assertEqual(second["action"], "profit_take_stage_2")
-        self.assertEqual(broker.sell_orders[1]["volume"], 300.0)
+        self.assertEqual(broker.sell_orders[1]["volume"], 21.0)
         self.assertEqual(store.state.profit_take_stage, 2)
 
         broker.prices["KRW-TRX"] = 103.1
         third = await strategy.run_once(now=now + timedelta(minutes=2))
         self.assertEqual(third["action"], "profit_take_stage_3")
-        self.assertEqual(broker.sell_orders[2]["volume"], 200.0)
+        self.assertEqual(broker.sell_orders[2]["volume"], 9.8)
         self.assertTrue(store.state.is_profit_taken)
         self.assertEqual(store.state.profit_take_stage, 3)
+        self.assertAlmostEqual(store.state.bot_inventory_trx, 39.2)
 
         broker.fail_kimchi = False
         fourth = await strategy.run_once(now=now + timedelta(minutes=3))

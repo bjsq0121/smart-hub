@@ -111,6 +111,8 @@ class StrategyState:
     pending_dca_order_krw: float | None = None
     pending_dca_orders: list[dict[str, Any]] = field(default_factory=list)
     profit_take_stage: int = 0
+    bot_inventory_trx: float = 0.0
+    bot_inventory_cost_krw: float = 0.0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StrategyState":
@@ -150,6 +152,8 @@ class StrategyState:
             pending_dca_order_krw=_safe_float(pending_krw) if pending_krw is not None else None,
             pending_dca_orders=pending_orders,
             profit_take_stage=int(data.get("profitTakeStage") or 0),
+            bot_inventory_trx=max(0.0, _safe_float(data.get("botInventoryTRX"))),
+            bot_inventory_cost_krw=max(0.0, _safe_float(data.get("botInventoryCostKRW"))),
         )
 
     def to_firestore_updates(self) -> dict[str, Any]:
@@ -164,6 +168,8 @@ class StrategyState:
             "pendingDcaOrderKRW": self.pending_dca_order_krw,
             "pendingDcaOrders": self.pending_dca_orders,
             "profitTakeStage": self.profit_take_stage,
+            "botInventoryTRX": self.bot_inventory_trx,
+            "botInventoryCostKRW": self.bot_inventory_cost_krw,
         }
 
 
@@ -601,14 +607,17 @@ class TRXDcaStrategy:
         current_price: float,
         now: datetime,
     ) -> dict[str, Any] | None:
-        if balance.trx_avg_buy_price <= 0 or balance.trx_balance <= 0:
+        if state.bot_inventory_trx <= 0 or state.bot_inventory_cost_krw <= 0 or balance.trx_balance <= 0:
             return None
         if state.is_profit_taken:
             return None
         if state.profit_take_stage >= 3:
             state.is_profit_taken = True
             return None
-        pnl_pct = ((current_price / balance.trx_avg_buy_price) - 1.0) * 100.0
+        bot_avg_buy_price = state.bot_inventory_cost_krw / state.bot_inventory_trx
+        if bot_avg_buy_price <= 0:
+            return None
+        pnl_pct = ((current_price / bot_avg_buy_price) - 1.0) * 100.0
         stages = [
             (0, 1.2, 0.30, "profit_take_stage_1"),
             (1, 2.0, 0.30, "profit_take_stage_2"),
@@ -617,13 +626,16 @@ class TRXDcaStrategy:
         for current_stage, threshold_pct, sell_ratio, action in stages:
             if state.profit_take_stage != current_stage or pnl_pct < threshold_pct:
                 continue
-            sell_volume = balance.trx_balance * sell_ratio
+            sell_volume = min(state.bot_inventory_trx * sell_ratio, balance.trx_balance)
             try:
                 result = self.broker.market_sell_volume(self.market, sell_volume)
             except Exception as exc:
                 return self._record_error(f"{action}_failed: {exc}", action="error")
             if not result.get("uuid"):
                 return self._record_error(f"{action}_rejected: {result}", action="error")
+            sold_cost_krw = bot_avg_buy_price * sell_volume
+            state.bot_inventory_trx = max(0.0, state.bot_inventory_trx - sell_volume)
+            state.bot_inventory_cost_krw = max(0.0, state.bot_inventory_cost_krw - sold_cost_krw)
             state.profit_take_stage = current_stage + 1
             state.is_profit_taken = state.profit_take_stage >= 3
             state.updated_at = now
@@ -636,15 +648,17 @@ class TRXDcaStrategy:
                     "market": self.market,
                     "uuid": result.get("uuid"),
                     "price": current_price,
-                    "avgBuyPrice": balance.trx_avg_buy_price,
+                    "avgBuyPrice": bot_avg_buy_price,
                     "trxVolume": sell_volume,
                     "krwAmount": sell_volume * current_price,
-                    "realizedPnlKRW": (current_price - balance.trx_avg_buy_price) * sell_volume,
+                    "realizedPnlKRW": (current_price - bot_avg_buy_price) * sell_volume,
                     "realizedPnlPct": pnl_pct,
                     "profitTakeStage": state.profit_take_stage,
+                    "remainingBotInventoryTRX": state.bot_inventory_trx,
+                    "remainingBotInventoryCostKRW": state.bot_inventory_cost_krw,
                 }
             )
-            self._log(action, {"price": current_price, "volume": sell_volume, "avg": balance.trx_avg_buy_price})
+            self._log(action, {"price": current_price, "volume": sell_volume, "avg": bot_avg_buy_price})
             return {"action": action, "price": current_price, "volume": sell_volume}
         return None
 
@@ -755,6 +769,9 @@ class TRXDcaStrategy:
         state.last_dca_price = current_price
         state.is_profit_taken = False
         state.profit_take_stage = 0
+        if current_price > 0:
+            state.bot_inventory_trx += float(krw_amount) / current_price
+            state.bot_inventory_cost_krw += float(krw_amount)
         state.last_error = None
         state.updated_at = utc_now()
         self.state_store.save(state)
@@ -999,6 +1016,8 @@ class TRXDcaStrategy:
                 state.last_dca_price = fill_price or _safe_float(pending.get("price"))
                 state.is_profit_taken = False
                 state.profit_take_stage = 0
+                state.bot_inventory_trx += volume
+                state.bot_inventory_cost_krw += krw_amount
                 state.last_error = None
                 changed = True
                 self._record_trade(
