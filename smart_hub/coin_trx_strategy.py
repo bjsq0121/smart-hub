@@ -8,6 +8,7 @@ can run without live API credentials.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -105,6 +106,9 @@ class StrategyState:
     is_profit_taken: bool = False
     last_error: str | None = None
     updated_at: datetime | None = None
+    pending_dca_order_uuid: str | None = None
+    pending_dca_order_price: float | None = None
+    pending_dca_order_krw: float | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StrategyState":
@@ -114,12 +118,17 @@ class StrategyState:
             last_dca_price = float(last_dca) if last_dca is not None else None
         except (TypeError, ValueError):
             last_dca_price = None
+        pending_price = data.get("pendingDcaOrderPrice")
+        pending_krw = data.get("pendingDcaOrderKRW")
         return cls(
             no_position_since=parse_dt(data.get("noPositionSince")),
             last_dca_price=last_dca_price,
             is_profit_taken=bool(data.get("isProfitTaken", False)),
             last_error=data.get("lastError"),
             updated_at=parse_dt(data.get("updatedAt")),
+            pending_dca_order_uuid=data.get("pendingDcaOrderUuid"),
+            pending_dca_order_price=_safe_float(pending_price) if pending_price is not None else None,
+            pending_dca_order_krw=_safe_float(pending_krw) if pending_krw is not None else None,
         )
 
     def to_firestore_updates(self) -> dict[str, Any]:
@@ -129,6 +138,9 @@ class StrategyState:
             "isProfitTaken": self.is_profit_taken,
             "lastError": self.last_error,
             "updatedAt": dt_to_iso(self.updated_at or utc_now()),
+            "pendingDcaOrderUuid": self.pending_dca_order_uuid,
+            "pendingDcaOrderPrice": self.pending_dca_order_price,
+            "pendingDcaOrderKRW": self.pending_dca_order_krw,
         }
 
 
@@ -258,10 +270,16 @@ class Broker(Protocol):
     def market_buy_krw(self, market: str, krw_amount: float) -> dict[str, Any]:
         ...
 
+    def limit_buy(self, market: str, price: float, volume: float) -> dict[str, Any]:
+        ...
+
     def market_sell_volume(self, market: str, volume: float) -> dict[str, Any]:
         ...
 
     def get_open_orders(self, market: str) -> list[dict[str, Any]]:
+        ...
+
+    def get_order(self, uuid: str) -> dict[str, Any]:
         ...
 
     def cancel_order(self, uuid: str) -> dict[str, Any]:
@@ -369,6 +387,20 @@ class PyUpbitBroker:
         )
         return self._ensure_private_response(result or {}, dict, "upbit_market_buy_failed")
 
+    def limit_buy(self, market: str, price: float, volume: float) -> dict[str, Any]:
+        result = self._upbit_proxy(
+            "POST",
+            "/v1/orders",
+            data={
+                "market": market,
+                "side": "bid",
+                "ord_type": "limit",
+                "price": str(price),
+                "volume": str(volume),
+            },
+        )
+        return self._ensure_private_response(result or {}, dict, "upbit_limit_buy_failed")
+
     def market_sell_volume(self, market: str, volume: float) -> dict[str, Any]:
         result = self._upbit_proxy(
             "POST",
@@ -381,6 +413,10 @@ class PyUpbitBroker:
         orders = self._upbit_proxy("GET", "/v1/orders", query=f"market={market}&state=wait") or []
         orders = self._ensure_private_response(orders, list, "upbit_open_orders_failed")
         return orders if isinstance(orders, list) else [orders]
+
+    def get_order(self, uuid: str) -> dict[str, Any]:
+        result = self._upbit_proxy("GET", "/v1/order", query=f"uuid={uuid}") or {}
+        return self._ensure_private_response(result, dict, "upbit_order_failed")
 
     def cancel_order(self, uuid: str) -> dict[str, Any]:
         result = self._upbit_proxy("DELETE", "/v1/order", query=f"uuid={uuid}") or {}
@@ -413,11 +449,17 @@ class LazyPyUpbitBroker:
     def market_buy_krw(self, market: str, krw_amount: float) -> dict[str, Any]:
         return self._get().market_buy_krw(market, krw_amount)
 
+    def limit_buy(self, market: str, price: float, volume: float) -> dict[str, Any]:
+        return self._get().limit_buy(market, price, volume)
+
     def market_sell_volume(self, market: str, volume: float) -> dict[str, Any]:
         return self._get().market_sell_volume(market, volume)
 
     def get_open_orders(self, market: str) -> list[dict[str, Any]]:
         return self._get().get_open_orders(market)
+
+    def get_order(self, uuid: str) -> dict[str, Any]:
+        return self._get().get_order(uuid)
 
     def cancel_order(self, uuid: str) -> dict[str, Any]:
         return self._get().cancel_order(uuid)
@@ -461,6 +503,8 @@ class TRXDcaStrategy:
                 return self._record_error(f"enabled_check_failed: {exc}", action="error")
         self._cleanup_stale_buy_orders(now)
         state = self.state_store.load()
+        if self._reconcile_pending_dca_order(state):
+            return {"action": "hold"}
 
         try:
             balance = self.broker.get_balance_snapshot()
@@ -514,6 +558,7 @@ class TRXDcaStrategy:
             changed = True
         if changed:
             self.state_store.save(state)
+            return {"action": "hold", "price": current_price}
 
         if (
             not state.is_profit_taken
@@ -548,10 +593,35 @@ class TRXDcaStrategy:
             self._log("profit_take", {"price": current_price, "volume": sell_volume, "avg": balance.trx_avg_buy_price})
             return {"action": "profit_take", "price": current_price, "volume": sell_volume}
 
-        if current_price <= float(state.last_dca_price) * 0.98:
+        dca_trigger_price = self._round_krw_bid_price(float(state.last_dca_price) * 0.98)
+        if current_price <= dca_trigger_price:
             return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
+        return self._try_place_limit_buy(balance.krw_balance * 0.10, current_price, dca_trigger_price, "dca_limit_buy", state)
 
-        return {"action": "hold", "price": current_price}
+    def _round_krw_bid_price(self, price: float) -> float:
+        if price <= 0:
+            return 0.0
+        if price < 1:
+            tick = 0.0001
+        elif price < 10:
+            tick = 0.01
+        elif price < 100:
+            tick = 0.1
+        elif price < 1_000:
+            tick = 1
+        elif price < 10_000:
+            tick = 5
+        elif price < 100_000:
+            tick = 10
+        elif price < 500_000:
+            tick = 50
+        elif price < 1_000_000:
+            tick = 100
+        elif price < 2_000_000:
+            tick = 500
+        else:
+            tick = 1_000
+        return math.floor(price / tick) * tick
 
     def _try_buy(
         self,
@@ -605,6 +675,115 @@ class TRXDcaStrategy:
         )
         self._log(action, {"krw": int(krw_amount), "price": current_price, "kimchiPremiumPct": premium_or_error})
         return {"action": action, "krw": int(krw_amount), "price": current_price}
+
+    def _try_place_limit_buy(
+        self,
+        krw_amount: float,
+        current_price: float,
+        limit_price: float,
+        action: str,
+        state: StrategyState,
+    ) -> dict[str, Any]:
+        pending = self._find_open_buy_order()
+        if pending:
+            return {"action": f"{action}_pending", "uuid": pending.get("uuid"), "price": _safe_float(pending.get("price"))}
+
+        max_total_krw, max_per_order_krw, current_bot_invested_krw = self._budget_limits()
+        if max_per_order_krw > 0:
+            krw_amount = min(krw_amount, max_per_order_krw)
+        if max_total_krw > 0:
+            remaining_budget = max_total_krw - max(0.0, current_bot_invested_krw)
+            if remaining_budget < MIN_ORDER_KRW:
+                return {
+                    "action": "buy_skipped_budget_cap",
+                    "krw": int(krw_amount),
+                    "currentBotInvestedKRW": int(current_bot_invested_krw),
+                    "maxTotalKRW": int(max_total_krw),
+                }
+            krw_amount = min(krw_amount, remaining_budget)
+        if krw_amount < MIN_ORDER_KRW:
+            return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
+        ok, premium_or_error = self._buy_allowed_by_kimchi(current_price)
+        if not ok:
+            self._record_error(str(premium_or_error), action="buy_blocked_kimchi")
+            return {"action": "buy_blocked_kimchi", "reason": str(premium_or_error)}
+        volume = float(krw_amount) / limit_price if limit_price > 0 else 0.0
+        if volume <= 0:
+            return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
+        try:
+            result = self.broker.limit_buy(self.market, limit_price, volume)
+        except Exception as exc:
+            return self._record_error(f"{action}_failed: {exc}", action="error")
+        if not result.get("uuid"):
+            return self._record_error(f"{action}_rejected: {result}", action="error")
+        state.pending_dca_order_uuid = result.get("uuid")
+        state.pending_dca_order_price = limit_price
+        state.pending_dca_order_krw = int(krw_amount)
+        state.last_error = None
+        state.updated_at = utc_now()
+        self.state_store.save(state)
+        self._record_trade(
+            {
+                "type": "buy_order",
+                "reason": action,
+                "market": self.market,
+                "uuid": result.get("uuid"),
+                "price": limit_price,
+                "currentPrice": current_price,
+                "krwAmount": int(krw_amount),
+                "trxVolume": volume,
+                "kimchiPremiumPct": premium_or_error,
+            }
+        )
+        self._log(action, {"krw": int(krw_amount), "price": limit_price, "kimchiPremiumPct": premium_or_error})
+        return {"action": f"{action}_placed", "krw": int(krw_amount), "price": limit_price, "volume": volume}
+
+    def _reconcile_pending_dca_order(self, state: StrategyState) -> bool:
+        uuid = state.pending_dca_order_uuid
+        if not uuid:
+            return False
+        try:
+            order = self.broker.get_order(uuid)
+        except Exception as exc:
+            self._record_error(f"pending_dca_order_fetch_failed: {exc}")
+            return False
+        order_state = order.get("state")
+        if order_state == "wait":
+            return False
+        if order_state == "done":
+            fill_price = _safe_float(order.get("price"), state.pending_dca_order_price or 0.0)
+            volume = _safe_float(order.get("executed_volume") or order.get("volume"))
+            krw_amount = state.pending_dca_order_krw or (fill_price * volume)
+            state.no_position_since = None
+            state.last_dca_price = fill_price or state.pending_dca_order_price
+            state.is_profit_taken = False
+            state.last_error = None
+            self._clear_pending_dca_order(state)
+            state.updated_at = utc_now()
+            self.state_store.save(state)
+            self._record_trade(
+                {
+                    "type": "buy",
+                    "reason": "dca_limit_filled",
+                    "market": self.market,
+                    "uuid": uuid,
+                    "price": state.last_dca_price,
+                    "krwAmount": int(krw_amount),
+                    "trxVolume": volume,
+                }
+            )
+            self._log("dca_limit_filled", {"uuid": uuid, "price": state.last_dca_price, "volume": volume})
+            return True
+        if order_state == "cancel":
+            self._clear_pending_dca_order(state)
+            state.updated_at = utc_now()
+            self.state_store.save(state)
+        return False
+
+    def _clear_pending_dca_order(self, state: StrategyState) -> None:
+        state.pending_dca_order_uuid = None
+        state.pending_dca_order_price = None
+        state.pending_dca_order_krw = None
 
     def _safe_rsi(self) -> float | None:
         try:
@@ -662,6 +841,10 @@ class TRXDcaStrategy:
                 uuid = order.get("uuid")
                 if uuid:
                     self.broker.cancel_order(uuid)
+                    state = self.state_store.load()
+                    if state.pending_dca_order_uuid == uuid:
+                        self._clear_pending_dca_order(state)
+                        self.state_store.save(state)
                     self._record_trade(
                         {
                             "type": "cancel",
@@ -674,6 +857,17 @@ class TRXDcaStrategy:
                     self._log("cancel_stale_buy", {"uuid": uuid, "createdAt": dt_to_iso(created_at)})
             except Exception as exc:
                 self._record_error(f"stale_order_cancel_failed: {exc}")
+
+    def _find_open_buy_order(self) -> dict[str, Any] | None:
+        try:
+            orders = self.broker.get_open_orders(self.market)
+        except Exception as exc:
+            self._record_error(f"open_order_fetch_failed: {exc}")
+            return None
+        for order in orders:
+            if order.get("side") == "bid":
+                return order
+        return None
 
     def _record_error(self, message: str, action: str = "error") -> dict[str, Any]:
         msg = message[:500]

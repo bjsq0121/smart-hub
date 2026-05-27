@@ -32,8 +32,10 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
 - TRX 미보유 시 5분봉 RSI(14), 100개 캔들 기준으로 RSI <= 30이면 KRW 현금의 10%를 첫 매수합니다.
 - RSI 조건이 24시간 동안 충족되지 않으면 현금의 3%만 정찰병 매수합니다.
 - 기존 TRX 보유분이 있으면 첫 진입 로직을 건너뛰고 현재 보유 평단 기준으로 DCA/익절을 관리합니다.
-- DCA는 평단이 아니라 `lastDcaPrice` 대비 -2% 하락 시에만 실행합니다.
-- DCA 성공 시 `lastDcaPrice`를 새 기준가로 저장하고 `isProfitTaken=false`로 리셋합니다.
+- DCA는 평단이 아니라 `lastDcaPrice` 대비 -2% 기준으로 실행합니다.
+- 현재가가 DCA 기준가보다 높으면 기준가에 지정가 매수 주문 1개를 미리 걸어둡니다.
+- DCA 지정가 주문이 체결되면 `lastDcaPrice`를 체결 주문가로 저장하고 `isProfitTaken=false`로 리셋합니다.
+- 이미 열린 TRX 매수 주문이 있으면 중복 지정가 주문을 만들지 않습니다.
 - 익절은 평단 대비 +3% 도달 시 보유 수량의 50%만 시장가 매도하고 `isProfitTaken=true`로 저장합니다.
 - 한 매수 사이클에서 익절은 1회만 실행됩니다. 다음 DCA 전까지 추가 매도하지 않습니다.
 - 매수 전 김치 프리미엄을 계산합니다: `(업비트 TRX / (바이낸스 TRX * 업비트 USDT)) - 1`.
@@ -60,6 +62,7 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
    - 추정 실현손익
    - `lastDcaPrice`
    - `isProfitTaken`
+   - `pendingDcaOrderUuid`
    - `lastError`
 
 비상 중단은 코인 운영 메뉴의 비상 정지를 사용합니다. 이 설정은 `settings/coin-autotrade.enabled=false`로 반영되며 TRX 전략 루프도 enabled checker를 통해 멈춥니다.
