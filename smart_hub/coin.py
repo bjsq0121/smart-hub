@@ -13,7 +13,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel
 import requests
 
-from smart_hub.coin_trx_strategy import MARKET_TRX, TRADE_COLLECTION, start_trx_strategy_loop
+from smart_hub.coin_trx_strategy import (
+    FirestoreTradeBudgetProvider,
+    MARKET_TRX,
+    TRADE_COLLECTION,
+    start_trx_strategy_loop,
+)
 
 
 router = APIRouter(tags=["coin"])
@@ -1155,11 +1160,12 @@ async def coin_autotrade_monitor_watchdog():
 
 async def start_coin_autotrade_monitor():
     """서버 시작 시 TRX 자체 전략 루프를 생성한다."""
+    db = deps().get_firestore()
     await start_trx_strategy_loop(
-        deps().get_firestore(),
+        db,
         deps().firestore,
         enabled_checker=lambda: bool(load_coin_autotrade_config().get("enabled")),
-        budget_provider=lambda: load_coin_autotrade_config(),
+        budget_provider=FirestoreTradeBudgetProvider(db, lambda: load_coin_autotrade_config()),
     )
     coin_autotrade_log.info("TRX strategy loop created on startup")
 

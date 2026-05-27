@@ -58,6 +58,15 @@ def dt_to_iso(value: datetime | None) -> str | None:
     return value.astimezone(timezone.utc).isoformat()
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def calculate_rsi(closes: list[float], period: int = 14) -> float | None:
     """Calculate RSI using Wilder smoothing over closing prices."""
     if len(closes) < period + 1:
@@ -166,6 +175,26 @@ class FirestoreTradeRecorder:
         trade_type = str(trade.get("type") or "trade")
         doc_id = f"{trade_type}-{trade.get('uuid')}" if trade.get("uuid") else f"{trade_type}-{int(created_at.timestamp() * 1000)}"
         self.db.collection(TRADE_COLLECTION).document(doc_id).set(trade, merge=True)
+
+
+class FirestoreTradeBudgetProvider:
+    def __init__(self, db: Any, config_provider: Any):
+        self.db = db
+        self.config_provider = config_provider
+
+    def __call__(self) -> dict[str, Any]:
+        cfg = dict(self.config_provider() or {})
+        invested_krw = 0.0
+        for doc in self.db.collection(TRADE_COLLECTION).stream():
+            trade = doc.to_dict() or {}
+            trade_type = trade.get("type")
+            krw_amount = _safe_float(trade.get("krwAmount"))
+            if trade_type == "buy":
+                invested_krw += krw_amount
+            elif trade_type == "sell":
+                invested_krw -= krw_amount
+        cfg["currentBotInvestedKRW"] = max(0.0, invested_krw)
+        return cfg
 
 
 class MemoryStrategyStateStore:
@@ -464,9 +493,9 @@ class TRXDcaStrategy:
         rsi = self._safe_rsi()
         elapsed = now - (state.no_position_since or now)
         if rsi is not None and rsi <= 30:
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "rsi_entry_buy", state, 0.0)
+            return self._try_buy(balance.krw_balance * 0.10, current_price, "rsi_entry_buy", state)
         if elapsed >= timedelta(hours=24):
-            return self._try_buy(balance.krw_balance * 0.03, current_price, "scout_buy", state, 0.0)
+            return self._try_buy(balance.krw_balance * 0.03, current_price, "scout_buy", state)
         return {"action": "wait_entry", "rsi": rsi, "noPositionSince": dt_to_iso(state.no_position_since)}
 
     def _handle_existing_position(
@@ -520,8 +549,7 @@ class TRXDcaStrategy:
             return {"action": "profit_take", "price": current_price, "volume": sell_volume}
 
         if current_price <= float(state.last_dca_price) * 0.98:
-            current_cost_basis = max(0.0, balance.trx_balance * balance.trx_avg_buy_price)
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state, current_cost_basis)
+            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
 
         return {"action": "hold", "price": current_price}
 
@@ -531,18 +559,17 @@ class TRXDcaStrategy:
         current_price: float,
         action: str,
         state: StrategyState,
-        current_cost_basis_krw: float,
     ) -> dict[str, Any]:
-        max_total_krw, max_per_order_krw = self._budget_limits()
+        max_total_krw, max_per_order_krw, current_bot_invested_krw = self._budget_limits()
         if max_per_order_krw > 0:
             krw_amount = min(krw_amount, max_per_order_krw)
         if max_total_krw > 0:
-            remaining_budget = max_total_krw - max(0.0, current_cost_basis_krw)
+            remaining_budget = max_total_krw - max(0.0, current_bot_invested_krw)
             if remaining_budget < MIN_ORDER_KRW:
                 return {
                     "action": "buy_skipped_budget_cap",
                     "krw": int(krw_amount),
-                    "currentCostBasisKRW": int(current_cost_basis_krw),
+                    "currentBotInvestedKRW": int(current_bot_invested_krw),
                     "maxTotalKRW": int(max_total_krw),
                 }
             krw_amount = min(krw_amount, remaining_budget)
@@ -605,15 +632,19 @@ class TRXDcaStrategy:
             return False, f"kimchi_premium_high: {premium_pct:.2f}%"
         return True, round(premium_pct, 4)
 
-    def _budget_limits(self) -> tuple[float, float]:
+    def _budget_limits(self) -> tuple[float, float, float]:
         if self.budget_provider is None:
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
         try:
             cfg = self.budget_provider() or {}
-            return float(cfg.get("maxTotalKRW") or 0), float(cfg.get("maxPerSymbolKRW") or 0)
+            return (
+                float(cfg.get("maxTotalKRW") or 0),
+                float(cfg.get("maxPerSymbolKRW") or 0),
+                float(cfg.get("currentBotInvestedKRW") or 0),
+            )
         except Exception as exc:
             self._record_error(f"budget_config_unavailable: {exc}")
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0
 
     def _cleanup_stale_buy_orders(self, now: datetime) -> None:
         try:

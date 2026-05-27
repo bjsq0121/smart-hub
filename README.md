@@ -40,6 +40,7 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
 - 김프 5% 이상이거나 바이낸스/USDT 조회 실패 시 매수는 차단합니다. 매도는 김프와 무관하게 실행합니다.
 - 1시간 이상 지난 미체결 매수 주문은 자동 취소합니다.
 - `settings/coin-autotrade.maxTotalKRW`, `maxPerSymbolKRW` 예산 상한을 TRX DCA에도 적용합니다.
+  - `maxTotalKRW`는 기존 수동 보유분 원가가 아니라 TRX 전략 매매기록의 순투입금(봇 매수금액 - 봇 매도금액) 기준입니다.
 
 주의:
 

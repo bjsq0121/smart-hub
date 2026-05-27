@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from smart_hub.coin_trx_strategy import (
     BalanceSnapshot,
+    FirestoreTradeBudgetProvider,
     MemoryTradeRecorder,
     MemoryStrategyStateStore,
     StrategyState,
@@ -51,6 +52,30 @@ class FakeBroker:
     def cancel_order(self, uuid):
         self.cancelled.append(uuid)
         return {"uuid": uuid}
+
+
+class FakeDoc:
+    def __init__(self, data):
+        self.data = data
+
+    def to_dict(self):
+        return dict(self.data)
+
+
+class FakeCollection:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def stream(self):
+        return [FakeDoc(row) for row in self.rows]
+
+
+class FakeFirestore:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def collection(self, name):
+        return FakeCollection(self.rows)
 
 
 class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
@@ -108,7 +133,11 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
             broker=broker,
             state_store=store,
             sleep_seconds=0,
-            budget_provider=lambda: {"maxTotalKRW": 300_000, "maxPerSymbolKRW": 180_000},
+            budget_provider=lambda: {
+                "maxTotalKRW": 300_000,
+                "maxPerSymbolKRW": 180_000,
+                "currentBotInvestedKRW": 400_000,
+            },
         )
 
         result = await strategy.run_once(now=now)
@@ -116,6 +145,30 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["action"], "buy_skipped_budget_cap")
         self.assertEqual(broker.buy_orders, [])
         self.assertTrue(store.state.is_profit_taken)
+
+    async def test_dca_budget_cap_ignores_manual_holding_cost_basis(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=400.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 97.9
+        store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=True))
+        strategy = TRXDcaStrategy(
+            broker=broker,
+            state_store=store,
+            sleep_seconds=0,
+            budget_provider=lambda: {
+                "maxTotalKRW": 300_000,
+                "maxPerSymbolKRW": 180_000,
+                "currentBotInvestedKRW": 0,
+            },
+        )
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "dca_buy")
+        self.assertEqual(broker.buy_orders[0]["krw"], 50_000)
+        self.assertEqual(store.state.last_dca_price, 97.9)
+        self.assertFalse(store.state.is_profit_taken)
 
     async def test_existing_manual_holding_seeds_dca_from_current_price(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
@@ -206,3 +259,22 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
     def test_rsi_calculation_uses_closing_prices(self):
         closes = list(range(1, 120))
         self.assertGreater(calculate_rsi(closes, period=14), 99)
+
+    def test_trade_budget_provider_uses_bot_net_invested_krw(self):
+        provider = FirestoreTradeBudgetProvider(
+            FakeFirestore(
+                [
+                    {"type": "buy", "krwAmount": 100_000},
+                    {"type": "buy", "krwAmount": 80_000},
+                    {"type": "sell", "krwAmount": 120_000},
+                    {"type": "cancel", "krwAmount": 999_999},
+                ]
+            ),
+            lambda: {"maxTotalKRW": 300_000, "maxPerSymbolKRW": 180_000},
+        )
+
+        cfg = provider()
+
+        self.assertEqual(cfg["maxTotalKRW"], 300_000)
+        self.assertEqual(cfg["maxPerSymbolKRW"], 180_000)
+        self.assertEqual(cfg["currentBotInvestedKRW"], 60_000)
