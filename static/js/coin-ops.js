@@ -295,7 +295,7 @@ function fmtTrx(n) {
   return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + ' TRX';
 }
 
-function fmtPrice(n) {
+function fmtCoinPrice(n) {
   if (n == null || isNaN(n)) return '-';
   return Number(n).toLocaleString('ko-KR', { maximumFractionDigits: 4 }) + '원';
 }
@@ -358,7 +358,7 @@ function renderTrxDashboard() {
         <td class="px-3 py-3 text-slate-400 whitespace-nowrap">${created ? fmtRel(created) : '-'}</td>
         <td class="px-3 py-3">${tradeTypeBadge(t.type)}</td>
         <td class="px-3 py-3 text-slate-300">${esc(tradeReasonLabel(t.reason))}</td>
-        <td class="px-3 py-3 text-right text-slate-300">${fmtPrice(Number(t.price || 0))}</td>
+        <td class="px-3 py-3 text-right text-slate-300">${fmtCoinPrice(Number(t.price || 0))}</td>
         <td class="px-3 py-3 text-right text-slate-300">${fmtKRW(Math.round(Number(t.krwAmount || 0)))}</td>
         <td class="px-3 py-3 text-right text-slate-300">${fmtTrx(Number(t.trxVolume || 0))}</td>
         <td class="px-3 py-3 text-right ${pnlColor(Number(t.realizedPnlPct || 0))}">${t.type === 'sell' ? fmtKRW(Math.round(Number(t.realizedPnlKRW || 0))) : '-'}</td>
@@ -369,8 +369,8 @@ function renderTrxDashboard() {
   el.innerHTML = `
     ${statusLine ? `<div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">${esc(statusLine)}</div>` : ''}
     <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
-      ${renderTrxMetric('현재 보유 수량', fmtTrx(Number(snapshot.trxBalance || 0)), `평단 ${fmtPrice(Number(snapshot.avgBuyPrice || 0))}`, 'sky')}
-      ${renderTrxMetric('현재 평가금액', fmtKRW(Math.round(Number(snapshot.evaluationKRW || 0))), `현재가 ${fmtPrice(Number(snapshot.currentPrice || 0))}`, 'slate')}
+      ${renderTrxMetric('현재 보유 수량', fmtTrx(Number(snapshot.trxBalance || 0)), `평단 ${fmtCoinPrice(Number(snapshot.avgBuyPrice || 0))}`, 'sky')}
+      ${renderTrxMetric('현재 평가금액', fmtKRW(Math.round(Number(snapshot.evaluationKRW || 0))), `현재가 ${fmtCoinPrice(Number(snapshot.currentPrice || 0))}`, 'slate')}
       ${renderTrxMetric('봇 기록 순증가', fmtTrx(Number(summary.netBotTRX || 0)), `매수 ${fmtTrx(Number(summary.totalBuyTRX || 0))} · 매도 ${fmtTrx(Number(summary.totalSellTRX || 0))}`, qtyTone)}
       ${renderTrxMetric('손익 체크', fmtKRW(Math.round(pnl)), `실현 ${fmtKRW(Math.round(Number(summary.realizedPnlKRW || 0)))} · 평가 ${fmtPct(Number(snapshot.unrealizedPnlPct || 0))}`, pnlTone)}
     </div>
