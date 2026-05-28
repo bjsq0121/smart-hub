@@ -90,12 +90,18 @@ class FakeFirestore:
 
 
 class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
+    def live_strategy(self, **kwargs):
+        kwargs.setdefault("sleep_seconds", 0)
+        kwargs.setdefault("dry_run", False)
+        kwargs.setdefault("live_trading_enabled", True)
+        return TRXDcaStrategy(**kwargs)
+
     async def test_rsi_failure_counts_as_not_met_and_scout_buys_after_24h(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
         broker.candles = []
         store = MemoryStrategyStateStore(StrategyState(no_position_since=now - timedelta(hours=25)))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store)
 
         result = await strategy.run_once(now=now)
 
@@ -109,7 +115,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker = FakeBroker()
         store = MemoryStrategyStateStore(StrategyState(no_position_since=now))
         recorder = MemoryTradeRecorder()
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store, trade_recorder=recorder)
 
         result = await strategy.run_once(now=now)
 
@@ -125,7 +131,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=100.0, krw_balance=500_000)
         broker.prices["KRW-TRX"] = 97.9
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=True, profit_take_stage=2))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store)
 
         result = await strategy.run_once(now=now)
 
@@ -141,10 +147,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=400.0, krw_balance=500_000)
         broker.prices["KRW-TRX"] = 97.9
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=True))
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -164,10 +169,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=400.0, krw_balance=500_000)
         broker.prices["KRW-TRX"] = 97.9
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, is_profit_taken=True))
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -190,11 +194,10 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.binance_trx_usdt = 0.4
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=556.0, is_profit_taken=True))
         recorder = MemoryTradeRecorder()
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
             trade_recorder=recorder,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -224,10 +227,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.binance_trx_usdt = 0.4
         broker.open_orders = [{"uuid": "pending-dca", "side": "bid", "created_at": now.isoformat()}]
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=556.0, is_profit_taken=True))
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -253,10 +255,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
             {"uuid": "old-3", "side": "bid", "price": "549", "created_at": (now - timedelta(minutes=11)).isoformat()},
         ]
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=556.0, is_profit_taken=True))
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -272,7 +273,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dynamic_ladder_moves_closer_in_uptrend_and_wider_in_downtrend(self):
         broker = FakeBroker()
-        strategy = TRXDcaStrategy(broker=broker, state_store=MemoryStrategyStateStore(), sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=MemoryStrategyStateStore())
 
         broker.candles = [{"close": 540.0 + i} for i in range(20)]
         self.assertEqual(strategy._dca_ladder_prices(560.0, 556.0), [558.0, 556.0, 553.0])
@@ -301,7 +302,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         recorder = MemoryTradeRecorder()
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store, trade_recorder=recorder)
 
         result = await strategy.run_once(now=now)
 
@@ -335,7 +336,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
                 bot_inventory_cost_krw=5_000.0,
             )
         )
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store)
 
         await strategy.run_once(now=now)
 
@@ -348,7 +349,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.balance = BalanceSnapshot(trx_balance=1000.0, trx_avg_buy_price=120.0, krw_balance=500_000)
         broker.prices["KRW-TRX"] = 100.0
         store = MemoryStrategyStateStore(StrategyState(no_position_since=now - timedelta(hours=2)))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store)
 
         result = await strategy.run_once(now=now)
 
@@ -364,10 +365,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.prices["KRW-TRX"] = 552.0
         broker.binance_trx_usdt = 0.4
         store = MemoryStrategyStateStore(StrategyState(last_dca_price=556.0, is_profit_taken=False))
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=store,
-            sleep_seconds=0,
             budget_provider=lambda: {
                 "maxTotalKRW": 300_000,
                 "maxPerSymbolKRW": 180_000,
@@ -396,33 +396,33 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         recorder = MemoryTradeRecorder()
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, trade_recorder=recorder, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store, trade_recorder=recorder)
 
         result = await strategy.run_once(now=now)
 
         self.assertEqual(result["action"], "profit_take_stage_1")
-        self.assertEqual(broker.sell_orders[0]["volume"], 30.0)
+        self.assertEqual(broker.sell_orders[0]["volume"], 20.0)
         self.assertFalse(store.state.is_profit_taken)
         self.assertEqual(store.state.profit_take_stage, 1)
-        self.assertAlmostEqual(store.state.bot_inventory_trx, 70.0)
-        self.assertAlmostEqual(store.state.bot_inventory_cost_krw, 7_000.0)
+        self.assertAlmostEqual(store.state.bot_inventory_trx, 80.0)
+        self.assertAlmostEqual(store.state.bot_inventory_cost_krw, 8_000.0)
         self.assertEqual(recorder.trades[0]["type"], "sell")
         self.assertEqual(recorder.trades[0]["reason"], "profit_take_stage_1")
-        self.assertAlmostEqual(recorder.trades[0]["realizedPnlKRW"], 93.0)
+        self.assertAlmostEqual(recorder.trades[0]["realizedPnlKRW"], 62.0)
 
         broker.prices["KRW-TRX"] = 102.1
         second = await strategy.run_once(now=now + timedelta(minutes=1))
         self.assertEqual(second["action"], "profit_take_stage_2")
-        self.assertEqual(broker.sell_orders[1]["volume"], 21.0)
+        self.assertEqual(broker.sell_orders[1]["volume"], 20.0)
         self.assertEqual(store.state.profit_take_stage, 2)
 
         broker.prices["KRW-TRX"] = 103.1
         third = await strategy.run_once(now=now + timedelta(minutes=2))
         self.assertEqual(third["action"], "profit_take_stage_3")
-        self.assertEqual(broker.sell_orders[2]["volume"], 9.8)
+        self.assertEqual(broker.sell_orders[2]["volume"], 15.0)
         self.assertTrue(store.state.is_profit_taken)
         self.assertEqual(store.state.profit_take_stage, 3)
-        self.assertAlmostEqual(store.state.bot_inventory_trx, 39.2)
+        self.assertAlmostEqual(store.state.bot_inventory_trx, 45.0)
 
         broker.fail_kimchi = False
         fourth = await strategy.run_once(now=now + timedelta(minutes=3))
@@ -435,7 +435,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         broker.prices["KRW-TRX"] = 110.0
         broker.binance_trx_usdt = 0.071
         store = MemoryStrategyStateStore(StrategyState(no_position_since=now - timedelta(hours=25)))
-        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=store)
 
         result = await strategy.run_once(now=now)
 
@@ -448,6 +448,142 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["action"], "buy_blocked_kimchi")
         self.assertEqual(broker.buy_orders, [])
 
+    async def test_dry_run_default_does_not_call_broker_order_function(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        store = MemoryStrategyStateStore(StrategyState(no_position_since=now))
+        strategy = TRXDcaStrategy(broker=broker, state_store=store, sleep_seconds=0)
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "dry_run_rsi_entry_buy")
+        self.assertEqual(broker.buy_orders, [])
+        self.assertGreater(store.state.bot_inventory_trx, 0)
+        self.assertEqual(store.state.strategy_mode, "ACCUMULATE")
+
+    async def test_live_trading_disabled_blocks_real_order_even_when_dry_run_false(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        store = MemoryStrategyStateStore(StrategyState(no_position_since=now))
+        strategy = TRXDcaStrategy(
+            broker=broker,
+            state_store=store,
+            sleep_seconds=0,
+            dry_run=False,
+            live_trading_enabled=False,
+        )
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "live_trading_blocked_rsi_entry_buy")
+        self.assertEqual(broker.buy_orders, [])
+
+    async def test_profit_take_updates_profit_reserve_and_buyback_budget(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=100.0, trx_avg_buy_price=100.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 102.0
+        store = MemoryStrategyStateStore(
+            StrategyState(
+                last_dca_price=100.0,
+                bot_inventory_trx=100.0,
+                bot_inventory_cost_krw=10_000.0,
+            )
+        )
+        strategy = self.live_strategy(broker=broker, state_store=store)
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "profit_take_stage_1")
+        self.assertGreater(store.state.profit_reserve_krw, 0)
+        self.assertGreater(store.state.buyback_budget_krw, 0)
+        self.assertEqual(store.state.last_profit_sell_price, 102.0)
+        self.assertEqual(store.state.strategy_mode, "HARVEST")
+        self.assertAlmostEqual(store.state.realized_profit_krw, 40.0)
+        self.assertAlmostEqual(store.state.total_bot_sell_trx, 20.0)
+
+    async def test_buyback_runs_only_after_profit_sell_pullback(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=80.0, trx_avg_buy_price=100.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 101.3
+        store = MemoryStrategyStateStore(
+            StrategyState(
+                last_dca_price=102.0,
+                bot_inventory_trx=80.0,
+                bot_inventory_cost_krw=8_000.0,
+                buyback_budget_krw=10_000.0,
+                last_profit_sell_price=102.0,
+                is_profit_taken=True,
+            )
+        )
+        strategy = self.live_strategy(broker=broker, state_store=store)
+
+        early = await strategy.run_once(now=now)
+        self.assertNotEqual(early["action"], "buyback_buy")
+        self.assertEqual(broker.buy_orders, [])
+
+        broker.prices["KRW-TRX"] = 100.9
+        ready = await strategy.run_once(now=now + timedelta(minutes=1))
+        self.assertEqual(ready["action"], "buyback_buy")
+        self.assertEqual(broker.buy_orders[0]["krw"], 10_000)
+        self.assertEqual(store.state.buyback_budget_krw, 0)
+
+    async def test_crash_market_suspends_dca(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=100.0, trx_avg_buy_price=100.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 96.0
+        broker.candles = [{"close": 100.0 - i * 0.25} for i in range(25)]
+        store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, bot_inventory_trx=100.0, bot_inventory_cost_krw=10_000.0))
+        strategy = self.live_strategy(broker=broker, state_store=store)
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "buy_suspended_risk")
+        self.assertEqual(broker.buy_orders, [])
+        self.assertEqual(store.state.strategy_mode, "DEFENSIVE")
+
+    async def test_high_budget_usage_reduces_dca_amount(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=100.0, trx_avg_buy_price=100.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 97.9
+        store = MemoryStrategyStateStore(StrategyState(last_dca_price=100.0, bot_inventory_trx=100.0, bot_inventory_cost_krw=10_000.0))
+        strategy = self.live_strategy(
+            broker=broker,
+            state_store=store,
+            budget_provider=lambda: {
+                "maxTotalKRW": 200_000,
+                "maxPerSymbolKRW": 180_000,
+                "currentBotInvestedKRW": 170_000,
+            },
+        )
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "dca_buy")
+        self.assertEqual(broker.buy_orders[0]["krw"], 10_000)
+
+    async def test_profit_take_blocks_when_bot_inventory_exceeds_actual_trx_balance(self):
+        now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
+        broker = FakeBroker()
+        broker.balance = BalanceSnapshot(trx_balance=50.0, trx_avg_buy_price=100.0, krw_balance=500_000)
+        broker.prices["KRW-TRX"] = 103.0
+        store = MemoryStrategyStateStore(
+            StrategyState(
+                last_dca_price=100.0,
+                bot_inventory_trx=100.0,
+                bot_inventory_cost_krw=10_000.0,
+            )
+        )
+        strategy = self.live_strategy(broker=broker, state_store=store)
+
+        result = await strategy.run_once(now=now)
+
+        self.assertEqual(result["action"], "sell_blocked_inventory_mismatch")
+        self.assertEqual(broker.sell_orders, [])
+
     async def test_stale_open_buy_orders_are_cancelled(self):
         now = datetime(2026, 5, 26, 12, tzinfo=timezone.utc)
         broker = FakeBroker()
@@ -456,7 +592,7 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
             {"uuid": "fresh-buy", "side": "bid", "created_at": (now - timedelta(minutes=5)).isoformat()},
             {"uuid": "old-sell", "side": "ask", "created_at": (now - timedelta(hours=2)).isoformat()},
         ]
-        strategy = TRXDcaStrategy(broker=broker, state_store=MemoryStrategyStateStore(), sleep_seconds=0)
+        strategy = self.live_strategy(broker=broker, state_store=MemoryStrategyStateStore())
 
         await strategy.run_once(now=now)
 
@@ -464,10 +600,9 @@ class TRXDcaStrategyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_disabled_strategy_does_not_call_broker(self):
         broker = FakeBroker()
-        strategy = TRXDcaStrategy(
+        strategy = self.live_strategy(
             broker=broker,
             state_store=MemoryStrategyStateStore(),
-            sleep_seconds=0,
             enabled_checker=lambda: False,
         )
 

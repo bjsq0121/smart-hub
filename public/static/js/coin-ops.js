@@ -352,6 +352,9 @@ function renderTrxDashboard() {
   const pnl = Number(summary.combinedPnlKRW || 0);
   const pnlTone = pnl > 0 ? 'emerald' : pnl < 0 ? 'rose' : 'slate';
   const qtyTone = Number(summary.netBotTRX || 0) > 0 ? 'emerald' : 'slate';
+  const strategyMode = summary.strategyMode || 'UNKNOWN';
+  const dryRun = !!summary.dryRun;
+  const liveTrading = !!summary.liveTradingEnabled;
   const statusLine = [
     summary.snapshotError ? '업비트 잔고 조회 일부 실패' : '',
     summary.tradesError ? '매매기록 조회 일부 실패' : '',
@@ -380,6 +383,12 @@ function renderTrxDashboard() {
       ${renderTrxMetric('봇 기록 순증가', fmtTrx(Number(summary.netBotTRX || 0)), `매수 ${fmtTrx(Number(summary.totalBuyTRX || 0))} · 매도 ${fmtTrx(Number(summary.totalSellTRX || 0))}`, qtyTone)}
       ${renderTrxMetric('손익 체크', fmtKRW(Math.round(pnl)), `실현 ${fmtKRW(Math.round(Number(summary.realizedPnlKRW || 0)))} · 평가 ${fmtPct(Number(snapshot.unrealizedPnlPct || 0))}`, pnlTone)}
     </div>
+    <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+      ${renderTrxMetric('전략 모드', esc(strategyMode), `리스크 ${esc(summary.riskState || 'unknown')}`, strategyMode === 'HARVEST' ? 'emerald' : strategyMode === 'DEFENSIVE' || strategyMode === 'PAUSED' ? 'amber' : 'sky')}
+      ${renderTrxMetric('봇 전용 재고', fmtTrx(Number(summary.botInventoryTRX || 0)), `보호 추정 ${fmtTrx(Number(summary.manualProtectedTRX || 0))}`, 'sky')}
+      ${renderTrxMetric('수익/재매수 재원', fmtKRW(Math.round(Number(summary.profitReserveKRW || 0))), `Buyback ${fmtKRW(Math.round(Number(summary.buybackBudgetKRW || 0)))}`, 'emerald')}
+      ${renderTrxMetric('다음 재매수 기준', summary.nextBuybackPrice ? fmtCoinPrice(Number(summary.nextBuybackPrice)) : '대기', `${dryRun ? 'DRY_RUN' : 'LIVE_ORDER'} · ${liveTrading ? 'LIVE ON' : 'LIVE OFF'}`, dryRun || !liveTrading ? 'amber' : 'emerald')}
+    </div>
 
     <div class="grid grid-cols-1 lg:grid-cols-3 gap-3 mb-4">
       <div class="rounded-lg border border-white/10 bg-slate-950/40 p-4">
@@ -399,6 +408,7 @@ function renderTrxDashboard() {
         <div class="text-sm text-slate-300">
           매수 ${summary.buyCount || 0}회 · 매도 ${summary.sellCount || 0}회 · 취소 ${summary.cancelCount || 0}회
         </div>
+        <div class="text-[11px] text-slate-500 mt-2 truncate">${esc(summary.lastDecisionReason || '-')}</div>
       </div>
     </div>
 
@@ -611,12 +621,21 @@ function renderCoinAutoCard() {
   const todayPnl = cfg.todayPnlPct != null ? cfg.todayPnlPct : 0;
   const todayPnlKRW = cfg.todayPnlKRW != null ? cfg.todayPnlKRW : 0;
   const upbitOk = !!cfg.upbitConfigured;
+  const trxDryRun = cfg.trxStrategyDryRun !== false;
+  const liveTrading = !!cfg.liveTradingEnabled;
   const st = coinAutoState.trxState || {};
   const lastDcaPrice = st.lastDcaPrice != null ? Number(st.lastDcaPrice) : null;
   const isProfitTaken = !!st.isProfitTaken;
   const noPositionSince = st.noPositionSince || null;
   const updatedAt = st.updatedAt || null;
   const lastError = st.lastError || coinAutoState.trxStateErr || '';
+  const strategyMode = st.strategyMode || 'UNKNOWN';
+  const riskState = st.riskState || 'unknown';
+  const botInventory = Number(st.botInventoryTRX || 0);
+  const profitReserve = Number(st.profitReserveKRW || 0);
+  const buybackBudget = Number(st.buybackBudgetKRW || 0);
+  const realizedProfit = Number(st.realizedProfitKRW || 0);
+  const nextBuybackPrice = st.lastProfitSellPrice ? Number(st.lastProfitSellPrice) * 0.992 : 0;
 
   // 진행 바
   const pct = maxTotal > 0 ? Math.min(100, (currentInvested / maxTotal) * 100) : 0;
@@ -657,12 +676,31 @@ function renderCoinAutoCard() {
         <div class="text-[10px] text-slate-500">상태 갱신</div>
         <div class="text-sm font-semibold text-slate-100">${updatedAt ? esc(fmtRel(updatedAt)) : '대기'}</div>
       </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">전략 모드</div>
+        <div class="text-sm font-semibold text-slate-100">${esc(strategyMode)} · ${esc(riskState)}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">봇 재고</div>
+        <div class="text-sm font-semibold text-sky-300">${fmtTrx(botInventory)}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">수익/Buyback</div>
+        <div class="text-sm font-semibold text-emerald-300">${fmtKRW(Math.round(profitReserve))} / ${fmtKRW(Math.round(buybackBudget))}</div>
+      </div>
+      <div class="rounded-lg border border-slate-700/40 bg-slate-950/30 px-3 py-2">
+        <div class="text-[10px] text-slate-500">다음 재매수</div>
+        <div class="text-sm font-semibold text-slate-100">${nextBuybackPrice ? fmtCoinPrice(nextBuybackPrice) : '대기'}</div>
+      </div>
     </div>
     <div class="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 text-[10px] text-slate-500">
       <span>전략 TRX 전용</span>
       <span>RSI(14) 5분봉</span>
       <span>DCA -2%</span>
-      <span>익절 +3% / 50%</span>
+      <span>익절 20~25%</span>
+      <span>${trxDryRun ? 'DRY_RUN' : '실주문 모드'}</span>
+      <span>${liveTrading ? 'LIVE_TRADING ON' : 'LIVE_TRADING OFF'}</span>
+      <span>실현수익 ${fmtKRW(Math.round(realizedProfit))}</span>
       <span>활성 포지션 ${activePos}개</span>
       <span class="text-${pnlColor}-400">오늘 ${pnlSign}${todayPnl.toFixed(2)}% (${pnlSign}${fmt(todayPnlKRW)})</span>
       <span>${upbitOk

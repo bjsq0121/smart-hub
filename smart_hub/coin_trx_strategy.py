@@ -24,8 +24,13 @@ TRADE_COLLECTION = "coin_trx_strategy_trades"
 MARKET_TRX = "KRW-TRX"
 MARKET_USDT = "KRW-USDT"
 MIN_ORDER_KRW = 5_000
-DEFAULT_UPBIT_PROXY_URL = "http://34.47.98.167:9090/"
-DEFAULT_UPBIT_PROXY_SECRET = "smarthub-upbit-proxy-2026"
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def utc_now() -> datetime:
@@ -113,6 +118,17 @@ class StrategyState:
     profit_take_stage: int = 0
     bot_inventory_trx: float = 0.0
     bot_inventory_cost_krw: float = 0.0
+    profit_reserve_krw: float = 0.0
+    buyback_budget_krw: float = 0.0
+    last_profit_sell_price: float | None = None
+    last_profit_sell_at: datetime | None = None
+    realized_profit_krw: float = 0.0
+    total_bot_buy_trx: float = 0.0
+    total_bot_sell_trx: float = 0.0
+    accumulation_score: float = 0.0
+    strategy_mode: str = "ACCUMULATE"
+    risk_state: str = "normal"
+    last_decision_reason: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> "StrategyState":
@@ -154,6 +170,17 @@ class StrategyState:
             profit_take_stage=int(data.get("profitTakeStage") or 0),
             bot_inventory_trx=max(0.0, _safe_float(data.get("botInventoryTRX"))),
             bot_inventory_cost_krw=max(0.0, _safe_float(data.get("botInventoryCostKRW"))),
+            profit_reserve_krw=max(0.0, _safe_float(data.get("profitReserveKRW"))),
+            buyback_budget_krw=max(0.0, _safe_float(data.get("buybackBudgetKRW"))),
+            last_profit_sell_price=_safe_float(data.get("lastProfitSellPrice")) if data.get("lastProfitSellPrice") is not None else None,
+            last_profit_sell_at=parse_dt(data.get("lastProfitSellAt")),
+            realized_profit_krw=_safe_float(data.get("realizedProfitKRW")),
+            total_bot_buy_trx=max(0.0, _safe_float(data.get("totalBotBuyTRX"))),
+            total_bot_sell_trx=max(0.0, _safe_float(data.get("totalBotSellTRX"))),
+            accumulation_score=_safe_float(data.get("accumulationScore")),
+            strategy_mode=str(data.get("strategyMode") or "ACCUMULATE"),
+            risk_state=str(data.get("riskState") or "normal"),
+            last_decision_reason=data.get("lastDecisionReason"),
         )
 
     def to_firestore_updates(self) -> dict[str, Any]:
@@ -170,6 +197,17 @@ class StrategyState:
             "profitTakeStage": self.profit_take_stage,
             "botInventoryTRX": self.bot_inventory_trx,
             "botInventoryCostKRW": self.bot_inventory_cost_krw,
+            "profitReserveKRW": self.profit_reserve_krw,
+            "buybackBudgetKRW": self.buyback_budget_krw,
+            "lastProfitSellPrice": self.last_profit_sell_price,
+            "lastProfitSellAt": dt_to_iso(self.last_profit_sell_at),
+            "realizedProfitKRW": self.realized_profit_krw,
+            "totalBotBuyTRX": self.total_bot_buy_trx,
+            "totalBotSellTRX": self.total_bot_sell_trx,
+            "accumulationScore": self.accumulation_score,
+            "strategyMode": self.strategy_mode,
+            "riskState": self.risk_state,
+            "lastDecisionReason": self.last_decision_reason,
         }
 
 
@@ -327,8 +365,8 @@ class PyUpbitBroker:
         import pyupbit
 
         self.pyupbit = pyupbit
-        self.proxy_url = os.getenv("UPBIT_PROXY_URL", DEFAULT_UPBIT_PROXY_URL)
-        self.proxy_secret = os.getenv("UPBIT_PROXY_SECRET", DEFAULT_UPBIT_PROXY_SECRET)
+        self.proxy_url = os.getenv("UPBIT_PROXY_URL")
+        self.proxy_secret = os.getenv("UPBIT_PROXY_SECRET")
         self.upbit = pyupbit.Upbit(
             access_key or os.getenv("UPBIT_ACCESS_KEY", ""),
             secret_key or os.getenv("UPBIT_SECRET_KEY", ""),
@@ -341,6 +379,8 @@ class PyUpbitBroker:
             time.sleep(self.pause_seconds)
 
     def _upbit_proxy(self, method: str, path: str, query: str = "", data: dict[str, Any] | None = None) -> Any:
+        if not self.proxy_url or not self.proxy_secret:
+            raise RuntimeError("upbit_proxy_not_configured")
         self._pause()
         body: dict[str, Any] = {"method": method, "path": path}
         if query:
@@ -505,6 +545,8 @@ class TRXDcaStrategy:
         enabled_checker: Any | None = None,
         trade_recorder: TradeRecorder | None = None,
         budget_provider: Any | None = None,
+        dry_run: bool | None = None,
+        live_trading_enabled: bool | None = None,
     ):
         self.broker = broker
         self.state_store = state_store
@@ -513,6 +555,10 @@ class TRXDcaStrategy:
         self.enabled_checker = enabled_checker
         self.trade_recorder = trade_recorder or NullTradeRecorder()
         self.budget_provider = budget_provider
+        self.dry_run = env_bool("TRX_STRATEGY_DRY_RUN", True) if dry_run is None else bool(dry_run)
+        self.live_trading_enabled = (
+            env_bool("LIVE_TRADING_ENABLED", False) if live_trading_enabled is None else bool(live_trading_enabled)
+        )
 
     async def run_forever(self) -> None:
         while True:
@@ -594,11 +640,98 @@ class TRXDcaStrategy:
         if profit_take is not None:
             return profit_take
 
+        buyback = self._try_buyback(state, balance, current_price, now)
+        if buyback is not None:
+            return buyback
+
         dca_trigger_price = self._round_krw_bid_price(float(state.last_dca_price) * 0.98)
         if current_price <= dca_trigger_price:
-            return self._try_buy(balance.krw_balance * 0.10, current_price, "dca_buy", state)
+            return self._try_buy(self._dynamic_dca_krw(balance, current_price, state), current_price, "dca_buy", state)
         ladder_prices = self._dca_ladder_prices(current_price, float(state.last_dca_price))
-        return self._try_place_limit_buy_ladder(balance.krw_balance * 0.10, current_price, ladder_prices, state, now)
+        return self._try_place_limit_buy_ladder(self._dynamic_dca_krw(balance, current_price, state), current_price, ladder_prices, state, now)
+
+    def _set_decision(self, state: StrategyState, mode: str, risk_state: str, reason: str, current_price: float = 0.0) -> None:
+        state.strategy_mode = mode
+        state.risk_state = risk_state
+        state.last_decision_reason = reason
+        state.accumulation_score = self._accumulation_score(state, current_price)
+
+    def _accumulation_score(self, state: StrategyState, current_price: float) -> float:
+        if state.bot_inventory_trx <= 0 or current_price <= 0:
+            return 0.0
+        avg = state.bot_inventory_cost_krw / state.bot_inventory_trx if state.bot_inventory_trx > 0 else 0.0
+        if avg <= 0:
+            return 0.0
+        return round(((current_price / avg) - 1.0) * 100.0, 4)
+
+    def _market_drop_pct(self, count: int) -> float:
+        try:
+            candles = self.broker.get_ohlcv(self.market, interval="minute5", count=count)
+        except Exception as exc:
+            self._record_error(f"risk_candles_unavailable: {exc}")
+            return 0.0
+        closes = [_safe_float(row.get("close")) for row in candles if isinstance(row, dict) and row.get("close") is not None]
+        if len(closes) < 2 or closes[0] <= 0 or closes[-1] <= 0:
+            return 0.0
+        return ((closes[-1] / closes[0]) - 1.0) * 100.0
+
+    def _buy_risk_controls(self, current_price: float, state: StrategyState) -> tuple[bool, str, str, str, float]:
+        max_total_krw, _, current_bot_invested_krw = self._budget_limits()
+        usage = (current_bot_invested_krw / max_total_krw) if max_total_krw > 0 else 0.0
+        one_hour_drop = self._market_drop_pct(13)
+        four_hour_drop = self._market_drop_pct(49)
+        loss_pct = 0.0
+        if state.bot_inventory_trx > 0 and state.bot_inventory_cost_krw > 0 and current_price > 0:
+            avg = state.bot_inventory_cost_krw / state.bot_inventory_trx
+            if avg > 0:
+                loss_pct = ((current_price / avg) - 1.0) * 100.0
+        if usage >= 0.90:
+            return True, "PAUSED", "budget_exhausted", "budget_usage_90_pct", 1.0
+        if one_hour_drop <= -3.0 or four_hour_drop <= -5.0:
+            return False, "DEFENSIVE", "crash", "recent_drop_exceeded", 0.0
+        if loss_pct <= -8.0:
+            return False, "DEFENSIVE", "bot_loss_limit", "bot_inventory_loss_limit", 0.0
+        if usage >= 0.80:
+            return True, "DEFENSIVE", "budget_high", "budget_usage_80_pct", 0.20
+        if usage >= 0.60:
+            return True, "DEFENSIVE", "budget_elevated", "budget_usage_60_pct", 0.40
+        if usage >= 0.30:
+            return True, "ACCUMULATE", "budget_moderate", "budget_usage_30_pct", 0.70
+        regime = self._market_regime(current_price)
+        if regime == "up":
+            return True, "ACCUMULATE", "uptrend_pullback", "dynamic_dca_uptrend", 1.0
+        if regime == "down":
+            return True, "DEFENSIVE", "downtrend", "dynamic_dca_downtrend", 1.0
+        return True, "ACCUMULATE", "normal", "dynamic_dca_range", 1.0
+
+    def _dynamic_dca_krw(self, balance: BalanceSnapshot, current_price: float, state: StrategyState) -> float:
+        allowed, mode, risk_state, reason, multiplier = self._buy_risk_controls(current_price, state)
+        self._set_decision(state, mode, risk_state, reason, current_price)
+        if not allowed:
+            return 0.0
+        rsi = self._safe_rsi()
+        base_pct = 0.10 if rsi is not None and rsi <= 30 and risk_state in {"normal", "budget_moderate"} else 0.10
+        return balance.krw_balance * base_pct * multiplier
+
+    def _try_buyback(
+        self,
+        state: StrategyState,
+        balance: BalanceSnapshot,
+        current_price: float,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        if state.buyback_budget_krw < MIN_ORDER_KRW or not state.last_profit_sell_price or current_price <= 0:
+            return None
+        target_price = self._round_krw_bid_price(state.last_profit_sell_price * 0.992)
+        if current_price > target_price:
+            return None
+        allowed, mode, risk_state, reason, multiplier = self._buy_risk_controls(current_price, state)
+        self._set_decision(state, mode, risk_state, f"buyback_{reason}", current_price)
+        if not allowed:
+            self.state_store.save(state)
+            return {"action": "buy_suspended_risk", "reason": reason}
+        krw_amount = min(balance.krw_balance, state.buyback_budget_krw * max(0.2, multiplier))
+        return self._try_buy(krw_amount, current_price, "buyback_buy", state, consume_buyback=True, now=now)
 
     def _try_staged_profit_take(
         self,
@@ -611,6 +744,11 @@ class TRXDcaStrategy:
             return None
         if state.is_profit_taken:
             return None
+        if state.bot_inventory_trx - balance.trx_balance > 1e-8:
+            self._set_decision(state, "PAUSED", "inventory_mismatch", "bot_inventory_exceeds_actual_balance", current_price)
+            state.updated_at = now
+            self.state_store.save(state)
+            return {"action": "sell_blocked_inventory_mismatch", "botInventoryTRX": state.bot_inventory_trx, "actualTRX": balance.trx_balance}
         if state.profit_take_stage >= 3:
             state.is_profit_taken = True
             return None
@@ -619,25 +757,38 @@ class TRXDcaStrategy:
             return None
         pnl_pct = ((current_price / bot_avg_buy_price) - 1.0) * 100.0
         stages = [
-            (0, 1.2, 0.30, "profit_take_stage_1"),
-            (1, 2.0, 0.30, "profit_take_stage_2"),
-            (2, 3.0, 0.20, "profit_take_stage_3"),
+            (0, 1.2, 0.20, "profit_take_stage_1"),
+            (1, 2.0, 0.25, "profit_take_stage_2"),
+            (2, 3.0, 0.25, "profit_take_stage_3"),
         ]
         for current_stage, threshold_pct, sell_ratio, action in stages:
             if state.profit_take_stage != current_stage or pnl_pct < threshold_pct:
                 continue
             sell_volume = min(state.bot_inventory_trx * sell_ratio, balance.trx_balance)
-            try:
-                result = self.broker.market_sell_volume(self.market, sell_volume)
-            except Exception as exc:
-                return self._record_error(f"{action}_failed: {exc}", action="error")
+            if self.dry_run:
+                result = {"uuid": f"dry-run-{action}-{int(now.timestamp())}"}
+            elif not self.live_trading_enabled:
+                return {"action": f"live_trading_blocked_{action}", "volume": sell_volume}
+            else:
+                try:
+                    result = self.broker.market_sell_volume(self.market, sell_volume)
+                except Exception as exc:
+                    return self._record_error(f"{action}_failed: {exc}", action="error")
             if not result.get("uuid"):
                 return self._record_error(f"{action}_rejected: {result}", action="error")
             sold_cost_krw = bot_avg_buy_price * sell_volume
+            realized_pnl_krw = (current_price - bot_avg_buy_price) * sell_volume
             state.bot_inventory_trx = max(0.0, state.bot_inventory_trx - sell_volume)
             state.bot_inventory_cost_krw = max(0.0, state.bot_inventory_cost_krw - sold_cost_krw)
+            state.realized_profit_krw += realized_pnl_krw
+            state.profit_reserve_krw += max(0.0, realized_pnl_krw) * 0.50
+            state.buyback_budget_krw += max(0.0, sell_volume * current_price - max(0.0, realized_pnl_krw) * 0.50)
+            state.last_profit_sell_price = current_price
+            state.last_profit_sell_at = now
+            state.total_bot_sell_trx += sell_volume
             state.profit_take_stage = current_stage + 1
             state.is_profit_taken = state.profit_take_stage >= 3
+            self._set_decision(state, "HARVEST", "profit_taking", action, current_price)
             state.updated_at = now
             state.last_error = None
             self.state_store.save(state)
@@ -651,15 +802,16 @@ class TRXDcaStrategy:
                     "avgBuyPrice": bot_avg_buy_price,
                     "trxVolume": sell_volume,
                     "krwAmount": sell_volume * current_price,
-                    "realizedPnlKRW": (current_price - bot_avg_buy_price) * sell_volume,
+                    "realizedPnlKRW": realized_pnl_krw,
                     "realizedPnlPct": pnl_pct,
+                    "dryRun": self.dry_run,
                     "profitTakeStage": state.profit_take_stage,
                     "remainingBotInventoryTRX": state.bot_inventory_trx,
                     "remainingBotInventoryCostKRW": state.bot_inventory_cost_krw,
                 }
             )
             self._log(action, {"price": current_price, "volume": sell_volume, "avg": bot_avg_buy_price})
-            return {"action": action, "price": current_price, "volume": sell_volume}
+            return {"action": f"dry_run_{action}" if self.dry_run else action, "price": current_price, "volume": sell_volume}
         return None
 
     def _round_krw_bid_price(self, price: float) -> float:
@@ -739,7 +891,13 @@ class TRXDcaStrategy:
         current_price: float,
         action: str,
         state: StrategyState,
+        consume_buyback: bool = False,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
+        now = now or utc_now()
+        if krw_amount <= 0 and state.risk_state in {"crash", "budget_exhausted", "bot_loss_limit"}:
+            self.state_store.save(state)
+            return {"action": "buy_suspended_risk", "reason": state.last_decision_reason or state.risk_state}
         max_total_krw, max_per_order_krw, current_bot_invested_krw = self._budget_limits()
         if max_per_order_krw > 0:
             krw_amount = min(krw_amount, max_per_order_krw)
@@ -759,10 +917,15 @@ class TRXDcaStrategy:
         if not ok:
             self._record_error(str(premium_or_error), action="buy_blocked_kimchi")
             return {"action": "buy_blocked_kimchi", "reason": str(premium_or_error)}
-        try:
-            result = self.broker.market_buy_krw(self.market, krw_amount)
-        except Exception as exc:
-            return self._record_error(f"{action}_failed: {exc}", action="error")
+        if self.dry_run:
+            result = {"uuid": f"dry-run-{action}-{int(now.timestamp())}"}
+        elif not self.live_trading_enabled:
+            return {"action": f"live_trading_blocked_{action}", "krw": int(krw_amount), "price": current_price}
+        else:
+            try:
+                result = self.broker.market_buy_krw(self.market, krw_amount)
+            except Exception as exc:
+                return self._record_error(f"{action}_failed: {exc}", action="error")
         if not result.get("uuid"):
             return self._record_error(f"{action}_rejected: {result}", action="error")
         state.no_position_since = None
@@ -770,10 +933,16 @@ class TRXDcaStrategy:
         state.is_profit_taken = False
         state.profit_take_stage = 0
         if current_price > 0:
-            state.bot_inventory_trx += float(krw_amount) / current_price
+            bought_trx = float(krw_amount) / current_price
+            state.bot_inventory_trx += bought_trx
             state.bot_inventory_cost_krw += float(krw_amount)
+            state.total_bot_buy_trx += bought_trx
+        if consume_buyback:
+            state.buyback_budget_krw = max(0.0, state.buyback_budget_krw - float(krw_amount))
+        if action != "buyback_buy":
+            self._set_decision(state, state.strategy_mode or "ACCUMULATE", state.risk_state or "normal", action, current_price)
         state.last_error = None
-        state.updated_at = utc_now()
+        state.updated_at = now
         self.state_store.save(state)
         self._record_trade(
             {
@@ -785,10 +954,11 @@ class TRXDcaStrategy:
                 "krwAmount": int(krw_amount),
                 "trxVolume": (float(krw_amount) / current_price) if current_price > 0 else None,
                 "kimchiPremiumPct": premium_or_error,
+                "dryRun": self.dry_run,
             }
         )
         self._log(action, {"krw": int(krw_amount), "price": current_price, "kimchiPremiumPct": premium_or_error})
-        return {"action": action, "krw": int(krw_amount), "price": current_price}
+        return {"action": f"dry_run_{action}" if self.dry_run else action, "krw": int(krw_amount), "price": current_price}
 
     def _try_place_limit_buy(
         self,
@@ -798,6 +968,9 @@ class TRXDcaStrategy:
         action: str,
         state: StrategyState,
     ) -> dict[str, Any]:
+        if krw_amount <= 0 and state.risk_state in {"crash", "budget_exhausted", "bot_loss_limit"}:
+            self.state_store.save(state)
+            return {"action": "buy_suspended_risk", "reason": state.last_decision_reason or state.risk_state}
         pending = self._find_open_buy_order()
         if pending:
             return {"action": f"{action}_pending", "uuid": pending.get("uuid"), "price": _safe_float(pending.get("price"))}
@@ -824,10 +997,15 @@ class TRXDcaStrategy:
         volume = float(krw_amount) / limit_price if limit_price > 0 else 0.0
         if volume <= 0:
             return {"action": "buy_skipped_min_order", "krw": int(krw_amount)}
-        try:
-            result = self.broker.limit_buy(self.market, limit_price, volume)
-        except Exception as exc:
-            return self._record_error(f"{action}_failed: {exc}", action="error")
+        if self.dry_run:
+            result = {"uuid": f"dry-run-{action}-{int(utc_now().timestamp())}"}
+        elif not self.live_trading_enabled:
+            return {"action": f"live_trading_blocked_{action}", "krw": int(krw_amount), "price": limit_price}
+        else:
+            try:
+                result = self.broker.limit_buy(self.market, limit_price, volume)
+            except Exception as exc:
+                return self._record_error(f"{action}_failed: {exc}", action="error")
         if not result.get("uuid"):
             return self._record_error(f"{action}_rejected: {result}", action="error")
         state.pending_dca_order_uuid = result.get("uuid")
@@ -850,7 +1028,8 @@ class TRXDcaStrategy:
             }
         )
         self._log(action, {"krw": int(krw_amount), "price": limit_price, "kimchiPremiumPct": premium_or_error})
-        return {"action": f"{action}_placed", "krw": int(krw_amount), "price": limit_price, "volume": volume}
+        prefix = "dry_run_" if self.dry_run else ""
+        return {"action": f"{prefix}{action}_placed", "krw": int(krw_amount), "price": limit_price, "volume": volume}
 
     def _try_place_limit_buy_ladder(
         self,
@@ -860,6 +1039,9 @@ class TRXDcaStrategy:
         state: StrategyState,
         now: datetime,
     ) -> dict[str, Any]:
+        if krw_amount <= 0 and state.risk_state in {"crash", "budget_exhausted", "bot_loss_limit"}:
+            self.state_store.save(state)
+            return {"action": "buy_suspended_risk", "reason": state.last_decision_reason or state.risk_state}
         open_bids = self._open_buy_orders()
         if open_bids and not self._should_reprice_ladder(open_bids, limit_prices, now):
             pending = open_bids[0]
@@ -917,12 +1099,17 @@ class TRXDcaStrategy:
         placed_orders: list[dict[str, Any]] = []
         for price, amount in zip(prices, amounts):
             volume = float(amount) / price
-            try:
-                result = self.broker.limit_buy(self.market, price, volume)
-            except Exception as exc:
-                if placed_orders:
-                    self._save_pending_ladder(state, placed_orders)
-                return self._record_error(f"dca_limit_ladder_buy_failed: {exc}", action="error")
+            if self.dry_run:
+                result = {"uuid": f"dry-run-dca-limit-{len(placed_orders) + 1}-{int(now.timestamp())}"}
+            elif not self.live_trading_enabled:
+                return {"action": "live_trading_blocked_dca_limit_ladder_buy", "krw": int(sum(amounts))}
+            else:
+                try:
+                    result = self.broker.limit_buy(self.market, price, volume)
+                except Exception as exc:
+                    if placed_orders:
+                        self._save_pending_ladder(state, placed_orders)
+                    return self._record_error(f"dca_limit_ladder_buy_failed: {exc}", action="error")
             if not result.get("uuid"):
                 if placed_orders:
                     self._save_pending_ladder(state, placed_orders)
@@ -949,7 +1136,7 @@ class TRXDcaStrategy:
             {"orders": len(placed_orders), "prices": [order["price"] for order in placed_orders], "krw": int(sum(amounts))},
         )
         return {
-            "action": "dca_limit_buy_ladder_placed",
+            "action": "dry_run_dca_limit_buy_ladder_placed" if self.dry_run else "dca_limit_buy_ladder_placed",
             "orders": placed_orders,
             "krw": int(sum(amounts)),
         }
@@ -1018,6 +1205,7 @@ class TRXDcaStrategy:
                 state.profit_take_stage = 0
                 state.bot_inventory_trx += volume
                 state.bot_inventory_cost_krw += krw_amount
+                state.total_bot_buy_trx += volume
                 state.last_error = None
                 changed = True
                 self._record_trade(

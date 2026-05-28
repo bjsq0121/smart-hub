@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 import asyncio
 import hashlib
 import logging as _logging
+import os
 import time
 import uuid
 from collections import defaultdict
@@ -287,26 +288,25 @@ def load_coin_engine_config(force: bool = False) -> dict:
     return coin_engine_config
 
 
-# 업비트 API — n8n 서버 프록시 경유 (IP 화이트리스트 우회)
-UPBIT_PROXY_URL = "http://34.47.98.167:9090/"
-UPBIT_PROXY_SECRET = "smarthub-upbit-proxy-2026"
-
-
 def upbit_configured() -> bool:
-    """프록시 서버 존재 여부로 판단 (로컬 키 불필요)."""
-    return True  # 프록시가 키를 보유
+    """프록시 URL/SECRET이 환경변수로 설정된 경우에만 업비트 연동으로 판단한다."""
+    return bool(os.getenv("UPBIT_PROXY_URL") and os.getenv("UPBIT_PROXY_SECRET"))
 
 
 def upbit_proxy(method: str, path: str, query: str = "", data: dict | None = None) -> dict | list:
     """n8n 서버의 업비트 프록시를 경유하여 API 호출."""
+    proxy_url = os.getenv("UPBIT_PROXY_URL")
+    proxy_secret = os.getenv("UPBIT_PROXY_SECRET")
+    if not proxy_url or not proxy_secret:
+        raise RuntimeError("upbit_proxy_not_configured")
     body = {"method": method, "path": path}
     if query:
         body["query"] = query
     if data:
         body["data"] = data
     resp = requests.post(
-        UPBIT_PROXY_URL,
-        headers={"Content-Type": "application/json", "X-Proxy-Secret": UPBIT_PROXY_SECRET},
+        proxy_url,
+        headers={"Content-Type": "application/json", "X-Proxy-Secret": proxy_secret},
         json=body,
         timeout=15,
     )
@@ -1205,6 +1205,8 @@ async def api_coin_autotrade_config_get(user: dict = Depends(coin_auth)):
         extra["todayPnlPct"] = 0
         extra["todayPnlKRW"] = 0
     extra["upbitConfigured"] = upbit_configured()
+    extra["trxStrategyDryRun"] = os.getenv("TRX_STRATEGY_DRY_RUN", "true").strip().lower() not in {"0", "false", "no", "off"}
+    extra["liveTradingEnabled"] = os.getenv("LIVE_TRADING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
     return {**cfg, **extra}
 
 
@@ -1283,6 +1285,18 @@ async def api_coin_trx_strategy_dashboard(limit: int = Query(default=100, le=300
     except Exception as exc:
         trades_error = str(exc)[:300]
 
+    state: dict = {}
+    try:
+        state_doc = d.get_firestore().collection("settings").document("coin-trx-strategy-state").get()
+        if getattr(state_doc, "exists", False):
+            state = state_doc.to_dict() or {}
+            for key in ("noPositionSince", "updatedAt", "lastProfitSellAt"):
+                value = state.get(key)
+                if hasattr(value, "isoformat"):
+                    state[key] = value.isoformat()
+    except Exception:
+        state = {}
+
     buy_trades = [t for t in trades if t.get("type") == "buy"]
     sell_trades = [t for t in trades if t.get("type") == "sell"]
     cancel_trades = [t for t in trades if t.get("type") == "cancel"]
@@ -1293,6 +1307,10 @@ async def api_coin_trx_strategy_dashboard(limit: int = Query(default=100, le=300
     realized_pnl_krw = sum(_safe_float(t.get("realizedPnlKRW")) for t in sell_trades)
     unrealized_pnl_krw = _safe_float(snapshot.get("unrealizedPnlKRW"))
     combined_pnl_krw = realized_pnl_krw + unrealized_pnl_krw
+    bot_inventory_trx = _safe_float(state.get("botInventoryTRX"))
+    manual_protected_trx = max(0.0, _safe_float(snapshot.get("trxBalance")) - bot_inventory_trx)
+    last_profit_sell_price = _safe_float(state.get("lastProfitSellPrice"))
+    next_buyback_price = round(last_profit_sell_price * 0.992, 4) if last_profit_sell_price > 0 else None
     summary = {
         "tradeCount": len(trades),
         "buyCount": len(buy_trades),
@@ -1305,12 +1323,23 @@ async def api_coin_trx_strategy_dashboard(limit: int = Query(default=100, le=300
         "totalSellKRW": total_sell_krw,
         "realizedPnlKRW": realized_pnl_krw,
         "combinedPnlKRW": combined_pnl_krw,
+        "botInventoryTRX": bot_inventory_trx,
+        "manualProtectedTRX": manual_protected_trx,
+        "profitReserveKRW": _safe_float(state.get("profitReserveKRW")),
+        "buybackBudgetKRW": _safe_float(state.get("buybackBudgetKRW")),
+        "realizedProfitKRW": _safe_float(state.get("realizedProfitKRW")) or realized_pnl_krw,
+        "nextBuybackPrice": next_buyback_price,
+        "strategyMode": state.get("strategyMode") or "UNKNOWN",
+        "riskState": state.get("riskState") or "unknown",
+        "lastDecisionReason": state.get("lastDecisionReason") or state.get("lastError") or "",
+        "dryRun": os.getenv("TRX_STRATEGY_DRY_RUN", "true").strip().lower() not in {"0", "false", "no", "off"},
+        "liveTradingEnabled": os.getenv("LIVE_TRADING_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"},
         "quantityIncreased": (total_buy_trx - total_sell_trx) > 0,
         "notLosing": combined_pnl_krw >= 0,
         "snapshotError": snapshot_error,
         "tradesError": trades_error,
     }
-    return {"ok": snapshot_error is None and trades_error is None, "snapshot": snapshot, "summary": summary, "trades": trades}
+    return {"ok": snapshot_error is None and trades_error is None, "snapshot": snapshot, "summary": summary, "state": state, "trades": trades}
 
 
 @router.post("/api/coin/autotrade/config")

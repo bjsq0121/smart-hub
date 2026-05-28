@@ -29,6 +29,7 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
 - 60초마다 FastAPI 백그라운드 태스크가 실행됩니다.
 - 상태는 Firestore `settings/coin-trx-strategy-state`에 저장합니다.
 - 매매기록은 Firestore `coin_trx_strategy_trades`에 저장합니다.
+- 기본값은 안전 모드입니다. `TRX_STRATEGY_DRY_RUN=true`, `LIVE_TRADING_ENABLED=false`가 기본이며, 실제 주문은 `TRX_STRATEGY_DRY_RUN=false`와 `LIVE_TRADING_ENABLED=true`가 모두 명시된 경우에만 실행됩니다.
 - TRX 미보유 시 5분봉 RSI(14), 100개 캔들 기준으로 RSI <= 30이면 KRW 현금의 10%를 첫 매수합니다.
 - RSI 조건이 24시간 동안 충족되지 않으면 현금의 3%만 정찰병 매수합니다.
 - 기존 TRX 보유분이 있으면 첫 진입 로직은 건너뛰지만, 기존 보유분은 보호 물량으로 취급해 자동 매도하지 않습니다.
@@ -41,20 +42,31 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
 - 봇이 신규로 매수/체결한 TRX만 `botInventoryTRX`, `botInventoryCostKRW`로 따로 추적합니다.
 - 이미 열린 TRX 매수 주문이 있으면 중복 지정가 주문을 만들지 않습니다.
 - 단, 열린 매수 주문 가격이 새 3단 가격과 다르고 10분 이상 지났으면 취소 후 새 가격으로 재배치합니다.
-- 익절은 계좌 전체 평단이 아니라 봇 신규 매수분 평균가 대비 +1.2%, +2.0%, +3.0%에서 각각 봇 재고의 30%, 30%, 20%를 시장가 매도합니다.
+- 전략 모드는 `ACCUMULATE`, `HARVEST`, `DEFENSIVE`, `PAUSED`로 저장합니다.
+  - `ACCUMULATE`: 수량 증가와 buyback을 우선합니다.
+  - `HARVEST`: 봇 재고가 수익권이면 일부 익절합니다.
+  - `DEFENSIVE`: 급락, 높은 예산 사용률, 봇 재고 손실 시 신규 매수를 줄이거나 멈춥니다.
+  - `PAUSED`: 예산 소진, 잔고 불일치, 보안 설정 미충족 등 수동 확인이 필요한 상태입니다.
+- 익절은 계좌 전체 평단이 아니라 봇 신규 매수분 평균가 대비 +1.2%, +2.0%, +3.0%에서 각각 봇 재고의 20%, 25%, 25%를 매도합니다.
+- 익절 후 실현 수익 일부는 `profitReserveKRW`로 확정하고, 매도 대금 일부는 `buybackBudgetKRW`로 남겨 더 낮은 가격에서 재매수합니다.
+- Buyback은 `lastProfitSellPrice` 대비 약 -0.8% 이상 눌렸고 김프/급락/예산 필터를 통과할 때만 실행합니다.
 - 봇 신규 재고가 0이면 계좌 전체 TRX가 수익권이어도 매도하지 않습니다.
+- 실제 TRX 잔고보다 `botInventoryTRX`가 크면 봇 재고 매도도 차단합니다.
 - 3차 익절 후 `isProfitTaken=true`로 저장하며, 다음 DCA 전까지 추가 익절하지 않습니다.
 - 매수 전 김치 프리미엄을 계산합니다: `(업비트 TRX / (바이낸스 TRX * 업비트 USDT)) - 1`.
 - 김프 5% 이상이거나 바이낸스/USDT 조회 실패 시 매수는 차단합니다. 매도는 김프와 무관하게 실행합니다.
+- 최근 1시간 약 -3% 또는 4시간 약 -5% 급락으로 판단되면 신규 매수를 중단하고 `DEFENSIVE`로 전환합니다.
+- 예산 사용률이 높아질수록 DCA 금액을 축소합니다. 60% 이상은 40%, 80% 이상은 20% 수준으로 줄이며 90% 이상은 신규 매수를 차단합니다.
 - 1시간 이상 지난 미체결 매수 주문은 자동 취소합니다.
 - `settings/coin-autotrade.maxTotalKRW`, `maxPerSymbolKRW` 예산 상한을 TRX DCA에도 적용합니다.
   - `maxTotalKRW`는 기존 수동 보유분 원가가 아니라 TRX 전략 매매기록의 순투입금(봇 매수금액 - 봇 매도금액) 기준입니다.
 
 주의:
 
-- 실제 업비트 주문이 발생하는 코드입니다.
+- 실제 업비트 주문이 발생할 수 있는 코드입니다. 실주문 전 반드시 DRY_RUN 로그를 먼저 확인합니다.
 - 운영 환경의 업비트 사설 API 호출은 IP 제한 때문에 Upbit proxy를 경유합니다.
-- API 키, 프록시 시크릿, 텔레그램 토큰 등 민감값은 README에 적지 않습니다. 다음 보안 작업은 Cloud Run 환경변수의 Secret Manager 이전입니다.
+- `UPBIT_PROXY_URL`, `UPBIT_PROXY_SECRET`, API 키, 텔레그램 토큰 등 민감값은 코드에 하드코딩하지 않습니다. 환경변수 또는 Secret Manager로만 주입합니다.
+- 프록시 URL/SECRET이 없으면 private Upbit 호출은 fail-closed로 실패합니다.
 
 ## 운영 화면 사용법
 
@@ -71,6 +83,13 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
    - `pendingDcaOrderUuid`
    - `botInventoryTRX`
    - `botInventoryCostKRW`
+   - `manualProtectedTRX`
+   - `strategyMode`
+   - `riskState`
+   - `profitReserveKRW`
+   - `buybackBudgetKRW`
+   - `realizedProfitKRW`
+   - `nextBuybackPrice`
    - `lastError`
 
 비상 중단은 코인 운영 메뉴의 비상 정지를 사용합니다. 이 설정은 `settings/coin-autotrade.enabled=false`로 반영되며 TRX 전략 루프도 enabled checker를 통해 멈춥니다.
@@ -102,6 +121,13 @@ TRX 상태와 최근 매매기록은 Firestore `settings/coin-trx-strategy-state
 
 - `botInventoryTRX`: 봇이 새로 산 매도 가능 TRX 수량입니다. 이 값이 0이면 기존 보유분은 팔지 않습니다.
 - `botInventoryCostKRW`: 봇 신규 재고 원가입니다.
+- `profitReserveKRW`: 익절 후 수익으로 확정한 금액입니다.
+- `buybackBudgetKRW`: 더 낮은 가격에서 TRX를 다시 사기 위해 남겨둔 금액입니다.
+- `lastProfitSellPrice`, `lastProfitSellAt`: 마지막 익절 매도 기준입니다.
+- `realizedProfitKRW`: 봇 재고 매도로 누적 확정한 손익입니다.
+- `totalBotBuyTRX`, `totalBotSellTRX`: 봇 신규 매수/매도 누적 수량입니다.
+- `accumulationScore`: 현재 봇 재고 평균가 대비 평가 수익률 기반 점수입니다.
+- `strategyMode`: 현재 전략 모드입니다.
 - `pendingDcaOrders`: 현재 열려 있는 3단 매수 주문입니다.
 - `profitTakeStage`: 봇 신규 재고 기준 익절 단계입니다.
 - `lastError`: 전략 루프의 마지막 오류입니다.
