@@ -175,7 +175,8 @@ venv/bin/python -m compileall smart_hub tests/test_coin_trx_strategy.py
 - 기존 수동/기존 보유 TRX는 자동 매도 금지로 변경했습니다.
 - 봇이 새로 체결한 매수분만 `botInventoryTRX`, `botInventoryCostKRW`로 추적하고, 익절은 이 봇 신규 재고만 대상으로 합니다.
 - 현재 운영 배포 리비전은 `smart-hub-api-00078-54s`이며 100% 트래픽을 받고 있습니다.
-- GitHub 기준 최신 커밋은 `ff4cf5b feat: add trx harvest buyback safeguards`입니다.
+- 운영 런타임 변경 커밋은 `ff4cf5b feat: add trx harvest buyback safeguards`입니다.
+- 이후 문서 갱신 커밋은 `4499ffb docs: update trx deployment revision`입니다.
 - 로컬 검증:
   - `python3 -m unittest tests.test_coin_trx_strategy`
   - `python3 -m compileall smart_hub tests/test_coin_trx_strategy.py`
