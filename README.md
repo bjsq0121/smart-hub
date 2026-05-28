@@ -9,11 +9,11 @@ Smart Hub는 개인 운영용 FastAPI 웹 서비스입니다. 가격 검색, 뉴
 - Production URL: `https://banghub.kr`
 - Cloud Run service: `smart-hub-api`
 - GCP project: `smarthub-9cd05`
-- Current deployed revision after TRX bot-inventory patch: `smart-hub-api-00077-ntz`
+- Current deployed revision after TRX harvest/buyback patch: `smart-hub-api-00078-54s`
 - Latest TRX-related commits:
+  - `ff4cf5b feat: add trx harvest buyback safeguards`
   - `22c0bd5 fix: protect manual trx holdings`
   - `fa4e2f8 feat: add dynamic trx grid strategy`
-  - `65570ec feat: ladder trx dca limit orders`
 
 ## TRX 전략 요약
 
@@ -167,15 +167,15 @@ venv/bin/python -m compileall smart_hub tests/test_coin_trx_strategy.py
 
 현재 TRX 안전 패치 후 확인된 결과:
 
-- `tests.test_coin_trx_strategy`: 19개 통과
+- `tests.test_coin_trx_strategy`: 26개 통과
 - compileall: 통과
 
 ## 2026-05-27 작업 메모
 
 - 기존 수동/기존 보유 TRX는 자동 매도 금지로 변경했습니다.
 - 봇이 새로 체결한 매수분만 `botInventoryTRX`, `botInventoryCostKRW`로 추적하고, 익절은 이 봇 신규 재고만 대상으로 합니다.
-- 현재 운영 배포 리비전은 `smart-hub-api-00077-ntz`이며 100% 트래픽을 받고 있습니다.
-- GitHub 기준 최신 커밋은 `22c0bd5 fix: protect manual trx holdings`입니다.
+- 현재 운영 배포 리비전은 `smart-hub-api-00078-54s`이며 100% 트래픽을 받고 있습니다.
+- GitHub 기준 최신 커밋은 `ff4cf5b feat: add trx harvest buyback safeguards`입니다.
 - 로컬 검증:
   - `python3 -m unittest tests.test_coin_trx_strategy`
   - `python3 -m compileall smart_hub tests/test_coin_trx_strategy.py`
